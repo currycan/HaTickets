@@ -1,6 +1,6 @@
 <script setup lang="js">
 import { reactive, watch, computed, ref, onMounted } from 'vue';
-import { getQueryString } from '../../../utils/common';
+import { getQueryString } from '../../utils/common';
 import { Message } from "@arco-design/web-vue";
 import { invoke } from '@tauri-apps/api/tauri'
 import { useStore } from 'vuex';
@@ -10,8 +10,8 @@ import {
     commonTip,
     isSuccess,
     joinMsg,
-} from "../../../utils/dm/index.js";
-import Log from '../../../utils/common/log'
+} from "../../utils/dm/index.js";
+import Log from '../../utils/common/log'
 
 import {
     selectAll,

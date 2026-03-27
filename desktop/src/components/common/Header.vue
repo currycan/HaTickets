@@ -1,7 +1,7 @@
 <script setup lang="js">
 import { ref } from 'vue';
 import dayjs from 'dayjs'
-import Log from '../../../utils/common/log';
+import Log from '../../utils/common/log';
 import { WebviewWindow } from '@tauri-apps/api/window'
 import Qa from '../common/Qa.vue'
 import { open } from '@tauri-apps/api/dialog'

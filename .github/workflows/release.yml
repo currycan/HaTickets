@@ -105,8 +105,10 @@ jobs:
             # 安装依赖执行构建，以及推送 github release
             - name: Install app dependencies and build it
               run: yarn && yarn build
+              working-directory: desktop
             - uses: tauri-apps/tauri-action@v0
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               with:
                   releaseId: ${{ needs.create-release.outputs.RELEASE_UPLOAD_ID }}
+                  projectPath: desktop

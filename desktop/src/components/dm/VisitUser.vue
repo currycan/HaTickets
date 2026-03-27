@@ -8,7 +8,7 @@ import {
     commonTip,
     isSuccess,
     joinMsg,
-} from "../../../utils/dm/index.js";
+} from "../../utils/dm/index.js";
 
 
 onMounted(() => {

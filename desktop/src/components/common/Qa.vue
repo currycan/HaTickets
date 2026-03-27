@@ -1,6 +1,6 @@
 <script setup lang="js">
 import { ref, computed } from 'vue'
-import { roundNum } from '../../../utils/common/index'
+import { roundNum } from '../../utils/common/index'
 
 const qaDmList = [
     {

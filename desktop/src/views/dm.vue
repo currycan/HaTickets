@@ -4,7 +4,7 @@ import {
     loadBaxiaScript,
     initBaxia,
     loadBaxiaTime,
-} from "../../utils/dm/index.js";
+} from "../utils/dm/index.js";
 import { Message } from "@arco-design/web-vue";
 import Form from '../components/dm/Form.vue'
 import Product from '../components/dm/Product.vue'

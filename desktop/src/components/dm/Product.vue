@@ -10,14 +10,14 @@ import {
     encode,
     HAVE_ORDER,
     VALIDATE,
-} from "../../../utils/dm/index.js";
+} from "../../utils/dm/index.js";
 import { invoke } from "@tauri-apps/api/tauri";
 import { Message, Notification } from "@arco-design/web-vue";
 import { WebviewWindow, appWindow } from '@tauri-apps/api/window'
 import { confirm } from '@tauri-apps/api/dialog';
 import dayjs from 'dayjs';
 import { useStore } from 'vuex'
-import Log from '../../../utils/common/log.js'
+import Log from '../../utils/common/log.js'
 
 const store = useStore()
 const log = new Log()

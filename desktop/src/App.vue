@@ -12,9 +12,9 @@ import {
     update,
 } from "./sql";
 import { IconSettings } from "@arco-design/web-vue/es/icon";
-import { createAppId } from "../utils/common";
+import { createAppId } from "./utils/common";
 import { Message } from "@arco-design/web-vue";
-import Log from "../utils/common/log";
+import Log from "./utils/common/log";
 import { invoke } from "@tauri-apps/api";
 import Update from "./components/common/Update.vue";
 import Tip from "./components/common/Tip.vue";
