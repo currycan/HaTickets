@@ -10,6 +10,7 @@ Usage:
 import logging
 import os
 from datetime import datetime, timezone, timedelta
+from typing import Optional, Set
 
 # Asia/Shanghai timezone (UTC+8)
 _TZ_SHANGHAI = timezone(timedelta(hours=8))
@@ -24,7 +25,7 @@ _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 class _ShanghaiFormatter(logging.Formatter):
     """Logging formatter that uses Asia/Shanghai timezone for timestamps."""
 
-    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+    def formatTime(self, record: logging.LogRecord, datefmt: Optional[str] = None) -> str:
         dt = datetime.fromtimestamp(record.created, tz=_TZ_SHANGHAI)
         if datefmt:
             return dt.strftime(datefmt)
@@ -46,7 +47,7 @@ def _build_file_handler() -> logging.FileHandler:
 
 
 # Module-level flag to avoid adding duplicate handlers on repeated get_logger() calls.
-_configured_loggers: set[str] = set()
+_configured_loggers: Set[str] = set()
 
 
 def get_logger(name: str) -> logging.Logger:
