@@ -1,11 +1,11 @@
 import { useStore } from "vuex";
-import { SET_LOG } from "../../src/store/mutation-types.js";
+import { SET_LOG } from "../../store/mutation-types.js";
 import {
     select,
     insert,
     selectAll,
     logTableName,
-} from "../../src/sql/index.js";
+} from "../../sql/index.js";
 import dayjs from "dayjs";
 
 export default class Log {
