@@ -1,93 +1,106 @@
-# 大麦抢票自动化系统
+# HaTickets - 大麦网抢票自动化
 
-一个基于Selenium和Appium的大麦网抢票自动化工具，支持Web端和移动端抢票。
+三套方案、一个目标 —— 在大麦网开售的瞬间帮你抢到票。
 
-## 🚀 功能特性
+## 三种抢票方案
 
-- **双端支持**：支持Web端（Selenium）和移动端（Appium）抢票
-- **智能抢票**：自动选择城市、票价、观演人员
-- **高性能**：优化的点击策略，适合抢票场景
-- **可配置**：灵活的配置文件，支持多种演出设置
-- **重试机制**：内置重试逻辑，提高成功率
+| 方案 | 目录 | 技术栈 | 原理 | 速度 |
+|------|------|--------|------|------|
+| **Web** | `web/` | Python + Selenium | 自动操控 Chrome 浏览器完成购票流程 | ★★☆ |
+| **Mobile** | `mobile/` | Python + Appium | 自动操控 Android 大麦 APP，坐标级手势点击 | ★★★ |
+| **Desktop** | `desktop/` | Rust + Vue 3 (Tauri) | 绕过浏览器/APP，直接调用大麦 mtop API | ★★★★ |
 
-## 📋 系统要求
+> **Desktop 最快**：跳过 UI 渲染，直接发 HTTP 请求；**Mobile 最稳**：走官方 APP 流程，不易触发风控。
 
-### 基础环境
-- **Python**: 3.9+
-- **Node.js**: 20.19.0+ 或 22.12.0+ 或 24.0.0+
-- **操作系统**: macOS / Windows / Linux
+## 快速开始
 
-### Web端抢票
-- **Chrome浏览器**: 最新版本
-- **ChromeDriver**: 自动下载
+### Web 端
 
-### 移动端抢票
-- **Android SDK**: 已配置环境变量
-- **Appium**: 3.1.0+
-- **Android设备**: 真机或模拟器
-
-## 🛠️ 安装指南
-
-### 1. 克隆项目
 ```bash
-git clone <repository-url>
-cd ticket-purchase
-```
-
-### 2. 安装Python依赖
-```bash
-# 使用Poetry（推荐）
 poetry install
-
-# 或使用pip
-pip install -r requirements.txt
+cd web
+# 编辑 config.json 填入演出 URL、观演人等
+python damai.py
 ```
 
-### 3. 移动端环境配置（仅移动端抢票需要）
+首次运行会打开 Chrome 让你扫码登录，Cookie 会自动保存。
 
-#### 3.1 安装Node.js
+### Mobile 端
+
 ```bash
-# macOS (使用Homebrew)
-brew install node
+# 1. 启动 Appium
+appium --port 4723
 
-# 验证版本（需要20.19.0+）
-node --version
+# 2. 编辑配置
+vim mobile/config.jsonc
+
+# 3. 在 Android 设备上打开大麦 APP，进入目标演出页面，然后运行：
+cd mobile && poetry run python damai_app.py
 ```
 
-#### 3.2 安装Appium
+需要：Android 设备/模拟器 + Appium 3.1+ + Node.js 20.19+
+
+### Desktop 端
+
 ```bash
-# 全局安装Appium
-npm install -g appium
-
-# 安装UiAutomator2驱动
-appium driver install uiautomator2
-
-# 验证安装
-appium --version
+cd desktop
+yarn install
+yarn tauri dev      # 开发模式
+yarn tauri build    # 生产构建
 ```
 
-#### 3.3 配置Android环境
-```bash
-# 设置环境变量（添加到 ~/.zshrc 或 ~/.bashrc）
-export ANDROID_HOME=/path/to/your/android/sdk
-export ANDROID_SDK_ROOT=/path/to/your/android/sdk
+需要：Node.js 20+ + Rust toolchain
 
-# 验证ADB
-adb devices
+## 项目结构
+
+```
+HaTickets/
+├── web/                  # Web 端 (Selenium + ChromeDriver)
+│   ├── damai.py         #   入口：加载配置 → 启动 Concert
+│   ├── concert.py       #   核心：登录、轮询、选票、下单
+│   └── config.json      #   配置：演出 URL、票价、观演人
+├── mobile/               # 移动端 (Appium + UIAutomator2)
+│   ├── damai_app.py     #   DamaiBot：坐标手势 + 批量点击
+│   └── config.jsonc     #   配置：关键词、城市、日期、票价
+├── desktop/              # 桌面端 (Tauri v1)
+│   ├── src/             #   Vue 3 前端 (Arco Design)
+│   ├── src-tauri/src/   #   Rust 后端：直调 mtop API
+│   │   ├── main.rs      #     5 个 Tauri command
+│   │   └── proxy_builder.rs  # HTTP/SOCKS 代理
+│   └── src/utils/dm/    #   签名、反爬、下单参数构造
+├── tests/                # Python 测试 (pytest, 80% 覆盖率)
+├── docs/                 # 技术文档与流程图
+└── pyproject.toml        # Python 依赖与测试配置
 ```
 
-## ⚙️ 配置说明
+## 配置示例
 
-### 移动端配置 (config.jsonc)
+<details>
+<summary><b>Web 端 — web/config.json</b></summary>
+
+```json
+{
+  "target_url": "https://detail.damai.cn/item.htm?id=xxx",
+  "users": ["张三", "李四"],
+  "city": "广州",
+  "dates": ["2025-10-28"],
+  "prices": ["1039"],
+  "if_commit_order": true,
+  "max_retries": 10000,
+  "fast_mode": true
+}
+```
+
+</details>
+
+<details>
+<summary><b>Mobile 端 — mobile/config.jsonc</b></summary>
 
 ```json
 {
   "server_url": "http://127.0.0.1:4723",
   "keyword": "刘若英",
-  "users": [
-    "观演人1",
-    "观演人2"
-  ],
+  "users": ["张三", "李四"],
   "city": "泉州",
   "date": "10.04",
   "price": "799元",
@@ -96,224 +109,29 @@ adb devices
 }
 ```
 
-#### 配置参数说明
+</details>
 
-| 参数 | 类型 | 说明 | 示例 |
-|------|------|------|------|
-| `server_url` | string | Appium服务器地址 | `"http://127.0.0.1:4723"` |
-| `keyword` | string | 搜索关键词 | `"刘若英"` |
-| `users` | array | 观演人员名单 | `["张三", "李四"]` |
-| `city` | string | 演出城市 | `"泉州"` |
-| `date` | string | 演出日期 | `"10.04"` |
-| `price` | string | 票价描述 | `"799元"` |
-| `price_index` | number | 票价索引（从0开始） | `1` |
-| `if_commit_order` | boolean | 是否自动提交订单 | `true` |
+## 关键设计
 
-### Web端配置 (config.json)
+- **Mobile 坐标点击**：用 `ultra_fast_click()` 替代 `element.click()`，省去元素查找开销
+- **Desktop 直调 API**：Rust 发起 HTTP 请求到 `mtop.damai.cn`，3s 超时，伪装移动端 UA + 反爬 Header
+- **Desktop 代理支持**：`ProxyBuilder` 支持 HTTP/SOCKS5 代理，所有 API 请求可走代理
+- **Web Cookie 持久化**：登录后 Cookie 序列化到本地，下次跳过登录
+- **Web 快速模式**：`fast_mode: true` 将轮询间隔压到最低
 
-```json
-{
-  "index_url": "https://www.damai.cn/",
-  "login_url": "https://passport.damai.cn/login",
-  "target_url": "https://detail.damai.cn/item.htm?id=xxx",
-  "users": ["张三", "李四"],
-  "city": "广州",
-  "date": "2023-10-28",
-  "price": "1039",
-  "if_commit_order": true
-}
-```
+## 开发
 
-## 🚀 使用方法
-
-### 移动端抢票（推荐）
-
-#### 1. 启动Android设备
 ```bash
-# 启动模拟器
-/Users/shengwang/Library/Android/sdk/emulator/emulator -avd YourAVDName
+# Python 测试
+poetry install
+poetry run pytest                    # 全部测试
+poetry run pytest -k "test_name"     # 单个测试
+poetry run pytest -m unit            # 按标签
 
-# 或连接真机（需开启USB调试）
-adb devices
+# Desktop 开发
+cd desktop && yarn tauri dev
 ```
 
-#### 2. 安装大麦APP
-在Android设备上安装大麦APP，并登录账号。
+## License
 
-#### 3. 启动Appium服务器
-```bash
-# 设置环境变量
-export ANDROID_HOME=/Users/shengwang/Library/Android/sdk
-export ANDROID_SDK_ROOT=/Users/shengwang/Library/Android/sdk
-
-# 启动Appium服务器
-appium --port 4723
-```
-
-#### 4. 配置抢票参数
-编辑 `mobile/config.jsonc` 文件，设置：
-- 搜索关键词
-- 观演人员
-- 城市、日期、票价
-- 其他参数
-
-#### 5. 运行抢票脚本
-```bash
-cd mobile
-ANDROID_HOME=/Users/shengwang/Library/Android/sdk ANDROID_SDK_ROOT=/Users/shengwang/Library/Android/sdk python damai_app.py
-```
-
-### Web端抢票
-
-#### 1. 配置参数
-编辑 `web/config.json` 文件，设置目标演出URL和其他参数。
-
-#### 2. 运行抢票脚本
-```bash
-cd web
-python damai.py
-```
-
-## 🔧 故障排除
-
-### 常见问题
-
-#### 1. Node.js版本不兼容
-```
-Error: Node version must be at least ^20.19.0 || ^22.12.0 || >=24.0.0
-```
-**解决方案**：升级Node.js到兼容版本
-```bash
-# macOS
-brew upgrade node
-```
-
-#### 2. Android环境变量未设置
-```
-Error: Neither ANDROID_HOME nor ANDROID_SDK_ROOT environment variable was exported
-```
-**解决方案**：设置环境变量
-```bash
-export ANDROID_HOME=/path/to/android/sdk
-export ANDROID_SDK_ROOT=/path/to/android/sdk
-```
-
-#### 3. 设备连接问题
-```
-Error: Unable to find an active device or emulator
-```
-**解决方案**：
-- 检查设备连接：`adb devices`
-- 确保设备已开启USB调试
-- 检查Android版本是否匹配
-
-#### 4. Appium连接失败
-```
-Error: Connection refused
-```
-**解决方案**：
-- 确保Appium服务器正在运行
-- 检查端口4723是否被占用
-- 验证服务器地址配置
-
-### 调试技巧
-
-#### 1. 检查设备状态
-```bash
-# 检查连接的设备
-adb devices
-
-# 检查设备Android版本
-adb shell getprop ro.build.version.release
-
-# 检查设备是否完全启动
-adb shell getprop sys.boot_completed
-```
-
-#### 2. 验证Appium连接
-```bash
-# 检查Appium服务器状态
-curl http://127.0.0.1:4723/status
-```
-
-#### 3. 查看应用包名
-```bash
-# 查看已安装的应用
-adb shell pm list packages | grep damai
-```
-
-## 📁 项目结构
-
-```
-HaTickets/
-├── web/                      # Web端抢票 (Selenium + Python)
-│   ├── damai.py             # 主程序入口
-│   ├── concert.py           # 核心自动化逻辑
-│   ├── config.py            # 配置类
-│   ├── config.json          # 配置文件
-│   └── scripts/             # 环境检查脚本
-├── mobile/                   # 移动端抢票 (Appium + Python)
-│   ├── damai_app.py         # 主程序 (坐标点击优化版)
-│   ├── config.py            # 配置类
-│   ├── config.jsonc         # 配置文件
-│   └── scripts/             # 启动脚本
-├── desktop/                  # 桌面端抢票 (Tauri: Vue 3 + Rust)
-│   ├── src/                 # Vue 3 前端
-│   ├── src-tauri/           # Rust 后端 (直调 mtop API)
-│   └── package.json         # 前端依赖
-├── tests/                    # Python 测试
-├── docs/                     # 项目文档与图片
-└── pyproject.toml            # Python 依赖与测试配置
-```
-
-## 🎯 使用流程
-
-### 移动端抢票完整流程
-
-1. **环境准备**
-   - 安装Node.js (20.19.0+)
-   - 安装Appium和驱动
-   - 配置Android SDK环境变量
-
-2. **设备准备**
-   - 启动Android模拟器或连接真机
-   - 安装大麦APP并登录
-
-3. **配置参数**
-   - 编辑 `config.jsonc` 文件
-   - 设置演出信息、观演人员等
-
-4. **启动服务**
-   - 启动Appium服务器
-   - 验证设备连接
-
-5. **执行抢票**
-   - 在模拟器上打开大麦APP
-   - 搜索目标演出
-   - 运行抢票脚本
-
-6. **监控结果**
-   - 脚本自动执行抢票流程
-   - 查看控制台输出
-   - 检查订单状态
-
-## ⚠️ 注意事项
-
-1. **合法使用**：请遵守大麦网的使用条款，合理使用自动化工具
-2. **账号安全**：建议使用专门的测试账号
-3. **网络环境**：确保网络连接稳定
-4. **设备性能**：建议使用性能较好的设备进行抢票
-5. **时间设置**：提前设置好抢票时间，确保脚本在开售时间运行
-
-## 🤝 贡献指南
-
-欢迎提交Issue和Pull Request来改进项目。
-
-## 📄 许可证
-
-本项目仅供学习和研究使用，请勿用于商业用途。
-
----
-
-**最后更新**: 2024年10月
-**版本**: 2.0.0
+仅供学习和研究使用。
