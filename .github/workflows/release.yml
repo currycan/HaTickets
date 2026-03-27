@@ -9,7 +9,28 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  create-release:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create-release.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create release with auto-generated notes
+        id: create-release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "app ${{ github.ref_name }}"
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
   build-tauri:
+    needs: create-release
     permissions:
       contents: write
     strategy:
@@ -55,7 +76,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "app ${{ github.ref_name }}"
-          releaseBody: "See the assets to download this version and install."
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           releaseDraft: false
           prerelease: false
           projectPath: desktop
