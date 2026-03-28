@@ -32,7 +32,6 @@ class DamaiBot:
         """初始化驱动配置"""
         capabilities = {
             "platformName": "Android",  # 操作系统
-            "platformVersion": "16",  # 系统版本
             "deviceName": "emulator-5554",  # 设备名称
             "appPackage": "cn.damai",  # app 包名
             "appActivity": ".launcher.splash.SplashMainActivity",  # app 启动 Activity
@@ -147,11 +146,98 @@ class DamaiBot:
                 continue
         return False
 
+    def _has_element(self, by, value):
+        """快速判断元素是否存在，不等待点击状态。"""
+        try:
+            return len(self.driver.find_elements(by=by, value=value)) > 0
+        except Exception:
+            return False
+
+    def _get_current_activity(self):
+        """获取当前 Activity，失败时返回空字符串。"""
+        try:
+            return self.driver.current_activity or ""
+        except Exception:
+            return ""
+
+    def dismiss_startup_popups(self):
+        """处理首启的一次性系统/应用弹窗。"""
+        dismissed = False
+
+        popup_clicks = [
+            (By.ID, "android:id/ok"),  # Android 全屏提示
+            (By.ID, "cn.damai:id/id_boot_action_agree"),  # 大麦隐私协议
+            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("Cancel")'),  # Add to home screen
+        ]
+
+        for by, value in popup_clicks:
+            if self._has_element(by, value):
+                if self.ultra_fast_click(by, value):
+                    dismissed = True
+                    time.sleep(0.3)
+
+        return dismissed
+
+    def probe_current_page(self):
+        """探测当前页面状态和关键控件可见性。"""
+        state = "unknown"
+        current_activity = self._get_current_activity()
+
+        if self._has_element(By.ID, "cn.damai:id/id_boot_action_agree"):
+            state = "consent_dialog"
+        elif self._has_element(By.ID, "cn.damai:id/homepage_header_search"):
+            state = "homepage"
+        elif "SearchActivity" in current_activity:
+            state = "search_page"
+        elif self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'):
+            state = "order_confirm_page"
+        elif self._has_element(By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl") or \
+                self._has_element(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"):
+            state = "detail_page"
+
+        result = {
+            "state": state,
+            "purchase_button": self._has_element(By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"),
+            "price_container": self._has_element(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"),
+            "quantity_picker": self._has_element(By.ID, "layout_num"),
+            "submit_button": self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+        }
+
+        print(f"当前页面状态: {result['state']}")
+        if current_activity:
+            print(f"当前 Activity: {current_activity}")
+        print(
+            "探测结果: "
+            f"purchase_button={result['purchase_button']}, "
+            f"price_container={result['price_container']}, "
+            f"quantity_picker={result['quantity_picker']}, "
+            f"submit_button={result['submit_button']}"
+        )
+
+        return result
+
     def run_ticket_grabbing(self):
         """执行抢票主流程"""
         try:
             print("开始抢票流程...")
             start_time = time.time()
+
+            self.dismiss_startup_popups()
+            page_probe = self.probe_current_page()
+
+            if page_probe["state"] != "detail_page":
+                print("当前不在演出详情页，请先手动打开目标演出详情页")
+                return False
+
+            if self.config.probe_only:
+                if page_probe["purchase_button"] and page_probe["price_container"]:
+                    print("probe_only 模式: 详情页关键控件已就绪，停止在购票点击前")
+                    end_time = time.time()
+                    print(f"探测完成，耗时: {end_time - start_time:.2f}秒")
+                    return True
+
+                print("probe_only 模式: 详情页关键控件未就绪")
+                return False
 
             # 1. 城市选择 - 准备多个备选方案
             print("选择城市...")

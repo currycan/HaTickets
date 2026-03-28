@@ -25,7 +25,8 @@ def _strip_jsonc_comments(text):
 
 
 class Config:
-    def __init__(self, server_url, keyword, users, city, date, price, price_index, if_commit_order):
+    def __init__(self, server_url, keyword, users, city, date, price, price_index, if_commit_order,
+                 probe_only=False):
         # Validate server_url
         validate_url(server_url, "server_url")
 
@@ -40,6 +41,9 @@ class Config:
         if not isinstance(keyword, str) or len(keyword.strip()) == 0:
             raise ValueError(f"keyword 必须是非空字符串，实际值: {keyword!r}")
 
+        if not isinstance(probe_only, bool):
+            raise ValueError(f"probe_only 必须是布尔值，实际值: {probe_only!r}")
+
         self.server_url = server_url
         self.keyword = keyword
         self.users = users
@@ -48,6 +52,7 @@ class Config:
         self.price = price
         self.price_index = price_index
         self.if_commit_order = if_commit_order
+        self.probe_only = probe_only
 
     @staticmethod
     def load_config():
@@ -74,4 +79,5 @@ class Config:
                       config['date'],
                       config['price'],
                       config['price_index'],
-                      config['if_commit_order'])
+                      config['if_commit_order'],
+                      config.get('probe_only', False))

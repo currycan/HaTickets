@@ -105,11 +105,14 @@ HaTickets/
   "date": "10.04",
   "price": "799元",
   "price_index": 1,
-  "if_commit_order": true
+  "if_commit_order": true,
+  "probe_only": false
 }
 ```
 
 </details>
+
+首次使用建议把 `probe_only` 设为 `true`，先只验证当前页面是不是目标演出详情页、关键控件是否就绪。当前 `mobile` MVP 仍要求用户先手动打开目标演出详情页，不依赖稳定的 App 内搜索或 deeplink 导航。
 
 ## 关键设计
 

@@ -1,6 +1,6 @@
 # Mobile 端抢票逻辑 (Appium)
 
-> 源码目录: `damai_appium/`
+> 源码目录: `mobile/`
 
 ## 技术栈
 
@@ -12,10 +12,10 @@
 
 | 文件 | 职责 |
 |------|------|
-| `damai_app_v2.py` | 当前版本：`DamaiBot` 类，优化后的抢票实现 |
-| `damai_app.py` | 旧版（已弃用） |
+| `damai_app.py` | 当前版本：`DamaiBot` 类，移动端抢票主流程 |
 | `config.py` | 配置容器 + `load_config()` 静态方法 |
-| `config.jsonc` | 用户配置文件 |
+| `config.jsonc` | 用户本地配置文件 |
+| `config.example.jsonc` | 配置样例 |
 
 ## 配置项 (`config.jsonc`)
 
@@ -27,6 +27,7 @@
 - `price`: 目标票价
 - `price_index`: 票价在列表中的索引位置
 - `if_commit_order`: 是否自动提交订单
+- `probe_only`: 仅做详情页探测，不执行购票点击
 
 ## 主流程
 
@@ -37,6 +38,10 @@ DamaiBot.__init__()
 
 run_with_retry(max_retries=3)
   └── run_ticket_grabbing()   # 单次抢票流程
+        ├── dismiss_startup_popups()   # 处理首启弹窗
+        ├── probe_current_page()       # 探测当前页面状态
+        │   ├── 非 detail_page => 直接失败
+        │   └── probe_only => 验证控件后提前结束
         ├── 1. 选择城市
         ├── 2. 点击预约按钮
         ├── 3. 选择票价
@@ -53,12 +58,15 @@ run_with_retry(max_retries=3)
 **Appium Capabilities**:
 ```python
 platformName: "Android"
-platformVersion: "16"
 deviceName: "emulator-5554"
 automationName: "UiAutomator2"
 noReset: True           # 保持 APP 登录态
 disableWindowAnimation: True  # 禁用动画提速
 ```
+
+说明：
+- 当前实现不再硬编码 `platformVersion`
+- 这样可以避免 Appium 因设备实际 Android 版本和代码常量不一致而拒绝创建会话
 
 **激进性能优化**:
 ```python
@@ -102,7 +110,28 @@ driver.execute_script("mobile: clickGesture", {
 - 接受主选择器 + 备用选择器列表
 - 依次尝试，第一个成功即返回
 
-### 3. 抢票各步骤
+### 3. 启动探测和安全探针
+
+**`dismiss_startup_popups()`**
+- 处理 Android 全屏提示
+- 处理大麦隐私协议弹窗
+- 处理系统级 `Add to home screen` 取消按钮
+
+**`probe_current_page()`**
+- 探测 `consent_dialog`、`homepage`、`search_page`、`detail_page`、`order_confirm_page`
+- 同时返回关键控件是否可见：
+  - `purchase_button`
+  - `price_container`
+  - `quantity_picker`
+  - `submit_button`
+- 同时输出当前 Activity，方便定位卡在首页、搜索页还是订单页
+
+**`probe_only` 模式**
+- 只验证详情页关键控件是否就绪
+- 就绪后停止在真正购票点击前
+- 适合首次接设备、校验页面、验证选择器
+
+### 4. 抢票各步骤
 
 **城市选择**: 三种选择器备选
 1. `UiSelector().text("城市名")` — 精确匹配
@@ -134,7 +163,7 @@ driver.execute_script("mobile: clickGesture", {
 2. 正则匹配 `.*提交.*|.*确认.*`
 3. XPath 文本包含
 
-### 4. 重试机制
+### 5. 重试机制
 
 `run_with_retry(max_retries=3)`:
 - 最多尝试 3 次
@@ -147,9 +176,17 @@ driver.execute_script("mobile: clickGesture", {
 运行前需要：
 1. 用户已手动打开大麦 APP 并登录
 2. 用户已导航到目标演出的详情页
-3. Appium 服务器已启动（`./start_appium.sh`）
+3. Appium 服务器已启动（`./mobile/scripts/start_appium.sh`）
 
 脚本从"详情页已打开"的状态开始执行，不包含搜索/导航步骤。
+
+## MVP 验证结论
+
+`2026-03-29` 的真实模拟器测试结论：
+- Appium + Android 模拟器 + 大麦 App 可以正常启动和探测页面
+- 大麦首启弹窗可以通过启动探测层稳定处理
+- 目标商品的 deeplink 会短暂进入 `ProjectDetailActivity`，随后回到首页，不适合作为默认导航方案
+- 因此当前推荐流程仍然是：用户手动打开目标演出详情页，再由脚本接管后续步骤
 
 ## 平台限制
 

@@ -6,7 +6,9 @@ import time as _time_module
 import pytest
 from unittest.mock import Mock, patch, call, PropertyMock
 
+from appium.webdriver.common.appiumby import AppiumBy
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.webdriver.common.by import By
 
 from mobile.damai_app import DamaiBot
 from mobile.config import Config
@@ -43,6 +45,7 @@ def bot():
         price="799元",
         price_index=1,
         if_commit_order=True,
+        probe_only=False,
     )
 
     with patch("mobile.damai_app.Config.load_config", return_value=mock_config), \
@@ -226,9 +229,73 @@ class TestSmartWaitAndClick:
 # ---------------------------------------------------------------------------
 
 class TestRunTicketGrabbing:
+    def test_run_ticket_grabbing_returns_false_when_not_detail_page(self, bot):
+        """Homepage or other non-detail states fail fast with a clear result."""
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "homepage",
+                 "purchase_button": False,
+                 "price_container": False,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "smart_wait_and_click") as smart_click, \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.return_value = 0.0
+            result = bot.run_ticket_grabbing()
+
+        assert result is False
+        smart_click.assert_not_called()
+
+    def test_run_ticket_grabbing_probe_only_returns_true_when_detail_ready(self, bot):
+        """probe_only stops before purchase when detail-page essentials are present."""
+        bot.config.probe_only = True
+
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": True,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "smart_wait_and_click") as smart_click, \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 0.1]
+            result = bot.run_ticket_grabbing()
+
+        assert result is True
+        smart_click.assert_not_called()
+
+    def test_run_ticket_grabbing_probe_only_returns_false_when_detail_incomplete(self, bot):
+        """probe_only reports failure when detail-page essentials are missing."""
+        bot.config.probe_only = True
+
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": False,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.return_value = 0.0
+            result = bot.run_ticket_grabbing()
+
+        assert result is False
+
     def test_run_ticket_grabbing_success(self, bot):
         """All phases succeed, returns True."""
-        with patch.object(bot, "smart_wait_and_click", return_value=True), \
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": True,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "smart_wait_and_click", return_value=True), \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
              patch("mobile.damai_app.time") as mock_time:
@@ -246,7 +313,15 @@ class TestRunTicketGrabbing:
 
     def test_run_ticket_grabbing_city_fail(self, bot):
         """City selection fails, returns False immediately."""
-        with patch.object(bot, "smart_wait_and_click", return_value=False), \
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": True,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "smart_wait_and_click", return_value=False), \
              patch("mobile.damai_app.time") as mock_time:
             mock_time.time.return_value = 0.0
             result = bot.run_ticket_grabbing()
@@ -255,7 +330,15 @@ class TestRunTicketGrabbing:
 
     def test_run_ticket_grabbing_book_fail(self, bot):
         """Booking button fails, returns False."""
-        with patch.object(bot, "smart_wait_and_click", side_effect=[True, False]), \
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": True,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "smart_wait_and_click", side_effect=[True, False]), \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
              patch("mobile.damai_app.time") as mock_time:
@@ -277,7 +360,15 @@ class TestRunTicketGrabbing:
         mock_target = _make_mock_element()
         mock_price_container.find_element.return_value = mock_target
 
-        with patch.object(bot, "smart_wait_and_click", return_value=True), \
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": True,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "smart_wait_and_click", return_value=True), \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
              patch("mobile.damai_app.time") as mock_time:
@@ -295,7 +386,15 @@ class TestRunTicketGrabbing:
 
     def test_run_ticket_grabbing_exception_returns_false(self, bot):
         """Unexpected exception in flow returns False."""
-        with patch.object(bot, "smart_wait_and_click", side_effect=RuntimeError("boom")), \
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": True,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "smart_wait_and_click", side_effect=RuntimeError("boom")), \
              patch("mobile.damai_app.time") as mock_time:
             mock_time.time.return_value = 0.0
             result = bot.run_ticket_grabbing()
@@ -313,7 +412,15 @@ class TestRunTicketGrabbing:
                 return False  # submit fails
             return True
 
-        with patch.object(bot, "smart_wait_and_click", side_effect=smart_click_side_effect), \
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": True,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "smart_wait_and_click", side_effect=smart_click_side_effect), \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
              patch("mobile.damai_app.time") as mock_time:
@@ -332,12 +439,76 @@ class TestRunTicketGrabbing:
 
     def test_run_ticket_grabbing_no_driver_quit_in_finally(self, bot):
         """Verify driver.quit is NOT called inside run_ticket_grabbing's finally block."""
-        with patch.object(bot, "smart_wait_and_click", return_value=False), \
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": True,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "smart_wait_and_click", return_value=False), \
              patch("mobile.damai_app.time") as mock_time:
             mock_time.time.return_value = 0.0
             bot.run_ticket_grabbing()
 
         bot.driver.quit.assert_not_called()
+
+
+class TestPageStateHelpers:
+    def test_probe_current_page_detects_homepage(self, bot):
+        with patch.object(
+            bot,
+            "_has_element",
+            side_effect=lambda by, value: (by, value) == (By.ID, "cn.damai:id/homepage_header_search"),
+        ), patch.object(bot, "_get_current_activity", return_value=""):
+            result = bot.probe_current_page()
+
+            assert result["state"] == "homepage"
+            assert result["purchase_button"] is False
+
+    def test_probe_current_page_detects_search_activity(self, bot):
+        with patch.object(bot, "_has_element", return_value=False), \
+             patch.object(bot, "_get_current_activity", return_value="com.alibaba.pictures.bricks.search.v2.SearchActivity"):
+            result = bot.probe_current_page()
+
+            assert result["state"] == "search_page"
+            assert result["purchase_button"] is False
+
+    def test_probe_current_page_detects_detail_page_controls(self, bot):
+        present = {
+            (By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"),
+            (By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"),
+            (By.ID, "layout_num"),
+            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+        }
+
+        with patch.object(bot, "_has_element", side_effect=lambda by, value: (by, value) in present), \
+             patch.object(bot, "_get_current_activity", return_value=""):
+            result = bot.probe_current_page()
+
+            assert result["state"] == "order_confirm_page"
+            assert result["purchase_button"] is True
+            assert result["price_container"] is True
+            assert result["quantity_picker"] is True
+            assert result["submit_button"] is True
+
+    def test_dismiss_startup_popups_clicks_known_popups(self, bot):
+        present = {
+            (By.ID, "android:id/ok"),
+            (By.ID, "cn.damai:id/id_boot_action_agree"),
+            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("Cancel")'),
+        }
+
+        with patch.object(bot, "_has_element", side_effect=lambda by, value: (by, value) in present), \
+             patch.object(bot, "ultra_fast_click", return_value=True) as fast_click, \
+             patch("mobile.damai_app.time.sleep"):
+            result = bot.dismiss_startup_popups()
+
+            assert result is True
+            fast_click.assert_any_call(By.ID, "android:id/ok")
+            fast_click.assert_any_call(By.ID, "cn.damai:id/id_boot_action_agree")
+            fast_click.assert_any_call(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("Cancel")')
 
 
 # ---------------------------------------------------------------------------

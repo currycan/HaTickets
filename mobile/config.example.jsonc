@@ -9,5 +9,6 @@
   "date": "12.06",
   "price": "内场1199元",
   "price_index": 5,
-  "if_commit_order": true
+  "if_commit_order": true,
+  "probe_only": false
 }

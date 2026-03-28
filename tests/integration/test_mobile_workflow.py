@@ -30,6 +30,7 @@ class TestConfigToBotInit:
             "price": "100元",
             "price_index": 0,
             "if_commit_order": True,
+            "probe_only": False,
         }
         (tmp_path / "config.jsonc").write_text(json.dumps(config_data), encoding="utf-8")
 
@@ -58,6 +59,7 @@ class TestFullTicketGrabbingFlow:
             keyword="test", users=["A"], city="深圳",
             date="12.06", price="799元", price_index=1,
             if_commit_order=True,
+            probe_only=False,
         )
 
         with patch("mobile.damai_app.Config.load_config", return_value=mock_config), \
@@ -71,7 +73,15 @@ class TestFullTicketGrabbingFlow:
             mock_driver.execute_script = Mock()
 
             bot = DamaiBot()
-            result = bot.run_ticket_grabbing()
+            with patch.object(bot, "dismiss_startup_popups"), \
+                 patch.object(bot, "probe_current_page", return_value={
+                     "state": "detail_page",
+                     "purchase_button": True,
+                     "price_container": True,
+                     "quantity_picker": True,
+                     "submit_button": True,
+                 }):
+                result = bot.run_ticket_grabbing()
             assert result is True
 
 
@@ -88,6 +98,7 @@ class TestRetryWithDriverRecreation:
             keyword="test", users=["A"], city="深圳",
             date="12.06", price="799元", price_index=1,
             if_commit_order=True,
+            probe_only=False,
         )
 
         with patch("mobile.damai_app.Config.load_config", return_value=mock_config), \

@@ -16,6 +16,7 @@ _VALID = dict(
     price="799元",
     price_index=0,
     if_commit_order=False,
+    probe_only=False,
 )
 
 
@@ -57,6 +58,7 @@ class TestMobileConfigInit:
             price="799元",
             price_index=1,
             if_commit_order=True,
+            probe_only=True,
         )
         assert cfg.server_url == "http://localhost:4723"
         assert cfg.keyword == "周深"
@@ -66,6 +68,7 @@ class TestMobileConfigInit:
         assert cfg.price == "799元"
         assert cfg.price_index == 1
         assert cfg.if_commit_order is True
+        assert cfg.probe_only is True
 
 
 class TestMobileConfigValidation:
@@ -114,6 +117,10 @@ class TestMobileConfigValidation:
         with pytest.raises(ValueError, match="keyword"):
             Config(**_make(keyword=123))
 
+    def test_probe_only_non_bool_raises(self):
+        with pytest.raises(ValueError, match="probe_only"):
+            Config(**_make(probe_only="yes"))
+
 
 class TestMobileConfigLoadConfig:
 
@@ -130,6 +137,7 @@ class TestMobileConfigLoadConfig:
             "price": "100元",
             "price_index": 0,
             "if_commit_order": False,
+            "probe_only": True,
         }
         with open("config.jsonc", "w", encoding="utf-8") as f:
             json.dump(config_data, f)
@@ -140,6 +148,7 @@ class TestMobileConfigLoadConfig:
         assert cfg.users == ["A"]
         assert cfg.city == "北京"
         assert cfg.if_commit_order is False
+        assert cfg.probe_only is True
 
     def test_load_config_file_not_found(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -170,9 +179,11 @@ class TestMobileConfigLoadConfig:
   "price": "100元",
   /* price index */
   "price_index": 0,
-  "if_commit_order": false
+  "if_commit_order": false,
+  "probe_only": true
 }"""
         (tmp_path / "config.jsonc").write_text(jsonc_content, encoding="utf-8")
         cfg = Config.load_config()
         assert cfg.server_url == "http://127.0.0.1:4723"
         assert cfg.price_index == 0
+        assert cfg.probe_only is True
