@@ -148,11 +148,35 @@ Chrome/113 → Chrome/146（2026 年 3 月最新稳定版）：
 
 `order.build.h5`、`order.create.h5`、`customerlist.get` 三个端点已统一移除旧风格参数：
 - 移除 `AntiFlood=true`
-- 移除 `method=GET/POST`
 - 移除 `tb_eagleeyex_scm_project=20190509-aone2-join-test`
 - 新增 `forceAntiCreep=true`
+- 保留 `method=POST`（订单端点需要）
 
 保留的业务参数（非协议参数）：`ttid`、`globalCode`、`isSec`、`ecode`、`hasToast`、`needTbLogin`。
+
+### 4.5 订单 API 名称和版本号 — ✅ 已更新（二次修正）
+
+通过直接分析大麦 H5 生产 JS bundle（`show-h5-next/2026.03.16/8408.14d6f043.js`）发现：
+
+**API 名称需要添加 `damai.` 前缀：**
+```diff
+- mtop.trade.order.build.h5
++ mtop.damai.trade.order.build.h5
+- mtop.trade.order.create.h5
++ mtop.damai.trade.order.create.h5
+```
+
+**版本号从 4.0 改为 1.0：**
+生产 JS 中订单 API 基础配置 `Na = {v:"1.0", data:{}, dataType:"json", method:"POST", type:"POST", ttid:"#t#ip##_h5_2014"}`，所有订单端点继承此版本号。
+
+```diff
+- API_VERSION_ORDER_BUILD = "4.0"
++ API_VERSION_ORDER_BUILD = "1.0"
+- API_VERSION_ORDER_CREATE = "4.0"
++ API_VERSION_ORDER_CREATE = "1.0"
+```
+
+**修改位置：** `dm_config.rs` 版本常量 + `main.rs` 中 `get_ticket_detail_res` 和 `create_order_res` 函数的 API 名和 v 参数。
 
 ---
 
@@ -200,8 +224,8 @@ Chrome/113 → Chrome/146（2026 年 3 月最新稳定版）：
 |---|------|----------|------|------|------|
 | 1 | 商品详情 | `mtop.damai.item.detail.getdetail` | 1.0 | ✅ 已更新 | 从旧 `mtop.alibaba.damai.detail.getdetail` v1.2 迁移 |
 | 2 | 票档列表 | `mtop.alibaba.detail.subpage.getdetail` | 2.0 | ✅ 已更新 | URL params 统一，data body 不变 |
-| 3 | 确认订单 | `mtop.trade.order.build.h5` | 4.0 | ✅ 已验证 | Ultron 体系，URL params 已更新 |
-| 4 | 提交订单 | `mtop.trade.order.create.h5` | 4.0 | ✅ 已验证 | Ultron 体系，URL params 已更新 |
+| 3 | 确认订单 | `mtop.damai.trade.order.build.h5` | 1.0 | ✅ 已更新 | API 名添加 `damai.` 前缀，版本 4.0→1.0 |
+| 4 | 提交订单 | `mtop.damai.trade.order.create.h5` | 1.0 | ✅ 已更新 | API 名添加 `damai.` 前缀，版本 4.0→1.0 |
 | 5 | 观演人 | `mtop.damai.wireless.user.customerlist.get` | 2.0 | ✅ 已更新 | URL params 统一 |
 
 **所有 5 个 API 端点均已验证为最新。**

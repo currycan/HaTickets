@@ -183,14 +183,14 @@ async fn get_ticket_detail_res(
     address: String,
 ) -> Result<String, Box<dyn Error>> {
     let base = dm_config::build_base_url(
-        "mtop.trade.order.build.h5",
+        "mtop.damai.trade.order.build.h5",
         dm_config::API_VERSION_ORDER_BUILD,
         t, sign,
     );
     let url = format!(
-        "{}&type=originaljson&dataType=json&v=4.0&H5Request=true\
+        "{}&type=originaljson&dataType=json&v=1.0&H5Request=true\
          &AntiCreep=true&forceAntiCreep=true\
-         &api=mtop.trade.order.build.h5\
+         &api=mtop.damai.trade.order.build.h5&method=POST\
          &ttid=%23t%23ip%23%23_h5_2014&globalCode=ali.china.damai",
         base
     );
@@ -247,15 +247,15 @@ async fn create_order_res(
     address: String,
 ) -> Result<String, Box<dyn Error>> {
     let base = dm_config::build_base_url(
-        "mtop.trade.order.create.h5",
+        "mtop.damai.trade.order.create.h5",
         dm_config::API_VERSION_ORDER_CREATE,
         t, sign,
     );
     let url = format!(
-        "{}&v=4.0&post=1&type=originaljson&timeout=15000&dataType=json\
+        "{}&v=1.0&post=1&type=originaljson&timeout=15000&dataType=json\
          &isSec=1&ecode=1&AntiCreep=true&forceAntiCreep=true\
          &ttid=%23t%23ip%23%23_h5_2014&globalCode=ali.china.damai\
-         &H5Request=true&api=mtop.trade.order.create.h5&{}",
+         &H5Request=true&api=mtop.damai.trade.order.create.h5&method=POST&{}",
         base, submitref
     );
 

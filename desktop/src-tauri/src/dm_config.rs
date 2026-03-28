@@ -24,8 +24,8 @@ pub const SEC_CH_UA: &str =
 // 各接口独立版本号（出现在 URL path 中）
 pub const API_VERSION_DETAIL: &str = "1.0"; // mtop.damai.item.detail.getdetail
 pub const API_VERSION_SKU: &str = "2.0"; // mtop.alibaba.detail.subpage.getdetail
-pub const API_VERSION_ORDER_BUILD: &str = "4.0"; // mtop.trade.order.build.h5
-pub const API_VERSION_ORDER_CREATE: &str = "4.0"; // mtop.trade.order.create.h5
+pub const API_VERSION_ORDER_BUILD: &str = "1.0"; // mtop.damai.trade.order.build.h5
+pub const API_VERSION_ORDER_CREATE: &str = "1.0"; // mtop.damai.trade.order.create.h5
 pub const API_VERSION_USER_LIST: &str = "2.0"; // mtop.damai.wireless.user.customerlist.get
 
 /// 构建 mtop URL 公共前缀，避免各接口函数重复拼接
