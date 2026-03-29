@@ -10,7 +10,7 @@ from appium.webdriver.common.appiumby import AppiumBy
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.common.by import By
 
-from mobile.damai_app import DamaiBot
+from mobile.damai_app import DamaiBot, logger as damai_logger
 from mobile.config import Config
 
 
@@ -26,6 +26,14 @@ def _make_mock_element(x=100, y=200, width=50, height=40):
     return el
 
 
+@pytest.fixture(autouse=True)
+def _enable_logger_propagation():
+    """Enable propagation on the damai_app logger so caplog can capture messages."""
+    damai_logger.propagate = True
+    yield
+    damai_logger.propagate = False
+
+
 @pytest.fixture
 def bot():
     """Create a DamaiBot with fully mocked Appium driver and config."""
@@ -38,6 +46,11 @@ def bot():
 
     mock_config = Config(
         server_url="http://127.0.0.1:4723",
+        device_name="Android",
+        udid=None,
+        platform_version=None,
+        app_package="cn.damai",
+        app_activity=".launcher.splash.SplashMainActivity",
         keyword="test",
         users=["UserA", "UserB"],
         city="深圳",
@@ -72,6 +85,39 @@ class TestInitialization:
         assert bot.wait is not None
         # update_settings was called during setup
         bot.driver.update_settings.assert_called_once()
+
+    def test_build_capabilities_uses_real_device_config(self):
+        mock_driver = Mock()
+        mock_driver.update_settings = Mock()
+
+        mock_config = Config(
+            server_url="http://127.0.0.1:4723",
+            device_name="Pixel 8",
+            udid="R58M123456A",
+            platform_version="14",
+            app_package="cn.damai",
+            app_activity=".launcher.splash.SplashMainActivity",
+            keyword="test",
+            users=["UserA"],
+            city="深圳",
+            date="12.06",
+            price="799元",
+            price_index=1,
+            if_commit_order=True,
+            probe_only=False,
+        )
+
+        with patch("mobile.damai_app.Config.load_config", return_value=mock_config), \
+             patch("mobile.damai_app.webdriver.Remote", return_value=mock_driver), \
+             patch("mobile.damai_app.AppiumOptions"):
+            bot = DamaiBot()
+
+        capabilities = bot._build_capabilities()
+        assert capabilities["deviceName"] == "Pixel 8"
+        assert capabilities["udid"] == "R58M123456A"
+        assert capabilities["platformVersion"] == "14"
+        assert capabilities["appPackage"] == "cn.damai"
+        assert capabilities["appActivity"] == ".launcher.splash.SplashMainActivity"
 
 
 # ---------------------------------------------------------------------------
@@ -119,16 +165,16 @@ class TestBatchClick:
         ufc.assert_any_call("by2", "v2")
         ufc.assert_any_call("by3", "v3")
 
-    def test_batch_click_some_fail(self, bot, capsys):
-        """Failed clicks print a message but processing continues."""
+    def test_batch_click_some_fail(self, bot, caplog):
+        """Failed clicks log a warning but processing continues."""
         elements = [("by1", "v1"), ("by2", "v2")]
-        with patch.object(bot, "ultra_fast_click", side_effect=[False, True]) as ufc, \
+        with caplog.at_level("WARNING", logger="mobile.damai_app"), \
+             patch.object(bot, "ultra_fast_click", side_effect=[False, True]) as ufc, \
              patch("mobile.damai_app.time"):
             bot.batch_click(elements, delay=0.1)
 
         assert ufc.call_count == 2
-        captured = capsys.readouterr()
-        assert "点击失败: v1" in captured.out
+        assert "点击失败: v1" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -136,12 +182,13 @@ class TestBatchClick:
 # ---------------------------------------------------------------------------
 
 class TestUltraBatchClick:
-    def test_ultra_batch_click_collects_and_clicks(self, bot, capsys):
+    def test_ultra_batch_click_collects_and_clicks(self, bot, caplog):
         """Coordinates collected for all elements, then clicked sequentially."""
         el1 = _make_mock_element(x=10, y=20, width=100, height=50)
         el2 = _make_mock_element(x=200, y=300, width=60, height=30)
 
-        with patch("mobile.damai_app.WebDriverWait") as MockWait, \
+        with caplog.at_level("DEBUG", logger="mobile.damai_app"), \
+             patch("mobile.damai_app.WebDriverWait") as MockWait, \
              patch("mobile.damai_app.time"):
             MockWait.return_value.until.side_effect = [el1, el2]
             bot.ultra_batch_click([("by1", "v1"), ("by2", "v2")], timeout=2)
@@ -152,14 +199,14 @@ class TestUltraBatchClick:
         assert calls[0] == call("mobile: clickGesture", {"x": 60, "y": 45, "duration": 30})
         assert calls[1] == call("mobile: clickGesture", {"x": 230, "y": 315, "duration": 30})
 
-        captured = capsys.readouterr()
-        assert "成功找到 2 个用户" in captured.out
+        assert "成功找到 2 个用户" in caplog.text
 
-    def test_ultra_batch_click_timeout_skips(self, bot, capsys):
+    def test_ultra_batch_click_timeout_skips(self, bot, caplog):
         """Timed-out elements are skipped; found ones are still clicked."""
         el1 = _make_mock_element(x=10, y=20, width=100, height=50)
 
-        with patch("mobile.damai_app.WebDriverWait") as MockWait, \
+        with caplog.at_level("DEBUG", logger="mobile.damai_app"), \
+             patch("mobile.damai_app.WebDriverWait") as MockWait, \
              patch("mobile.damai_app.time"):
             MockWait.return_value.until.side_effect = [
                 el1,
@@ -169,9 +216,8 @@ class TestUltraBatchClick:
 
         # Only 1 click executed (the successful one)
         assert bot.driver.execute_script.call_count == 1
-        captured = capsys.readouterr()
-        assert "超时未找到用户: v2" in captured.out
-        assert "成功找到 1 个用户" in captured.out
+        assert "超时未找到用户: v2" in caplog.text
+        assert "成功找到 1 个用户" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +330,26 @@ class TestRunTicketGrabbing:
             result = bot.run_ticket_grabbing()
 
         assert result is False
+
+    def test_run_ticket_grabbing_probe_only_returns_true_when_sku_page_ready(self, bot):
+        """probe_only succeeds when the ticket sku page is already open."""
+        bot.config.probe_only = True
+
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "sku_page",
+                 "purchase_button": False,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "smart_wait_and_click") as smart_click, \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 0.1]
+            result = bot.run_ticket_grabbing()
+
+        assert result is True
+        smart_click.assert_not_called()
 
     def test_run_ticket_grabbing_success(self, bot):
         """All phases succeed, returns True."""
@@ -401,8 +467,8 @@ class TestRunTicketGrabbing:
 
         assert result is False
 
-    def test_run_ticket_grabbing_submit_warns_on_failure(self, bot, capsys):
-        """Submit button fails but function still returns True (warning printed)."""
+    def test_run_ticket_grabbing_submit_warns_on_failure(self, bot, caplog):
+        """Submit button fails but function still returns True (warning logged)."""
         call_count = [0]
 
         def smart_click_side_effect(*args, **kwargs):
@@ -412,7 +478,8 @@ class TestRunTicketGrabbing:
                 return False  # submit fails
             return True
 
-        with patch.object(bot, "dismiss_startup_popups"), \
+        with caplog.at_level("WARNING", logger="mobile.damai_app"), \
+             patch.object(bot, "dismiss_startup_popups"), \
              patch.object(bot, "probe_current_page", return_value={
                  "state": "detail_page",
                  "purchase_button": True,
@@ -434,8 +501,7 @@ class TestRunTicketGrabbing:
             result = bot.run_ticket_grabbing()
 
         assert result is True
-        captured = capsys.readouterr()
-        assert "提交订单按钮未找到" in captured.out
+        assert "提交订单按钮未找到" in caplog.text
 
     def test_run_ticket_grabbing_no_driver_quit_in_finally(self, bot):
         """Verify driver.quit is NOT called inside run_ticket_grabbing's finally block."""
@@ -474,6 +540,32 @@ class TestPageStateHelpers:
 
             assert result["state"] == "search_page"
             assert result["purchase_button"] is False
+
+    def test_probe_current_page_detects_detail_page_by_activity_and_summary_price(self, bot):
+        present = {
+            (By.ID, "cn.damai:id/project_detail_price_layout"),
+        }
+
+        with patch.object(bot, "_has_element", side_effect=lambda by, value: (by, value) in present), \
+             patch.object(bot, "_get_current_activity", return_value=".trade.newtradeorder.ui.projectdetail.ui.activity.ProjectDetailActivity"):
+            result = bot.probe_current_page()
+
+            assert result["state"] == "detail_page"
+            assert result["purchase_button"] is False
+            assert result["price_container"] is True
+
+    def test_probe_current_page_detects_sku_page(self, bot):
+        present = {
+            (By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"),
+            (By.ID, "cn.damai:id/layout_sku"),
+        }
+
+        with patch.object(bot, "_has_element", side_effect=lambda by, value: (by, value) in present), \
+             patch.object(bot, "_get_current_activity", return_value=".commonbusiness.seatbiz.sku.qilin.ui.NcovSkuActivity"):
+            result = bot.probe_current_page()
+
+            assert result["state"] == "sku_page"
+            assert result["price_container"] is True
 
     def test_probe_current_page_detects_detail_page_controls(self, bot):
         present = {
