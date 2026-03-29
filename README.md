@@ -2,16 +2,23 @@
 
 这个仓库不是票务展示站，而是一个“大麦抢票自动化工具箱”。
 
-目前有 3 条路线：
+## 当前状态
 
-| 方案 | 目录 | 适合谁 | 特点 |
+- `Mobile`：当前主推方案，也是 README 主要说明对象
+- `Web`：保留，适合会调 Selenium 的用户
+- `Desktop`：**已被官方渠道限制，当前视为不可用，不再推荐，也不要作为主流程投入时间**
+
+## 方案状态
+
+| 方案 | 目录 | 当前状态 | 说明 |
 |------|------|--------|------|
-| `Mobile` | `mobile/` | 新手优先 | 走 Android 大麦 App，最接近真实购票流程 |
-| `Web` | `web/` | 会折腾浏览器自动化的人 | Selenium 控制 Chrome |
-| `Desktop` | `desktop/` | 研究接口的人 | 直接调 API，速度快，但更容易受渠道和风控影响 |
+| `Mobile` | `mobile/` | 主推 | 走 Android 大麦 App，最接近真实购票流程 |
+| `Web` | `web/` | 可用但次选 | Selenium 控制 Chrome |
+| `Desktop` | `desktop/` | 不可用 | 官方渠道和风控已限制，当前不要再作为可执行方案使用 |
 
 > 如果你是第一次用，直接走 `Mobile + 安卓真机`。  
-> 如果你只想先验证流程，不想误提交订单，先把 `if_commit_order` 设成 `false`。
+> 如果你只想先验证流程，不想误提交订单，先把 `if_commit_order` 设成 `false`。  
+> 如果你看到旧文档里提到 `Desktop`，把它理解成“历史实现”，不要再按它准备环境。
 
 ## 一图看懂
 
@@ -19,6 +26,12 @@
 
 上图对应的是当前项目的核心思路：  
 先到演出详情页或票档页，再进入确认页；如果配置了 `if_commit_order: false`，脚本会停在“立即提交”之前，不会帮你支付。
+
+## 推荐阅读顺序
+
+1. 先看下面的 `Mobile 真机教程`
+2. 再看 [docs/quick-start.md](docs/quick-start.md)
+3. 如果你要理解脚本细节，再看 [docs/mobile-ticket-logic.md](docs/mobile-ticket-logic.md)
 
 ## 小白推荐路线
 
@@ -238,7 +251,7 @@ export PATH="$ANDROID_HOME/platform-tools:$PATH"
 
 ### Web 端
 
-适合已经熟悉 Selenium 的人。
+适合已经熟悉 Selenium 的人。它还在仓库里，但不再是默认推荐路线。
 
 ```bash
 cd web
@@ -249,7 +262,15 @@ python damai.py
 
 ### Desktop 端
 
-速度最快，但不推荐新手先从这里开始，因为很多项目会有渠道限制和风控差异。
+`Desktop` 方案保留代码和历史文档，但当前已经不作为可用方案推荐。
+
+原因很简单：
+
+- 这条路线依赖大麦 H5 / mtop 接口
+- 当前官方渠道限制和风控已经让这条方案失去稳定可用性
+- 继续折腾 `desktop` 的投入产出很差
+
+如果你只是想真正跑通抢票流程，请回到上面的 `Mobile 真机教程`。
 
 ```bash
 cd desktop

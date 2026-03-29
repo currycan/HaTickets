@@ -1,34 +1,50 @@
 # 项目概览
 
-大麦网 (damai.cn) 抢票自动化系统，包含三套独立的抢票方案。
+大麦网 (damai.cn) 抢票自动化系统，仓库里保留了三套实现，但当前真正主推的是 `Mobile`。
 
-## 三套方案
+## 当前结论
+
+- `Mobile`：当前主推路线
+- `Web`：保留，可作为补充方案
+- `Desktop`：历史实现，当前已不再视为可用方案
+
+如果你的目标是“现在就把流程跑通”，优先看 `mobile/`，不要从 `desktop/` 开始。
+
+## 当前主推方案
+
+### Mobile 端 — Appium Android 自动化 (`mobile/`)
+
+- **状态**: 主推
+- **技术栈**: Python + Appium + UIAutomator2
+- **原理**: 控制 Android 真机/模拟器操作大麦 APP
+- **登录**: `noReset=true` 保持 APP 登录态
+- **特点**: 坐标级点击优化、支持真机、最接近真实购票链路
+- **适合**: 想按 README 直接上手的新用户
+
+## 其他保留方案
 
 ### 1. Web 端 — Selenium 浏览器自动化 (`damai/`)
 
+- **状态**: 次选
 - **技术栈**: Python + Selenium + ChromeDriver
 - **原理**: 控制 Chrome 浏览器模拟人工操作，在大麦网页面上完成选票、下单
 - **登录**: Cookie 持久化（pickle 序列化），首次需手动扫码
 - **特点**: 支持选座、有快速模式、ChromeDriver 自动安装
 
-### 2. Mobile 端 — Appium Android 自动化 (`damai_appium/`)
-
-- **技术栈**: Python + Appium + UIAutomator2
-- **原理**: 控制 Android 设备/模拟器操作大麦 APP
-- **登录**: `noReset=true` 保持 APP 登录态
-- **特点**: 坐标级点击优化（绕过元素交互开销）、仅支持 Android
-
 ### 3. 桌面端 — Tauri API 直调 (`tickets-master/`)
 
+- **状态**: 不可用 / 历史实现
 - **技术栈**: Tauri v1 + Rust + Vue 3 + Arco Design
 - **原理**: 跳过 UI，直接调用大麦 H5 mtop API 接口
 - **登录**: 用户手动从浏览器复制 Cookie
-- **特点**: 速度最快、支持预售倒计时、支持代理、有反爬对抗
+- **历史特点**: 速度快、支持预售倒计时、支持代理、有反爬对抗
+- **当前说明**: 因官方渠道限制和风控变化，这条路线已经不再作为实际可执行方案推荐
 
 ## 方案对比
 
 | | Web (Selenium) | Mobile (Appium) | 桌面 (Tauri API) |
 |---|---|---|---|
+| **当前状态** | 可用但次选 | **主推** | 不可用 |
 | **技术路线** | 浏览器 UI 自动化 | Android APP UI 自动化 | 直接调用 HTTP API |
 | **抢票速度** | 慢（需渲染页面） | 中（坐标点击优化） | **最快**（无 UI 开销） |
 | **登录方式** | Cookie / 扫码 | APP 保持登录态 | 手动复制 Cookie |
@@ -40,6 +56,7 @@
 | **重试策略** | 无限刷新 | 固定 3 次 | 可配置次数 + 间隔 |
 | **运行平台** | 跨平台（有 Chrome） | 仅 Android | 跨平台桌面 |
 | **风控风险** | 中 | 低（真实设备） | 高（直接调 API） |
+| **当前推荐度** | 中 | **高** | 低 |
 
 ## 共同的抢票流程
 
@@ -58,7 +75,7 @@ poetry install
 cd damai && python damai.py
 ```
 
-### Mobile 端
+### Mobile 端（推荐）
 
 ```bash
 poetry install
@@ -66,7 +83,7 @@ poetry install
 ./start_ticket_grabbing.sh  # 执行抢票
 ```
 
-### 桌面端
+### 桌面端（仅历史参考）
 
 ```bash
 cd tickets-master
