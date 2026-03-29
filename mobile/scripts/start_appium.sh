@@ -23,6 +23,12 @@ echo "✅ 环境变量已设置"
 echo "   ANDROID_HOME: $ANDROID_HOME"
 echo "   ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT"
 
+# 优先使用SDK自带的adb
+ADB="$ANDROID_HOME/platform-tools/adb"
+if [ ! -x "$ADB" ]; then
+    ADB="adb"
+fi
+
 # 检查Node.js版本
 NODE_VERSION=$(node --version | cut -d'v' -f2)
 echo "📦 Node.js版本: $NODE_VERSION"
@@ -36,7 +42,7 @@ fi
 
 # 检查Android设备
 echo "📱 检查Android设备..."
-DEVICES=$(adb devices | grep -c "device$")
+DEVICES=$($ADB devices | grep -c "device$")
 if [ $DEVICES -eq 0 ]; then
     echo "⚠️  未检测到Android设备"
     echo "   请启动模拟器或连接真机"
@@ -47,7 +53,7 @@ else
 fi
 
 # 检查大麦APP是否安装
-if ! adb shell pm list packages | grep -q "cn.damai"; then
+if ! $ADB shell pm list packages | grep -q "cn.damai"; then
     echo "⚠️  大麦APP未安装"
     echo "   请在设备上安装大麦APP"
     exit 1

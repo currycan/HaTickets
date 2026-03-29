@@ -25,7 +25,27 @@ def _strip_jsonc_comments(text):
 
 
 class Config:
-    def __init__(self, server_url, keyword, users, city, date, price, price_index, if_commit_order):
+    def __init__(
+        self,
+        server_url,
+        keyword,
+        users,
+        city,
+        date,
+        price,
+        price_index,
+        if_commit_order,
+        city_index=0,
+        date_index=0,
+        date_strict=False,
+        fast_mode=True,
+        device_name="emulator-5554",
+        platform_version="16",
+        udid=None,
+        app_package="cn.damai",
+        app_activity=".launcher.splash.SplashMainActivity",
+        automation_name="UiAutomator2",
+    ):
         # Validate server_url
         validate_url(server_url, "server_url")
 
@@ -47,7 +67,17 @@ class Config:
         self.date = date
         self.price = price
         self.price_index = price_index
+        self.city_index = city_index
+        self.date_index = date_index
         self.if_commit_order = if_commit_order
+        self.date_strict = bool(date_strict)
+        self.fast_mode = bool(fast_mode)
+        self.device_name = device_name
+        self.platform_version = platform_version
+        self.udid = udid
+        self.app_package = app_package
+        self.app_activity = app_activity
+        self.automation_name = automation_name
 
     @staticmethod
     def load_config():
@@ -67,11 +97,23 @@ class Config:
         if missing:
             raise KeyError(f"配置文件缺少必需字段: {', '.join(missing)}")
 
-        return Config(config['server_url'],
-                      config['keyword'],
-                      config['users'],
-                      config['city'],
-                      config['date'],
-                      config['price'],
-                      config['price_index'],
-                      config['if_commit_order'])
+        return Config(
+            config['server_url'],
+            config['keyword'],
+            config['users'],
+            config['city'],
+            config['date'],
+            config['price'],
+            config['price_index'],
+            config['if_commit_order'],
+            config.get('city_index', 0),
+            config.get('date_index', 0),
+            config.get('date_strict', False),
+            config.get('fast_mode', True),
+            config.get('device_name', 'emulator-5554'),
+            str(config.get('platform_version', '16')),
+            config.get('udid'),
+            config.get('app_package', 'cn.damai'),
+            config.get('app_activity', '.launcher.splash.SplashMainActivity'),
+            config.get('automation_name', 'UiAutomator2'),
+        )
