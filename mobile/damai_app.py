@@ -6,119 +6,51 @@ __Description__ = "大麦app抢票自动化 - 优化版"
 __Created__ = 2025/09/13 19:27
 """
 
-import re
-import os
-import shutil
-import subprocess
-import tempfile
 import time
-from datetime import datetime, timezone, timedelta
-
+import subprocess
+import xml.etree.ElementTree as ET
 from appium import webdriver
 from appium.options.common.base import AppiumOptions
 from appium.webdriver.common.appiumby import AppiumBy
+from selenium.webdriver.remote.client_config import ClientConfig
+from selenium.webdriver.remote.remote_connection import RemoteConnection
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import (
+    TimeoutException,
+    NoSuchElementException,
+    StaleElementReferenceException,
+    WebDriverException,
+)
 
 try:
     from mobile.config import Config
 except ImportError:
     from config import Config
 
-try:
-    from mobile.item_resolver import (
-        DamaiItemResolver,
-        DamaiItemResolveError,
-        city_keyword,
-        extract_item_id,
-        normalize_text,
-    )
-except ImportError:
-    from item_resolver import (
-        DamaiItemResolver,
-        DamaiItemResolveError,
-        city_keyword,
-        extract_item_id,
-        normalize_text,
-    )
-
-try:
-    from mobile.logger import get_logger
-except ImportError:
-    from logger import get_logger
-
-logger = get_logger(__name__)
-
-_MAGICK_BIN = shutil.which("magick")
-_TESSERACT_BIN = shutil.which("tesseract")
-
 
 class DamaiBot:
-    def __init__(self, config=None, setup_driver=True):
-        self.config = config or Config.load_config()
-        self.item_detail = None
+    def __init__(self):
+        self.config = Config.load_config()
         self.driver = None
         self.wait = None
-        self._terminal_failure_reason = None
-        self._prepare_runtime_config()
-        if setup_driver:
-            self._setup_driver()
+        self.last_error = ""
+        self._setup_driver()
 
-    def _set_terminal_failure(self, reason):
-        """Mark the current failure as non-retriable."""
-        self._terminal_failure_reason = reason
-
-    def _prepare_runtime_config(self):
-        """Resolve item metadata before creating the Appium session."""
-        if self.config.item_url and not self.config.item_id:
-            self.config.item_id = extract_item_id(self.config.item_url)
-
-        if not (self.config.item_url or self.config.item_id):
-            return
-
-        try:
-            self.item_detail = DamaiItemResolver().fetch_item_detail(
-                item_url=self.config.item_url,
-                item_id=self.config.item_id,
-            )
-        except (DamaiItemResolveError, ValueError) as exc:
-            if self.config.keyword:
-                logger.warning(f"解析 item_url/item_id 失败，继续使用现有 keyword: {exc}")
-                return
-            raise
-
-        self.config.item_id = self.item_detail.item_id
-        if not self.config.keyword:
-            self.config.keyword = self.item_detail.search_keyword
-            logger.info(f"已根据 item 链接自动生成搜索关键词: {self.config.keyword}")
-
-        resolved_city = self.item_detail.city_keyword or city_keyword(self.item_detail.venue_city_name)
-        config_city = city_keyword(self.config.city)
-        if resolved_city and config_city and normalize_text(resolved_city) != normalize_text(config_city):
-            raise ValueError(
-                f"配置 city={self.config.city!r} 与 item_url 指向城市={self.item_detail.city_name!r} 不一致"
-            )
-
-        logger.info(
-            f"已解析 itemId={self.item_detail.item_id}，演出={self.item_detail.item_name}，"
-            f"城市={self.item_detail.city_name}，时间={self.item_detail.show_time}，"
-            f"票价范围={self.item_detail.price_range}"
-        )
-
-    def _build_capabilities(self):
-        """根据配置构造 Appium capabilities。"""
+    def _setup_driver(self):
+        """初始化驱动配置"""
         capabilities = {
             "platformName": "Android",  # 操作系统
-            "deviceName": self.config.device_name,  # 模拟器或真机名称
+            "platformVersion": self.config.platform_version,  # 系统版本
+            "deviceName": self.config.device_name,  # 设备名称
             "appPackage": self.config.app_package,  # app 包名
             "appActivity": self.config.app_activity,  # app 启动 Activity
             "unicodeKeyboard": True,  # 支持 Unicode 输入
             "resetKeyboard": True,  # 隐藏键盘
             "noReset": True,  # 不重置 app
             "newCommandTimeout": 6000,  # 超时时间
-            "automationName": "UiAutomator2",  # 使用 uiautomator2
+            "automationName": self.config.automation_name,  # 使用 uiautomator2
             "skipServerInstallation": False,  # 跳过服务器安装
             "ignoreHiddenApiPolicyError": True,  # 忽略隐藏 API 策略错误
             "disableWindowAnimation": True,  # 禁用窗口动画
@@ -126,53 +58,81 @@ class DamaiBot:
             "mjpegServerFramerate": 1,  # 降低截图帧率
             "shouldTerminateApp": False,
             "adbExecTimeout": 20000,
+            "uiautomator2ServerInstallTimeout": 60000,
+            "uiautomator2ServerLaunchTimeout": 60000,
         }
-
         if self.config.udid:
             capabilities["udid"] = self.config.udid
 
-        if self.config.platform_version:
-            capabilities["platformVersion"] = self.config.platform_version
-
-        return capabilities
-
-    def _setup_driver(self):
-        """初始化驱动配置"""
         device_app_info = AppiumOptions()
-        device_app_info.load_capabilities(self._build_capabilities())
-        self.driver = webdriver.Remote(self.config.server_url, options=device_app_info)
+        device_app_info.load_capabilities(capabilities)
+        client_timeout = 12
+        client_config = ClientConfig(remote_server_addr=self.config.server_url, timeout=client_timeout)
+        command_executor = RemoteConnection(self.config.server_url, client_config=client_config)
 
-        # 更激进的性能优化设置
-        self.driver.update_settings({
-            "waitForIdleTimeout": 0,  # 空闲时间，0 表示不等待，让 UIAutomator2 不等页面“空闲”再返回
-            "actionAcknowledgmentTimeout": 0,  # 禁止等待动作确认
-            "keyInjectionDelay": 0,  # 禁止输入延迟
-            "waitForSelectorTimeout": 300,  # 从500减少到300ms
-            "ignoreUnimportantViews": False,  # 保持false避免元素丢失
-            "allowInvisibleElements": True,
-            "enableNotificationListener": False,  # 禁用通知监听
-        })
+        for attempt in range(2):
+            try:
+                self.driver = webdriver.Remote(command_executor=command_executor, options=device_app_info)
+                break
+            except Exception as e:
+                if attempt == 0 and self.config.udid:
+                    # 重启 uiautomator2 server 后再试一次
+                    try:
+                        subprocess.run(
+                            ["adb", "-s", self.config.udid, "shell", "am", "force-stop", "io.appium.uiautomator2.server"],
+                            check=False,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        subprocess.run(
+                            ["adb", "-s", self.config.udid, "shell", "am", "force-stop", "io.appium.uiautomator2.server.test"],
+                            check=False,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        time.sleep(0.5)
+                        continue
+                    except Exception:
+                        pass
+                raise e
+
+        # 稳定优先的设置（避免 UIA2 崩溃）
+        base_settings = {
+            "waitForIdleTimeout": 200,
+            "actionAcknowledgmentTimeout": 100,
+            "keyInjectionDelay": 0,
+            "waitForSelectorTimeout": 600,
+            "ignoreUnimportantViews": False,
+            "allowInvisibleElements": False,
+            "enableNotificationListener": False,
+        }
+        if not self.config.fast_mode:
+            base_settings.update({
+                "waitForIdleTimeout": 1000,
+                "actionAcknowledgmentTimeout": 200,
+                "waitForSelectorTimeout": 1000,
+            })
+        self.driver.update_settings(base_settings)
 
         # 极短的显式等待，抢票场景下速度优先
-        self.wait = WebDriverWait(self.driver, 2)  # 从5秒减少到2秒
+        wait_seconds = 1.2 if self.config.fast_mode else 3
+        self.wait = WebDriverWait(self.driver, wait_seconds)
 
-    def ultra_fast_click(self, by, value, timeout=1.5):
+    def ultra_fast_click(self, by, value, timeout=1.0):
         """超快速点击 - 适合抢票场景"""
         try:
-            # 直接查找并点击，不等待可点击状态
-            el = WebDriverWait(self.driver, timeout).until(
-                EC.presence_of_element_located((by, value))
-            )
-            # 使用坐标点击更快
-            rect = el.rect
-            x = rect['x'] + rect['width'] // 2
-            y = rect['y'] + rect['height'] // 2
-            self.driver.execute_script("mobile: clickGesture", {
-                "x": x,
-                "y": y,
-                "duration": 50  # 极短点击时间
-            })
-            return True
+            for _ in range(3):
+                try:
+                    # 直接查找并点击，不等待可点击状态
+                    el = WebDriverWait(self.driver, timeout).until(
+                        EC.presence_of_element_located((by, value))
+                    )
+                    if self._click_element(el):
+                        return True
+                except StaleElementReferenceException:
+                    time.sleep(0.05)
+                    continue
+            return False
         except TimeoutException:
             return False
 
@@ -183,7 +143,7 @@ class DamaiBot:
                 if delay > 0:
                     time.sleep(delay)
             else:
-                logger.warning(f"点击失败: {value}")
+                print(f"点击失败: {value}")
 
     def ultra_batch_click(self, elements_info, timeout=2):
         """超快批量点击 - 带等待机制"""
@@ -191,19 +151,18 @@ class DamaiBot:
         # 批量收集坐标，带超时等待
         for by, value in elements_info:
             try:
-                # 等待元素出现
-                el = WebDriverWait(self.driver, timeout).until(
-                    EC.presence_of_element_located((by, value))
-                )
+                elements = self.driver.find_elements(by, value)
+                if not elements:
+                    print(f"未找到用户: {value}")
+                    continue
+                el = elements[0]
                 rect = el.rect
                 x = rect['x'] + rect['width'] // 2
                 y = rect['y'] + rect['height'] // 2
                 coordinates.append((x, y, value))
-            except TimeoutException:
-                logger.warning(f"超时未找到用户: {value}")
             except Exception as e:
-                logger.error(f"查找用户失败 {value}: {e}")
-        logger.info(f"成功找到 {len(coordinates)} 个用户")
+                print(f"查找用户失败 {value}: {e}")
+        print(f"成功找到 {len(coordinates)} 个用户")
         # 快速连续点击
         for i, (x, y, value) in enumerate(coordinates):
             self.driver.execute_script("mobile: clickGesture", {
@@ -213,1101 +172,750 @@ class DamaiBot:
             })
             if i < len(coordinates) - 1:
                 time.sleep(0.01)
-            logger.debug(f"点击用户: {value}")
+            print(f"点击用户: {value}")
 
-    def smart_wait_and_click(self, by, value, backup_selectors=None, timeout=1.5):
+    def smart_wait_and_click(self, by, value, backup_selectors=None, timeout=1.0):
         """智能等待和点击 - 支持备用选择器"""
         selectors = [(by, value)]
         if backup_selectors:
             selectors.extend(backup_selectors)
 
         for selector_by, selector_value in selectors:
-            try:
-                el = WebDriverWait(self.driver, timeout).until(
-                    EC.presence_of_element_located((selector_by, selector_value))
-                )
-                rect = el.rect
-                x = rect['x'] + rect['width'] // 2
-                y = rect['y'] + rect['height'] // 2
-                self.driver.execute_script("mobile: clickGesture", {"x": x, "y": y, "duration": 50})
-                return True
-            except TimeoutException:
-                continue
+            for _ in range(3):
+                try:
+                    el = WebDriverWait(self.driver, timeout).until(
+                        EC.presence_of_element_located((selector_by, selector_value))
+                    )
+                    if self._click_element(el):
+                        return True
+                except StaleElementReferenceException:
+                    time.sleep(0.05)
+                    continue
+                except TimeoutException:
+                    break
         return False
 
-    def smart_wait_for_element(self, by, value, backup_selectors=None, timeout=1.5):
-        """智能等待元素出现 - 支持备用选择器，但不执行点击。"""
-        selectors = [(by, value)]
-        if backup_selectors:
-            selectors.extend(backup_selectors)
-
-        for selector_by, selector_value in selectors:
-            try:
-                WebDriverWait(self.driver, timeout).until(
-                    EC.presence_of_element_located((selector_by, selector_value))
-                )
-                return True
-            except TimeoutException:
-                continue
-        return False
-
-    def wait_for_page_state(self, expected_states, timeout=5, poll_interval=0.2):
-        """轮询等待页面进入指定状态，返回最后一次探测结果。"""
-        deadline = time.time() + timeout
-        last_probe = None
-
-        while time.time() < deadline:
-            last_probe = self.probe_current_page()
-            if last_probe["state"] in expected_states:
-                return last_probe
-            time.sleep(poll_interval)
-
-        return last_probe if last_probe is not None else self.probe_current_page()
-
-    def _has_element(self, by, value):
-        """快速判断元素是否存在，不等待点击状态。"""
+    def _click_element(self, el, duration=50):
+        """点击元素，处理 StaleElement"""
         try:
-            return len(self.driver.find_elements(by=by, value=value)) > 0
+            rect = el.rect
+            x = rect['x'] + rect['width'] // 2
+            y = rect['y'] + rect['height'] // 2
+            self.driver.execute_script("mobile: clickGesture", {
+                "x": x,
+                "y": y,
+                "duration": duration
+            })
+            return True
+        except (StaleElementReferenceException, WebDriverException):
+            return False
+
+    def _build_date_tokens(self, date_text):
+        """从配置的场次文本构建可匹配的 token 列表（偏宽松，仅按日期匹配）"""
+        if not date_text:
+            return []
+        raw = date_text.strip()
+        tokens = []
+
+        # 提取时间
+        import re
+        # 宽松策略：仅按日期匹配，不强制时间
+        m_time = re.search(r"(\\d{1,2}:\\d{2})", raw)
+
+        # 提取日期
+        m_full = re.search(r"(\\d{4}[-./]\\d{1,2}[-./]\\d{1,2})", raw)
+        if m_full:
+            full = m_full.group(1).replace(".", "-").replace("/", "-")
+            y, m, d = full.split("-")
+            tokens.extend([
+                f"{y}-{m.zfill(2)}-{d.zfill(2)}",
+                f"{y}.{m.zfill(2)}.{d.zfill(2)}",
+                f"{int(m)}-{int(d)}",
+                f"{m.zfill(2)}-{d.zfill(2)}",
+                f"{int(m)}.{int(d)}",
+                f"{m.zfill(2)}.{d.zfill(2)}",
+                f"{int(m)}月{int(d)}日",
+                f"{int(m)}月{int(d)}",
+            ])
+            # 兼容“5月2日-3日”类范围展示
+            tokens.extend([
+                f"{int(m)}月{int(d)}日-",
+                f"{int(m)}月{int(d)}-",
+                f"{m.zfill(2)}-{d.zfill(2)}-",
+            ])
+        else:
+            m_md = re.search(r"(\\d{1,2})[-./](\\d{1,2})", raw)
+            if m_md:
+                m, d = m_md.group(1), m_md.group(2)
+                tokens.extend([
+                    f"{int(m)}-{int(d)}",
+                    f"{m.zfill(2)}-{d.zfill(2)}",
+                    f"{int(m)}.{int(d)}",
+                    f"{m.zfill(2)}.{d.zfill(2)}",
+                    f"{int(m)}月{int(d)}日",
+                    f"{int(m)}月{int(d)}",
+                ])
+                tokens.extend([
+                    f"{int(m)}月{int(d)}日-",
+                    f"{int(m)}月{int(d)}-",
+                    f"{m.zfill(2)}-{d.zfill(2)}-",
+                ])
+
+        # 兜底：如果没有日期解析出来，再尝试原始文本或时间
+        if not tokens:
+            tokens.append(raw)
+            if m_time:
+                tokens.append(m_time.group(1))
+
+        # 去重并保持顺序
+        seen = set()
+        ordered = []
+        for t in tokens:
+            if t and t not in seen:
+                seen.add(t)
+                ordered.append(t)
+        return ordered
+
+    def _try_click_by_text_tokens(self, tokens, timeout=1.0):
+        """使用文本 token 尝试点击元素（不滚动）"""
+        for token in tokens:
+            try:
+                # UIAutomator contains
+                elements = self.driver.find_elements(
+                    AppiumBy.ANDROID_UIAUTOMATOR,
+                    f'new UiSelector().textContains("{token}")'
+                )
+                for el in elements[:3]:
+                    if self._click_element(el):
+                        return True
+
+                # content-desc contains
+                elements = self.driver.find_elements(
+                    AppiumBy.ANDROID_UIAUTOMATOR,
+                    f'new UiSelector().descriptionContains("{token}")'
+                )
+                for el in elements[:3]:
+                    if self._click_element(el):
+                        return True
+
+                # XPath contains
+                elements = self.driver.find_elements(By.XPATH, f'//*[contains(@text,"{token}") or contains(@content-desc,"{token}")]')
+                for el in elements[:3]:
+                    if self._click_element(el):
+                        return True
+            except WebDriverException:
+                continue
+        return False
+
+    def _try_scroll_and_click(self, tokens):
+        """滚动查找文本 token 并点击"""
+        if self.config.fast_mode:
+            return False
+        try:
+            if not self.driver.find_elements(
+                AppiumBy.ANDROID_UIAUTOMATOR,
+                'new UiSelector().scrollable(true)'
+            ):
+                return False
+        except WebDriverException:
+            return False
+        for token in tokens:
+            try:
+                el = self.driver.find_element(
+                    AppiumBy.ANDROID_UIAUTOMATOR,
+                    'new UiScrollable(new UiSelector().scrollable(true))'
+                    f'.scrollIntoView(new UiSelector().textContains("{token}"))'
+                )
+                if self._click_element(el):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _try_open_time_panel(self):
+        """尝试打开场次/时间选择区域"""
+        panel_tokens = ["场次", "时间", "日期", "演出时间", "选择场次", "选择时间"]
+        return self._try_click_by_text_tokens(panel_tokens, timeout=1.0)
+
+    def _try_select_date_by_index(self):
+        """在场次容器内按索引选择场次"""
+        try:
+            items = self.driver.find_elements(
+                By.XPATH,
+                "//*[@resource-id='cn.damai:id/project_detail_perform_flowlayout']//android.view.ViewGroup[@clickable='true']"
+            )
+            if not items and not self.config.fast_mode:
+                try:
+                    WebDriverWait(self.driver, 1).until(
+                        EC.presence_of_element_located((By.ID, "cn.damai:id/project_detail_perform_flowlayout"))
+                    )
+                    items = self.driver.find_elements(
+                        By.XPATH,
+                        "//*[@resource-id='cn.damai:id/project_detail_perform_flowlayout']//android.view.ViewGroup[@clickable='true']"
+                    )
+                except Exception:
+                    pass
+            if not items:
+                containers = self.driver.find_elements(By.ID, "cn.damai:id/project_detail_perform_flowlayout")
+                if not containers:
+                    containers = self.driver.find_elements(
+                        AppiumBy.ANDROID_UIAUTOMATOR,
+                        'new UiSelector().resourceId("cn.damai:id/project_detail_perform_flowlayout")'
+                    )
+                if containers:
+                    vg = containers[0].find_elements(By.CLASS_NAME, "android.view.ViewGroup")
+                    items = [el for el in vg if el.get_attribute("clickable") == "true"]
+                if not items:
+                    if not self.config.fast_mode:
+                        print("  场次容器内未找到可点击项")
+                    return False
+            idx = int(self.config.date_index) if self.config.date_index is not None else 0
+            if idx < 0 or idx >= len(items):
+                if self.config.date_strict:
+                    return False
+                idx = 0
+            ok = self._click_element(items[idx])
+            if not self.config.fast_mode:
+                print(f"  场次可点击项: {len(items)}, 选择索引: {idx}, 成功: {ok}")
+            return ok
         except Exception:
             return False
 
-    def _get_current_activity(self):
-        """获取当前 Activity，失败时返回空字符串。"""
+    def _scan_date_texts(self, max_items=20):
+        """打印部分可能的场次文本，便于调试"""
         try:
-            return self.driver.current_activity or ""
-        except Exception:
-            return ""
-
-    def _click_element_center(self, element, duration=50):
-        """Click the center point of an element via gesture."""
-        rect = element.rect
-        x = rect["x"] + rect["width"] // 2
-        y = rect["y"] + rect["height"] // 2
-        self.driver.execute_script(
-            "mobile: clickGesture",
-            {"x": x, "y": y, "duration": duration},
-        )
-
-    def _safe_element_text(self, container, by, value):
-        """Read the first child text if present."""
-        try:
-            elements = container.find_elements(by=by, value=value)
-        except Exception:
-            return ""
-
-        for element in elements:
-            text = (element.text or "").strip()
-            if text:
-                return text
-        return ""
-
-    def _safe_element_texts(self, container, by, value):
-        """Read all non-empty child texts if present."""
-        try:
-            elements = container.find_elements(by=by, value=value)
-        except Exception:
-            return []
-
-        texts = []
-        seen = set()
-        for element in elements:
-            text = (element.text or "").strip()
-            if not text or text in seen:
-                continue
-            texts.append(text)
-            seen.add(text)
-        return texts
-
-    def _collect_descendant_texts(self, container):
-        """Collect all visible descendant texts under a container."""
-        texts = []
-        seen = set()
-        try:
-            descendants = container.find_elements(By.XPATH, ".//*")
-        except Exception:
-            descendants = []
-
-        for element in descendants:
-            try:
-                text = (element.text or "").strip()
-            except Exception:
-                text = ""
-            if not text or text in seen:
-                continue
-            texts.append(text)
-            seen.add(text)
-        return texts
-
-    def _build_compound_price_text(self, container):
-        """Build a human-readable price string from split price fields."""
-        prefix_ids = (
-            "cn.damai:id/bricks_dm_common_price_prefix",
-            "cn.damai:id/project_price_char",
-        )
-        value_ids = (
-            "cn.damai:id/bricks_dm_common_price_des",
-            "cn.damai:id/project_price_pre",
-            "cn.damai:id/project_price_suffix",
-        )
-        suffix_ids = (
-            "cn.damai:id/bricks_dm_common_price_suffix",
-        )
-
-        prefix = ""
-        value_parts = []
-        suffix = ""
-
-        for resource_id in prefix_ids:
-            prefix = prefix or self._safe_element_text(container, By.ID, resource_id)
-        for resource_id in value_ids:
-            value_parts.extend(self._safe_element_texts(container, By.ID, resource_id))
-        for resource_id in suffix_ids:
-            suffix = suffix or self._safe_element_text(container, By.ID, resource_id)
-
-        value = "".join(value_parts).strip()
-        compound = f"{prefix}{value}{suffix}".strip()
-        if compound == "¥":
-            compound = ""
-        if compound and prefix == "¥" and suffix == "起":
-            return compound
-        if value and value.replace(".", "", 1).isdigit() and not suffix:
-            return f"{value}元"
-        if compound and compound.startswith("¥"):
-            return compound.replace("¥", "¥", 1)
-        return compound
-
-    def _price_option_text_from_descendants(self, texts):
-        """Collapse descendant texts into a price label."""
-        if not texts:
-            return ""
-
-        filtered = []
-        ignored = {"可预约", "预售", "无票", "已预约", "缺货", "惠", "荐", "热", "售罄"}
-        for text in texts:
-            value = text.strip()
-            if not value or value in ignored:
-                continue
-            filtered.append(value)
-
-        if not filtered:
-            return ""
-
-        merged = "".join(filtered)
-        if merged.isdigit():
-            return f"{merged}元"
-        if re.fullmatch(r"[\u4e00-\u9fffA-Za-z]+[0-9]{2,5}", merged):
-            return f"{merged}元"
-        if re.fullmatch(r"[0-9]{2,5}[A-Za-z\u4e00-\u9fff]+", merged):
-            return merged
-        return merged
-
-    def _normalize_ocr_price_text(self, ocr_output):
-        """Extract the leading ticket price from noisy OCR output."""
-        digits = "".join(re.findall(r"\d", ocr_output or ""))
-        if len(digits) >= 4:
-            leading_four = int(digits[:4])
-            if 1000 <= leading_four <= 1999:
-                return f"{leading_four}元"
-        if len(digits) >= 3:
-            leading_three = int(digits[:3])
-            if 100 <= leading_three <= 999:
-                return f"{leading_three}元"
-        return ""
-
-    def _ocr_price_text_from_card(self, screenshot_path, rect):
-        """OCR the price number from a price-card crop as a last-resort fallback."""
-        if not (_MAGICK_BIN and _TESSERACT_BIN and screenshot_path and rect):
-            return ""
-
-        crop_path = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
-                crop_path = tmp_file.name
-
-            subprocess.run(
-                [
-                    _MAGICK_BIN,
-                    screenshot_path,
-                    "-crop", f"{rect['width']}x{rect['height']}+{rect['x']}+{rect['y']}",
-                    "-resize", "300%",
-                    crop_path,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
+            candidates = self.driver.find_elements(
+                By.XPATH,
+                '//*[contains(@text,"月") or contains(@text,"日") or contains(@text,":") or contains(@text,"-") or contains(@text,".") or contains(@content-desc,"月") or contains(@content-desc,"日") or contains(@content-desc,":") or contains(@content-desc,"-") or contains(@content-desc,".")]'
             )
-            result = subprocess.run(
-                [_TESSERACT_BIN, crop_path, "stdout", "-l", "eng+snum", "--psm", "6"],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            return self._normalize_ocr_price_text(result.stdout)
-        except Exception:
-            return ""
-        finally:
-            if crop_path and os.path.exists(crop_path):
+            print(f"  可能的场次文本元素: {len(candidates)}")
+            seen = set()
+            for elem in candidates[:max_items]:
                 try:
-                    os.unlink(crop_path)
-                except OSError:
-                    pass
+                    text = (elem.get_attribute("text") or "").strip()
+                    desc = (elem.get_attribute("content-desc") or "").strip()
+                    text = text or desc
+                    text = text.strip()
+                    if text and text not in seen and len(text) < 100:
+                        print(f"  - {text}")
+                        seen.add(text)
+                except Exception:
+                    continue
+        except WebDriverException:
+            return
 
-    def _keyword_tokens(self):
-        """Split the configured keyword into reusable fuzzy-match tokens."""
-        keyword = self.config.keyword or ""
-        tokens = []
-        for raw in re.split(r"[\s,，、|/]+", keyword):
-            token = normalize_text(raw)
-            if len(token) >= 2 and token not in tokens:
-                tokens.append(token)
-        return tokens
-
-    def _get_detail_title_text(self):
-        """Read title text from detail/sku pages."""
-        title = ""
+    def _get_webview_context(self):
         try:
-            title = self._safe_element_text(self.driver, By.ID, "cn.damai:id/title_tv")
+            contexts = self.driver.contexts
+            for ctx in contexts:
+                if "WEBVIEW" in ctx:
+                    return ctx
         except Exception:
-            title = ""
+            return None
+        return None
 
-        if title:
-            return title
+    def _with_context(self, ctx, fn):
+        """临时切换上下文执行"""
+        original = None
+        try:
+            original = self.driver.current_context
+        except Exception:
+            original = None
+        try:
+            if ctx and ctx != original:
+                self.driver.switch_to.context(ctx)
+            return fn()
+        finally:
+            try:
+                if original and ctx != original:
+                    self.driver.switch_to.context(original)
+            except Exception:
+                pass
 
-        title_parts = []
-        for resource_id in ("cn.damai:id/project_title_tv1", "cn.damai:id/project_title_tv2"):
-            part = self._safe_element_text(self.driver, By.ID, resource_id)
-            if part:
-                title_parts.append(part.strip())
+    def _try_click_by_text_tokens_webview(self, tokens):
+        """在 WEBVIEW 上下文尝试点击"""
+        def _run():
+            for token in tokens:
+                try:
+                    elements = self.driver.find_elements(
+                        By.XPATH,
+                        f'//*[contains(normalize-space(.), "{token}")]'
+                    )
+                    for el in elements[:3]:
+                        try:
+                            el.click()
+                            return True
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+            return False
 
-        return "".join(title_parts).strip()
+        webview = self._get_webview_context()
+        if not webview:
+            return False
+        return self._with_context(webview, _run)
 
-    def _title_matches_target(self, title_text):
-        """Check whether a page or search result title matches the configured target."""
-        normalized_title = normalize_text(title_text)
-        if not normalized_title:
+    def _tap_bottom_area(self):
+        """兜底点击底部购票区域"""
+        try:
+            size = self.driver.get_window_size()
+            x = int(size["width"] * 0.75)
+            y = int(size["height"] * 0.92)
+            self.driver.execute_script("mobile: clickGesture", {
+                "x": x,
+                "y": y,
+                "duration": 80
+            })
+            return True
+        except Exception:
+            return False
+
+    def _ensure_sku_panel(self):
+        """确保 SKU 面板已打开"""
+        max_tries = 1 if self.config.fast_mode else 3
+        for _ in range(max_tries):
+            try:
+                if self.driver.find_elements(By.ID, "cn.damai:id/layout_sku") or \
+                   self.driver.find_elements(By.ID, "cn.damai:id/sku_contanier"):
+                    return True
+            except Exception:
+                pass
+            self._tap_bottom_area()
+            time.sleep(0.2 if self.config.fast_mode else 0.6)
+            self._swipe_up_small()
+            time.sleep(0.2 if self.config.fast_mode else 0.6)
+        return False
+
+    def _try_select_city_by_index(self):
+        """按索引选择城市（从 dump 中点击）"""
+        if self.config.city_index is None:
+            return False
+        # 尝试导出当前结构
+        self._dump_page_source(path="/tmp/damai_city.xml", force=True)
+        return self._tap_from_dump(
+            "cn.damai:id/tour_list",
+            index=int(self.config.city_index),
+            class_name="android.view.ViewGroup",
+        )
+
+    def _adb_tap(self, x, y):
+        if not self.config.udid:
+            return False
+
+        try:
+            subprocess.run(
+                ["adb", "-s", self.config.udid, "shell", "input", "tap", str(int(x)), str(int(y))],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _adb_screen_size(self):
+        if not self.config.udid:
+            return None
+        try:
+            result = subprocess.run(
+                ["adb", "-s", self.config.udid, "shell", "wm", "size"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            # output: Physical size: 1080x2346
+            for line in result.stdout.splitlines():
+                if "Physical size" in line:
+                    size = line.split(":")[-1].strip()
+                    w, h = size.split("x")
+                    return {"width": int(w), "height": int(h)}
+        except Exception:
+            return None
+        return None
+
+    def _tap_right_bottom(self):
+        size = self._adb_screen_size()
+        if size:
+            return self._adb_tap(size["width"] * 0.85, size["height"] * 0.94)
+        return False
+
+    def _tap_bounds(self, bounds):
+        try:
+            # bounds format: [x1,y1][x2,y2]
+            parts = bounds.replace("[", "").split("]")
+            x1, y1 = map(int, parts[0].split(","))
+            x2, y2 = map(int, parts[1].split(","))
+            return self._adb_tap((x1 + x2) / 2, (y1 + y2) / 2)
+        except Exception:
+            return False
+
+    def _tap_from_dump(self, resource_id, index=0, class_name=None):
+        """从本地 dump 文件中按索引点击"""
+        dump_path = "/tmp/damai_after_date.xml"
+        try:
+            tree = ET.parse(dump_path)
+            root = tree.getroot()
+        except Exception:
             return False
 
         candidates = []
-        if self.item_detail:
-            candidates.extend([self.item_detail.item_name, self.item_detail.item_name_display])
-        if self.config.target_title:
-            candidates.append(self.config.target_title)
-        if self.config.keyword:
-            candidates.append(self.config.keyword)
+        for node in root.iter():
+            if node.attrib.get("resource-id") == resource_id:
+                for child in node.iter():
+                    if class_name and child.attrib.get("class") != class_name:
+                        continue
+                    if child.attrib.get("clickable") == "true":
+                        bounds = child.attrib.get("bounds")
+                        if bounds:
+                            candidates.append(bounds)
+        if not candidates:
+            return False
+        idx = max(0, min(index, len(candidates) - 1))
+        return self._tap_bounds(candidates[idx])
 
-        for candidate in candidates:
-            normalized_candidate = normalize_text(candidate)
-            if not normalized_candidate:
+    def _tap_text_from_dump(self, dump_path, text, exact=False):
+        """从 dump 文件中按文本点击"""
+        try:
+            tree = ET.parse(dump_path)
+            root = tree.getroot()
+        except Exception:
+            return False
+        for node in root.iter():
+            t = (node.attrib.get("text") or "").strip()
+            d = (node.attrib.get("content-desc") or "").strip()
+            cand = t or d
+            if not cand:
                 continue
-            if normalized_candidate in normalized_title or normalized_title in normalized_candidate:
-                return True
-
-        keyword_tokens = self._keyword_tokens()
-        if keyword_tokens and all(token in normalized_title for token in keyword_tokens):
-            return True
-
+            if exact:
+                ok = cand == text
+            else:
+                ok = text in cand
+            if ok and node.attrib.get("bounds"):
+                return self._tap_bounds(node.attrib.get("bounds"))
         return False
 
-    def _current_page_matches_target(self, page_probe):
-        """Check if the current detail/sku page already points at the expected event."""
-        if page_probe["state"] not in {"detail_page", "sku_page"}:
+    def _swipe_up_small(self):
+        """轻微上滑，展开底部面板"""
+        try:
+            size = self.driver.get_window_size()
+            x = int(size["width"] * 0.5)
+            y_start = int(size["height"] * 0.78)
+            y_end = int(size["height"] * 0.52)
+            self.driver.execute_script("mobile: swipeGesture", {
+                "left": x - 10,
+                "top": y_end,
+                "width": 20,
+                "height": y_start - y_end,
+                "direction": "up",
+                "percent": 0.7
+            })
+            return True
+        except Exception:
             return False
 
-        if not self.item_detail:
-            return True
-
-        return self._title_matches_target(self._get_detail_title_text())
-
-    def _recover_to_navigation_start(self, page_probe, max_back_steps=3):
-        """Recover to a navigable page such as homepage or search page."""
-        navigable_states = {"homepage", "search_page", "detail_page", "sku_page"}
-        current_probe = page_probe
-        if current_probe["state"] in navigable_states:
-            return current_probe
-
-        for _ in range(max_back_steps):
-            self.driver.press_keycode(4)
-            time.sleep(0.4)
-            current_probe = self.probe_current_page()
-            if current_probe["state"] in navigable_states:
-                return current_probe
-
+    def _scan_textviews(self, max_items=30):
         try:
-            self.driver.activate_app(self.config.app_package)
-            time.sleep(1)
+            elements = self.driver.find_elements(
+                AppiumBy.ANDROID_UIAUTOMATOR,
+                'new UiSelector().className("android.widget.TextView")'
+            )
+            print(f"  TextView 数量: {len(elements)}")
+            seen = set()
+            for elem in elements[:max_items]:
+                try:
+                    text = (elem.get_attribute("text") or "").strip()
+                    desc = (elem.get_attribute("content-desc") or "").strip()
+                    text = text or desc
+                    if text and text not in seen and len(text) < 100:
+                        print(f"  - {text}")
+                        seen.add(text)
+                except Exception:
+                    continue
+        except Exception:
+            return
+
+    def _dump_page_source(self, path="/tmp/damai_page_source.xml", force=False):
+        if self.config.fast_mode and not force:
+            return
+        try:
+            src = self.driver.page_source
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(src)
+            print(f"  已导出页面结构: {path}")
         except Exception:
             pass
 
-        return self.probe_current_page()
-
-    def _open_search_from_homepage(self):
-        """Enter the homepage search flow."""
-        search_selectors = [
-            (By.ID, "cn.damai:id/pioneer_homepage_header_search_btn"),
-            (By.ID, "cn.damai:id/homepage_header_search"),
-            (By.ID, "cn.damai:id/homepage_header_search_layout"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("搜索")'),
-        ]
-
-        for by, value in search_selectors:
-            if self.ultra_fast_click(by, value, timeout=0.8):
-                search_probe = self.wait_for_page_state({"search_page"}, timeout=2.5, poll_interval=0.15)
-                if search_probe["state"] == "search_page":
-                    return True
-
-        search_probe = self.probe_current_page()
-        if search_probe["state"] == "search_page":
-            return True
-
-        logger.warning("未能从首页打开搜索页")
-        return False
-
-    def _submit_search_keyword(self):
-        """Fill the configured keyword into the Damai search box and submit."""
-        if not self.config.keyword:
-            logger.warning("缺少 keyword，无法执行自动搜索")
-            return False
-
+    def _try_select_any_price(self):
+        """尝试选择任意可见票价"""
         try:
-            search_input = WebDriverWait(self.driver, 3).until(
-                EC.presence_of_element_located((By.ID, "cn.damai:id/header_search_v2_input"))
+            candidates = self.driver.find_elements(
+                By.XPATH,
+                '//*[contains(@text,"¥") or contains(@text,"元") or contains(@content-desc,"¥") or contains(@content-desc,"元")]'
             )
-        except TimeoutException:
-            logger.warning("未找到搜索输入框")
+            for elem in candidates[:10]:
+                if self._click_element(elem):
+                    return True
+            return False
+        except WebDriverException:
             return False
 
-        self._click_element_center(search_input)
-        time.sleep(0.2)
+    def _try_select_price_by_resource(self):
+        """根据资源 id 关键词选择票价"""
+        try:
+            elements = self.driver.find_elements(
+                AppiumBy.ANDROID_UIAUTOMATOR,
+                'new UiSelector().resourceIdMatches(".*price.*|.*ticket.*|.*sku.*").clickable(true)'
+            )
+            for el in elements[:5]:
+                if self._click_element(el):
+                    return True
+            return False
+        except WebDriverException:
+            return False
 
-        current_text = (search_input.text or "").strip()
-        if current_text and current_text != self.config.keyword:
-            if self._has_element(By.ID, "cn.damai:id/header_search_v2_input_delete"):
-                self.ultra_fast_click(By.ID, "cn.damai:id/header_search_v2_input_delete", timeout=0.8)
-                time.sleep(0.1)
-            else:
+    def _try_select_price_by_layout(self):
+        """在 SKU 容器内按位置选择票价"""
+        try:
+            sku = self.driver.find_elements(By.ID, "cn.damai:id/layout_sku")
+            if not sku:
+                return False
+            sku = sku[0]
+            items = sku.find_elements(By.CLASS_NAME, "android.view.ViewGroup")
+            candidates = []
+            for el in items:
                 try:
-                    search_input.clear()
+                    if el.get_attribute("clickable") != "true":
+                        continue
+                    rect = el.rect
+                    # 过滤掉顶部区域（场次区域）
+                    if rect.get("y", 0) < 850:
+                        continue
+                    candidates.append(el)
+                except Exception:
+                    continue
+            if not candidates:
+                return False
+            idx = int(self.config.price_index) if self.config.price_index is not None else 0
+            idx = max(0, min(idx, len(candidates) - 1))
+            ok = self._click_element(candidates[idx])
+            if not self.config.fast_mode:
+                print(f"  票价可点击项: {len(candidates)}, 选择索引: {idx}, 成功: {ok}")
+            return ok
+        except Exception:
+            return False
+
+    def _try_select_price_in_flowlayout(self):
+        """在票档 flowlayout 内按索引选择"""
+        try:
+            items = self.driver.find_elements(
+                By.XPATH,
+                "//*[@resource-id='cn.damai:id/project_detail_perform_price_flowlayout']//android.widget.FrameLayout[@clickable='true']"
+            )
+            if not items and not self.config.fast_mode:
+                try:
+                    WebDriverWait(self.driver, 1).until(
+                        EC.presence_of_element_located((By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"))
+                    )
+                    items = self.driver.find_elements(
+                        By.XPATH,
+                        "//*[@resource-id='cn.damai:id/project_detail_perform_price_flowlayout']//android.widget.FrameLayout[@clickable='true']"
+                    )
                 except Exception:
                     pass
-
-        if (search_input.text or "").strip() != self.config.keyword:
-            search_input.send_keys(self.config.keyword)
-
-        self.driver.press_keycode(66)
-        try:
-            WebDriverWait(self.driver, 5).until(
-                lambda drv: len(drv.find_elements(By.ID, "cn.damai:id/ll_search_item")) > 0
-            )
-        except TimeoutException:
-            logger.warning("搜索结果加载超时")
-            return False
-
-        if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("演出")'):
-            self.smart_wait_and_click(
-                AppiumBy.ANDROID_UIAUTOMATOR,
-                'new UiSelector().text("演出")',
-                timeout=0.8,
-            )
-            time.sleep(0.2)
-
-        return True
-
-    def _score_search_result(self, title_text, venue_text):
-        """Score a search result against the configured target."""
-        normalized_title = normalize_text(title_text)
-        normalized_venue = normalize_text(venue_text)
-        if not normalized_title:
-            return -1
-
-        score = 0
-        if self._title_matches_target(title_text):
-            score += 100
-
-        normalized_keyword = normalize_text(self.config.keyword)
-        if normalized_keyword:
-            if normalized_keyword == normalized_title:
-                score += 80
-            elif normalized_keyword in normalized_title:
-                score += 50
-
-        keyword_tokens = self._keyword_tokens()
-        if keyword_tokens:
-            token_hits = sum(1 for token in keyword_tokens if token in normalized_title)
-            score += token_hits * 20
-            if token_hits == len(keyword_tokens) and len(keyword_tokens) >= 2:
-                score += 30
-
-        normalized_city = normalize_text(city_keyword(self.config.city))
-        if normalized_city and normalized_city in normalized_title:
-            score += 20
-
-        if self.item_detail:
-            expected_venue = normalize_text(self.item_detail.venue_name)
-            if expected_venue and expected_venue in normalized_venue:
-                score += 20
-
-            expected_city = normalize_text(self.item_detail.city_keyword)
-            if expected_city and expected_city in normalized_title:
-                score += 10
-
-        if self.config.target_venue:
-            expected_venue = normalize_text(self.config.target_venue)
-            if expected_venue and expected_venue in normalized_venue:
-                score += 30
-
-        return score
-
-    def _scroll_search_results(self):
-        """Scroll the search result list upward."""
-        self.driver.execute_script(
-            "mobile: swipeGesture",
-            {
-                "left": 96,
-                "top": 520,
-                "width": 1088,
-                "height": 1500,
-                "direction": "up",
-                "percent": 0.55,
-                "speed": 5000,
-            },
-        )
-
-    def _open_target_from_search_results(self, max_scrolls=2):
-        """Open the best-matching event from search results."""
-        seen_titles = set()
-
-        for _ in range(max_scrolls + 1):
-            result_cards = self.driver.find_elements(By.ID, "cn.damai:id/ll_search_item")
-            best_match = None
-            best_score = -1
-
-            for card in result_cards:
-                title_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_name")
-                venue_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_venueName")
-                score = self._score_search_result(title_text, venue_text)
-                if title_text:
-                    seen_titles.add(title_text)
-                if score > best_score:
-                    best_score = score
-                    best_match = card
-
-            if best_match is not None and best_score >= 60:
-                self._click_element_center(best_match)
-                detail_probe = self.wait_for_page_state({"detail_page", "sku_page"}, timeout=8)
-                if detail_probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(detail_probe):
-                    return True
-
-                logger.warning("已进入详情页，但标题与目标演出不一致，返回搜索结果继续尝试")
-                self.driver.press_keycode(4)
-                time.sleep(0.5)
-            else:
-                logger.info(f"本屏搜索结果未找到明确匹配项，已扫描: {len(seen_titles)} 条")
-
-            if _ < max_scrolls:
-                self._scroll_search_results()
-                time.sleep(0.4)
-
-        logger.warning("自动搜索后未找到目标演出")
-        return False
-
-    def collect_search_results(self, max_scrolls=0, max_results=5):
-        """Collect search result summaries without opening them."""
-        seen = set()
-        collected = []
-
-        for scroll_index in range(max_scrolls + 1):
-            result_cards = self.driver.find_elements(By.ID, "cn.damai:id/ll_search_item")
-            for card in result_cards:
-                title_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_name")
-                if not title_text:
-                    continue
-
-                normalized_title = normalize_text(title_text)
-                if normalized_title in seen:
-                    continue
-
-                venue_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_venueName")
-                city_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_city").replace("|", "").strip()
-                time_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_time")
-                price_text = self._build_compound_price_text(card)
-                score = self._score_search_result(title_text, venue_text)
-
-                collected.append({
-                    "title": title_text,
-                    "venue": venue_text,
-                    "city": city_text,
-                    "time": time_text,
-                    "price": price_text,
-                    "score": score,
-                })
-                seen.add(normalized_title)
-
-            if len(collected) >= max_results:
-                break
-
-            if scroll_index < max_scrolls:
-                self._scroll_search_results()
-                time.sleep(0.4)
-
-        collected.sort(key=lambda item: item["score"], reverse=True)
-        return collected[:max_results]
-
-    def navigate_to_target_event(self, initial_probe=None):
-        """Auto-navigate from homepage/search to the target event detail page."""
-        if not self.config.auto_navigate:
-            return False
-
-        page_probe = initial_probe or self.probe_current_page()
-        page_probe = self._recover_to_navigation_start(page_probe)
-
-        if page_probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(page_probe):
-            return True
-
-        if page_probe["state"] in {"detail_page", "sku_page"} and not self._current_page_matches_target(page_probe):
-            self.driver.press_keycode(4)
-            time.sleep(0.5)
-            page_probe = self.probe_current_page()
-
-        if page_probe["state"] == "homepage":
-            logger.info("当前位于首页，开始自动搜索目标演出")
-            if not self._open_search_from_homepage():
+            if not items:
                 return False
-            page_probe = self.probe_current_page()
-
-        if page_probe["state"] != "search_page":
-            logger.warning(f"当前页面不适合自动搜索: {page_probe['state']}")
-            return False
-
-        if not self._submit_search_keyword():
-            return False
-
-        return self._open_target_from_search_results()
-
-    def discover_target_event(self, keyword_candidates, initial_probe=None, search_scrolls=1, result_limit=5):
-        """Try multiple keywords, collect candidate summaries, and open the best match."""
-        page_probe = initial_probe or self.probe_current_page()
-        page_probe = self._recover_to_navigation_start(page_probe)
-
-        if page_probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(page_probe):
-            return {
-                "used_keyword": self.config.keyword,
-                "search_results": [],
-                "page_probe": page_probe,
-            }
-
-        if page_probe["state"] in {"detail_page", "sku_page"} and not self._current_page_matches_target(page_probe):
-            self.driver.press_keycode(4)
-            time.sleep(0.5)
-            page_probe = self.probe_current_page()
-
-        if page_probe["state"] == "homepage":
-            if not self._open_search_from_homepage():
-                return None
-            page_probe = self.probe_current_page()
-
-        if page_probe["state"] != "search_page":
-            logger.warning(f"当前页面不适合执行提示词检索: {page_probe['state']}")
-            return None
-
-        tried = set()
-        for keyword in keyword_candidates:
-            normalized_keyword = normalize_text(keyword)
-            if not normalized_keyword or normalized_keyword in tried:
-                continue
-
-            self.config.keyword = keyword
-            logger.info(f"尝试搜索关键词: {keyword}")
-            if not self._submit_search_keyword():
-                tried.add(normalized_keyword)
-                continue
-
-            search_results = self.collect_search_results(max_scrolls=search_scrolls, max_results=result_limit)
-            if search_results:
-                logger.info(f"搜索到 {len(search_results)} 条候选结果，最高分 {search_results[0]['score']}")
-            if search_results and search_results[0]["score"] >= 40 and self._open_target_from_search_results(max_scrolls=search_scrolls):
-                page_probe = self.probe_current_page()
-                return {
-                    "used_keyword": keyword,
-                    "search_results": search_results,
-                    "page_probe": page_probe,
-                }
-
-            tried.add(normalized_keyword)
-
-        logger.warning("根据提示词尝试多个搜索关键词后，仍未打开目标演出")
-        return None
-
-    def select_performance_date(self):
-        """选择演出场次日期"""
-        if not self.config.date:
-            return
-
-        date_selector = f'new UiSelector().textContains("{self.config.date}")'
-        if self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, date_selector, timeout=1.0):
-            logger.info(f"选择场次日期: {self.config.date}")
-        else:
-            logger.debug(f"未找到日期 '{self.config.date}'，使用默认场次")
-
-    def check_session_valid(self):
-        """检查大麦 App 登录状态是否有效"""
-        activity = self._get_current_activity()
-        if "LoginActivity" in activity or "SignActivity" in activity:
-            logger.error("检测到登录页面，大麦 App 登录已过期，请重新登录")
-            return False
-
-        login_prompt_selectors = [
-            'new UiSelector().textContains("请先登录")',
-            'new UiSelector().textContains("登录/注册")',
-        ]
-        for selector in login_prompt_selectors:
-            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, selector):
-                logger.error("检测到登录提示，请重新登录大麦 App")
-                return False
-
-        return True
-
-    def wait_for_sale_start(self):
-        """等待开售时间，在开售前 countdown_lead_ms 毫秒开始轮询。"""
-        if self.config.sell_start_time is None:
-            return
-
-        _tz_shanghai = timezone(timedelta(hours=8))
-        sell_time = datetime.fromisoformat(self.config.sell_start_time)
-        # Ensure timezone-aware
-        if sell_time.tzinfo is None:
-            sell_time = sell_time.replace(tzinfo=_tz_shanghai)
-
-        now = datetime.now(tz=_tz_shanghai)
-        if now >= sell_time:
-            logger.info("开售时间已过，跳过等待")
-            return
-
-        lead_delta = timedelta(milliseconds=self.config.countdown_lead_ms)
-        poll_start = sell_time - lead_delta
-        sleep_seconds = (poll_start - now).total_seconds()
-
-        if sleep_seconds > 0:
-            logger.info(
-                f"等待开售，将在 {self.config.sell_start_time} 前 "
-                f"{self.config.countdown_lead_ms}ms 开始轮询"
-            )
-            time.sleep(sleep_seconds)
-
-        # Tight polling loop (~200ms) until button becomes actionable or timeout
-        deadline = sell_time + timedelta(seconds=5)
-        while datetime.now(tz=_tz_shanghai) < deadline:
-            if self._has_element(
-                AppiumBy.ANDROID_UIAUTOMATOR,
-                'new UiSelector().textMatches(".*立即.*|.*购买.*|.*选座.*")'
-            ):
-                logger.info("检测到可购买按钮，开售已开始")
-                return
-            time.sleep(0.2)
-
-        logger.warning("等待开售超时，继续执行")
-
-    def verify_order_result(self, timeout=5):
-        """验证订单提交结果"""
-        start = time.time()
-        while time.time() - start < timeout:
-            activity = self._get_current_activity()
-
-            # Success: payment page
-            if any(kw in activity for kw in ("Pay", "Cashier", "AlipayClient")):
-                logger.info("订单提交成功，已跳转支付页面")
-                return "success"
-
-            # Check page text for various outcomes
-            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("支付")'):
-                logger.info("订单提交成功，检测到支付页面")
-                return "success"
-            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("已售罄")') or \
-               self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("库存不足")') or \
-               self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("暂时无票")'):
-                logger.warning("票已售罄")
-                return "sold_out"
-            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("滑块")') or \
-               self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("验证")'):
-                logger.warning("触发验证码")
-                return "captcha"
-            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("未支付")'):
-                logger.warning("已有未支付订单")
-                return "existing_order"
-
-            time.sleep(0.3)
-
-        logger.warning("订单验证超时")
-        return "timeout"
-
-    def _fast_retry_from_current_state(self):
-        """根据当前页面状态进行快速重试。"""
-        page_probe = self.probe_current_page()
-        state = page_probe["state"]
-
-        if state in ("detail_page", "sku_page"):
-            if self.item_detail and not self._current_page_matches_target(page_probe):
-                logger.info("当前详情页不是目标演出，转为自动导航")
-                return self.navigate_to_target_event(page_probe) and self.run_ticket_grabbing()
-            return self.run_ticket_grabbing()
-        elif state == "order_confirm_page":
-            if not self.config.if_commit_order:
-                submit_selectors = [
-                    (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
-                    (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
-                    (By.XPATH, '//*[contains(@text,"提交")]')
-                ]
-                return self.smart_wait_for_element(*submit_selectors[0], submit_selectors[1:])
-            submit_selectors = [
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
-                (By.XPATH, '//*[contains(@text,"提交")]')
-            ]
-            return self.smart_wait_and_click(*submit_selectors[0], submit_selectors[1:])
-        else:
-            if self.config.auto_navigate:
-                return self.navigate_to_target_event(page_probe) and self.run_ticket_grabbing()
-            self.driver.press_keycode(4)  # Android Back
-            time.sleep(0.5)
-            return self.run_ticket_grabbing()
-
-    def dismiss_startup_popups(self):
-        """处理首启的一次性系统/应用弹窗。"""
-        dismissed = False
-
-        popup_clicks = [
-            (By.ID, "android:id/ok"),  # Android 全屏提示
-            (By.ID, "cn.damai:id/id_boot_action_agree"),  # 大麦隐私协议
-            (By.ID, "cn.damai:id/damai_theme_dialog_cancel_btn"),  # 开启消息通知
-            (By.ID, "cn.damai:id/damai_theme_dialog_close_layout"),  # 新版升级提示关闭按钮
-            (By.ID, "cn.damai:id/damai_theme_dialog_close_btn"),  # 新版升级提示关闭图标
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("Cancel")'),  # Add to home screen
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("下次再说")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("我知道了")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("知道了")'),
-        ]
-
-        for by, value in popup_clicks:
-            if self._has_element(by, value):
-                if self.ultra_fast_click(by, value):
-                    dismissed = True
-                    time.sleep(0.3)
-
-        return dismissed
-
-    def is_reservation_sku_mode(self):
-        """识别当前 SKU 页是否仍处于抢票预约流，而非正式下单流。"""
-        reservation_indicators = [
-            (By.ID, "cn.damai:id/btn_cancel_reservation"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("预约想看场次")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("预约想看票档")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("提交抢票预约")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("已预约")'),
-        ]
-
-        return any(self._has_element(by, value) for by, value in reservation_indicators)
-
-    def get_visible_date_options(self):
-        """Return visible date options on the current page."""
-        dates = []
-        seen = set()
-        for element in self.driver.find_elements(By.ID, "cn.damai:id/tv_date"):
-            text = (element.text or "").strip()
-            if not text or text in seen:
-                continue
-            dates.append(text)
-            seen.add(text)
-        return dates
-
-    def get_visible_price_options(self):
-        """Return visible price options from the current sku page."""
-        try:
-            price_container = self.driver.find_element(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout")
+            idx = int(self.config.price_index) if self.config.price_index is not None else 0
+            idx = max(0, min(idx, len(items) - 1))
+            ok = self._click_element(items[idx])
+            if not self.config.fast_mode:
+                print(f"  票档可点击项: {len(items)}, 选择索引: {idx}, 成功: {ok}")
+            return ok
         except Exception:
-            return []
-
-        options = []
-        try:
-            cards = price_container.find_elements(By.CLASS_NAME, "android.widget.FrameLayout")
-        except Exception:
-            cards = []
-
-        cards = [card for card in cards if str(card.get_attribute("clickable")).lower() == "true"]
-        screenshot_path = None
-        if cards and _MAGICK_BIN and _TESSERACT_BIN:
-            try:
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
-                    screenshot_path = tmp_file.name
-                self.driver.get_screenshot_as_file(screenshot_path)
-            except Exception:
-                screenshot_path = None
-
-        for index, card in enumerate(cards):
-            texts = self._collect_descendant_texts(card)
-            text = self._price_option_text_from_descendants(texts)
-            source = "ui" if text else ""
-            tag = ""
-            for candidate in texts:
-                if candidate in {"可预约", "预售", "无票", "已预约", "缺货", "售罄", "已售罄", "可选"}:
-                    tag = candidate
-                    break
-
-            if not text and screenshot_path:
-                text = self._ocr_price_text_from_card(screenshot_path, card.rect)
-                if text:
-                    source = "ocr"
-
-            if not text and not tag:
-                continue
-
-            options.append({
-                "index": index,
-                "text": text,
-                "tag": tag,
-                "raw_texts": texts,
-                "source": source or "ui",
-            })
-
-        if screenshot_path and os.path.exists(screenshot_path):
-            try:
-                os.unlink(screenshot_path)
-            except OSError:
-                pass
-
-        return options
-
-    def _get_detail_venue_text(self):
-        """Read venue text from the detail page if present."""
-        for resource_id in ("cn.damai:id/venue_name_0", "cn.damai:id/tv_project_venueName"):
-            value = self._safe_element_text(self.driver, By.ID, resource_id)
-            if value:
-                return value.strip()
-        return ""
-
-    def ensure_sku_page_for_inspection(self, page_probe=None):
-        """Safely enter the sku page so prompt-based flows can inspect dates and prices."""
-        page_probe = page_probe or self.probe_current_page()
-        if page_probe["state"] == "sku_page":
-            return page_probe
-
-        if page_probe["state"] != "detail_page":
-            return page_probe
-
-        if self.config.date:
-            self.select_performance_date()
-
-        city_selectors = [
-            (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{self.config.city}")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().textContains("{self.config.city}")'),
-            (By.XPATH, f'//*[@text="{self.config.city}"]'),
-        ]
-        self.smart_wait_and_click(*city_selectors[0], city_selectors[1:], timeout=0.8)
-
-        book_selectors = [
-            (By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*")'),
-            (By.XPATH, '//*[contains(@text,"预约") or contains(@text,"购买")]'),
-        ]
-        if not self.smart_wait_and_click(*book_selectors[0], book_selectors[1:], timeout=1.0):
-            return self.probe_current_page()
-
-        return self.wait_for_page_state({"sku_page", "order_confirm_page"}, timeout=5)
-
-    def inspect_current_target_event(self, page_probe=None):
-        """Summarize the currently opened event for prompt-based confirmation."""
-        page_probe = page_probe or self.probe_current_page()
-        summary = {
-            "state": page_probe["state"],
-            "title": self._get_detail_title_text(),
-            "venue": self._get_detail_venue_text(),
-            "dates": [],
-            "price_options": [],
-            "reservation_mode": page_probe.get("reservation_mode", False),
-        }
-
-        sku_probe = self.ensure_sku_page_for_inspection(page_probe)
-        summary["state"] = sku_probe["state"]
-        if not summary["title"]:
-            summary["title"] = self._get_detail_title_text()
-        if not summary["venue"]:
-            summary["venue"] = self._get_detail_venue_text()
-
-        if sku_probe["state"] == "sku_page":
-            summary["reservation_mode"] = sku_probe.get("reservation_mode", False)
-            summary["dates"] = self.get_visible_date_options()
-            summary["price_options"] = self.get_visible_price_options()
-
-        return summary
-
-    def probe_current_page(self):
-        """探测当前页面状态和关键控件可见性。"""
-        state = "unknown"
-        current_activity = self._get_current_activity()
-        purchase_button = self._has_element(By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl")
-        detail_price_summary = self._has_element(By.ID, "cn.damai:id/project_detail_price_layout")
-        sku_price_container = self._has_element(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout") or \
-            self._has_element(By.ID, "cn.damai:id/layout_price") or \
-            self._has_element(By.ID, "cn.damai:id/tv_price_name")
-        quantity_picker = self._has_element(By.ID, "layout_num")
-        submit_button = self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")')
-        reservation_mode = False
-
-        if self._has_element(By.ID, "cn.damai:id/id_boot_action_agree"):
-            state = "consent_dialog"
-        elif "MainActivity" in current_activity or \
-                self._has_element(By.ID, "cn.damai:id/homepage_header_search") or \
-                self._has_element(By.ID, "cn.damai:id/pioneer_homepage_header_search_btn"):
-            state = "homepage"
-        elif "SearchActivity" in current_activity or self._has_element(By.ID, "cn.damai:id/header_search_v2_input"):
-            state = "search_page"
-        elif submit_button:
-            state = "order_confirm_page"
-        elif "NcovSkuActivity" in current_activity or \
-                self._has_element(By.ID, "cn.damai:id/layout_sku") or \
-                self._has_element(By.ID, "cn.damai:id/sku_contanier"):
-            state = "sku_page"
-        elif "ProjectDetailActivity" in current_activity or purchase_button or detail_price_summary or \
-                self._has_element(By.ID, "cn.damai:id/title_tv"):
-            state = "detail_page"
-
-        if state == "sku_page":
-            reservation_mode = self.is_reservation_sku_mode()
-
-        result = {
-            "state": state,
-            "purchase_button": purchase_button,
-            "price_container": sku_price_container or detail_price_summary,
-            "quantity_picker": quantity_picker,
-            "submit_button": submit_button,
-            "reservation_mode": reservation_mode,
-        }
-
-        logger.info(f"当前页面状态: {result['state']}")
-        if current_activity:
-            logger.debug(f"当前 Activity: {current_activity}")
-        logger.debug(
-            "探测结果: "
-            f"purchase_button={result['purchase_button']}, "
-            f"price_container={result['price_container']}, "
-            f"quantity_picker={result['quantity_picker']}, "
-            f"submit_button={result['submit_button']}, "
-            f"reservation_mode={result['reservation_mode']}"
-        )
-
-        return result
+            return False
 
     def run_ticket_grabbing(self):
         """执行抢票主流程"""
         try:
-            self._terminal_failure_reason = None
-            logger.info("开始抢票流程...")
+            print("开始抢票流程...")
             start_time = time.time()
+            self.last_error = ""
 
-            self.dismiss_startup_popups()
-
-            if not self.check_session_valid():
-                self._set_terminal_failure("session_invalid")
-                return False
-
-            page_probe = self.probe_current_page()
-
-            if page_probe["state"] not in {"detail_page", "sku_page"} or \
-                    (self.item_detail and not self._current_page_matches_target(page_probe)):
-                if self.config.auto_navigate:
-                    logger.info("当前不在目标演出页，尝试自动导航")
-                    if not self.navigate_to_target_event(page_probe):
-                        return False
-                    page_probe = self.probe_current_page()
-                else:
-                    logger.warning("当前不在演出详情页，请先手动打开目标演出详情页")
-                    return False
-
-            if self.config.probe_only:
-                detail_ready = page_probe["state"] == "detail_page" and page_probe["purchase_button"] and page_probe["price_container"]
-                sku_ready = page_probe["state"] == "sku_page" and page_probe["price_container"]
-
-                if detail_ready or sku_ready:
-                    logger.info("probe_only 模式: 详情页关键控件已就绪，停止在购票点击前")
-                    end_time = time.time()
-                    logger.info(f"探测完成，耗时: {end_time - start_time:.2f}秒")
-                    return True
-
-                logger.warning("probe_only 模式: 详情页关键控件未就绪")
-                return False
-
-            # Wait for sale start if configured
-            self.wait_for_sale_start()
-
-            if page_probe["state"] == "detail_page":
-                # 0. 选择场次日期（在城市选择前）
-                self.select_performance_date()
-
-                # 1. 城市选择 - 准备多个备选方案
-                logger.info("选择城市...")
+            # 1. 城市选择 - 准备多个备选方案
+            print("选择城市...")
+            if self.config.city:
+                city_tokens = [self.config.city, f"{self.config.city}站"]
                 city_selectors = [
                     (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{self.config.city}")'),
                     (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().textContains("{self.config.city}")'),
                     (By.XPATH, f'//*[@text="{self.config.city}"]')
                 ]
                 if not self.smart_wait_and_click(*city_selectors[0], city_selectors[1:]):
-                    logger.warning("城市选择失败")
-                    return False
+                    if not self._try_click_by_text_tokens(city_tokens, timeout=1.0):
+                        if not self._try_select_city_by_index():
+                            print("城市未选中，继续下一步")
 
-                # 2. 点击预约按钮 - 多种可能的按钮文本
-                logger.info("点击预约按钮...")
-                book_selectors = [
-                    (By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"),
-                    (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*")'),
-                    (By.XPATH, '//*[contains(@text,"预约") or contains(@text,"购买")]')
-                ]
-                if not self.smart_wait_and_click(*book_selectors[0], book_selectors[1:]):
-                    logger.warning("预约按钮点击失败")
-                    return False
-                page_probe = self.wait_for_page_state({"sku_page", "order_confirm_page"}, timeout=5)
+            # 2. 点击预约按钮 - 多种可能的按钮文本
+            print("点击预约按钮...")
+            book_selectors = [
+                (By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"),
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*|.*购票.*|.*抢票.*|.*预售.*|.*开抢.*|.*开售.*")'),
+                (By.XPATH, '//*[contains(@text,"预约") or contains(@text,"购买") or contains(@text,"购票") or contains(@text,"抢票") or contains(@text,"开售") or contains(@text,"预售")]'),
+                (By.XPATH, '//*[contains(@content-desc,"预约") or contains(@content-desc,"购买") or contains(@content-desc,"购票") or contains(@content-desc,"抢票")]'),
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().resourceIdMatches(".*purchase.*|.*buy.*|.*ticket.*")'),
+            ]
+            if not self.smart_wait_and_click(*book_selectors[0], book_selectors[1:]):
+                # 兜底：按文本 token 找按钮
+                if not self._try_click_by_text_tokens(["预约", "购买", "购票", "抢票", "开售", "预售", "立即"]):
+                    if not self._tap_bottom_area():
+                        print("预约按钮点击失败")
+                        return False
+            # 尝试展开场次/票价面板
+            self._swipe_up_small()
+            time.sleep(0.2 if self.config.fast_mode else 0.8)
+            if self._ensure_sku_panel():
+                if not self.config.fast_mode:
+                    print("已检测到票档面板")
             else:
-                logger.info("当前已在票档选择页，跳过城市和预约按钮步骤")
-                # 新版 SKU 页会先展示日期卡片，需在此再次选择场次后才会展开票档列表。
-                self.select_performance_date()
-                page_probe = self.probe_current_page()
+                print("未检测到票档面板，继续尝试选择")
 
-            if page_probe["state"] == "sku_page" and page_probe.get("reservation_mode"):
-                logger.warning(
-                    "检测到当前页面仍是“预售/抢票预约”流程，继续点击底部按钮只会提交预约，不会进入订单确认页"
-                )
-                self._set_terminal_failure("reservation_only")
-                return False
-
-            # 3. 票价选择 - 优化查找逻辑
-            logger.info("选择票价...")
-            # Try text-based price matching first
-            try:
-                price_text_selector = f'new UiSelector().textContains("{self.config.price}")'
-                if self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, price_text_selector, timeout=1.0):
-                    logger.info(f"通过文本匹配选择票价: {self.config.price}")
+            # 3. 场次选择（时间/日期）
+            if self.config.date:
+                print("选择场次...")
+                self._try_open_time_panel()
+                time.sleep(0.2 if self.config.fast_mode else 0.6)
+                if self.config.date_index is not None:
+                    if self._try_select_date_by_index():
+                        print(f"  已按索引选择场次: {self.config.date_index}")
+                    else:
+                        if self._tap_from_dump(
+                            "cn.damai:id/project_detail_perform_flowlayout",
+                            index=int(self.config.date_index),
+                            class_name="android.view.ViewGroup",
+                        ):
+                            print(f"  已通过ADB选择场次: {self.config.date_index}")
+                        else:
+                            print(f"  按索引选择场次失败: {self.config.date_index}")
                 else:
-                    raise Exception("text match failed")
-            except Exception:
-                # Fall back to index-based selection (existing code)
-                logger.info(f"文本匹配失败，使用索引选择票价: price_index={self.config.price_index}")
-                try:
-                    price_container = self.driver.find_element(By.ID, 'cn.damai:id/project_detail_perform_price_flowlayout')
-                    target_price = price_container.find_element(
-                        AppiumBy.ANDROID_UIAUTOMATOR,
-                        f'new UiSelector().className("android.widget.FrameLayout").index({self.config.price_index}).clickable(true)'
-                    )
-                    self.driver.execute_script('mobile: clickGesture', {'elementId': target_price.id})
-                except Exception as e:
-                    logger.warning(f"票价选择失败，启动备用方案: {e}")
-                    price_container = self.wait.until(
-                        EC.presence_of_element_located((By.ID, 'cn.damai:id/project_detail_perform_price_flowlayout')))
-                    target_price = price_container.find_element(
-                        AppiumBy.ANDROID_UIAUTOMATOR,
-                        f'new UiSelector().className("android.widget.FrameLayout").index({self.config.price_index}).clickable(true)'
-                    )
-                    self.driver.execute_script('mobile: clickGesture', {'elementId': target_price.id})
+                    tokens = self._build_date_tokens(self.config.date)
+                    if not self._try_click_by_text_tokens(tokens, timeout=1.2):
+                        if self._try_click_by_text_tokens_webview(tokens):
+                            pass
+                        else:
+                            if not self.config.fast_mode:
+                                if not self._try_scroll_and_click(tokens):
+                                    print("场次选择失败")
+                                try:
+                                    print(f"  当前上下文: {self.driver.current_context}")
+                                    print(f"  可用上下文: {self.driver.contexts}")
+                                except Exception:
+                                    pass
+                                self._scan_date_texts()
+                                self._scan_textviews()
+                                self._dump_page_source()
+                            if self.config.date_strict:
+                                return False
+                if not self.config.fast_mode:
+                    time.sleep(0.6)
+                    self._dump_page_source(path="/tmp/damai_after_date.xml")
 
-            # 4. 数量选择
-            logger.info("选择数量...")
-            if self.driver.find_elements(by=By.ID, value='layout_num'):
+            # 4. 票价选择 - 优化查找逻辑
+            print("选择票价...")
+            try:
+                price_selected = False
+                if not self.config.fast_mode:
+                    self._dump_page_source(path="/tmp/damai_after_date.xml", force=True)
+                # 优先按文本匹配
+                if self._tap_from_dump(
+                    "cn.damai:id/project_detail_perform_price_flowlayout",
+                    index=int(self.config.price_index) if self.config.price_index is not None else 0,
+                    class_name="android.widget.FrameLayout",
+                ):
+                    price_selected = True
+                if self.config.price_index is not None:
+                    if not price_selected:
+                        if self._try_select_price_in_flowlayout():
+                            price_selected = True
+                        else:
+                            if self._tap_from_dump(
+                                "cn.damai:id/project_detail_perform_price_flowlayout",
+                                index=int(self.config.price_index),
+                                class_name="android.widget.FrameLayout",
+                            ):
+                                price_selected = True
+                            else:
+                                if self.config.fast_mode:
+                                    print("票档未命中索引，判定抢票失败，准备重试")
+                                    return False
+                                else:
+                                    raise NoSuchElementException("price index not found")
+                if self.config.price:
+                    price_token = str(self.config.price)
+                    if not price_selected:
+                        if self._try_click_by_text_tokens([price_token, f"{price_token}元", f"¥{price_token}"]):
+                            price_selected = True
+                        elif self._try_click_by_text_tokens_webview([price_token, f"{price_token}元", f"¥{price_token}"]):
+                            price_selected = True
+                        elif self._try_select_price_in_flowlayout():
+                            price_selected = True
+                        elif self._try_select_price_by_layout():
+                            price_selected = True
+                        else:
+                            raise NoSuchElementException("price text not found")
+                else:
+                    if self._try_select_any_price():
+                        pass
+                    else:
+                        print("未能自动选择票价，继续下一步")
+                        # 不抛错，可能只有单一票价或默认已选
+            except Exception as e:
+                print(f"票价选择失败，启动备用方案: {e}")
+                # 备用方案
+                if self._try_select_price_in_flowlayout():
+                    pass
+                else:
+                    container_ids = [
+                        'cn.damai:id/project_detail_perform_price_flowlayout',
+                        'cn.damai:id/project_detail_perform_price_list',
+                        'cn.damai:id/project_detail_perform_price_recycler',
+                    ]
+                    price_container = None
+                    for cid in container_ids:
+                        try:
+                            price_container = self.wait.until(
+                                EC.presence_of_element_located((By.ID, cid))
+                            )
+                            if price_container:
+                                break
+                        except TimeoutException:
+                            continue
+
+                    if price_container:
+                        target_price = price_container.find_element(
+                            AppiumBy.ANDROID_UIAUTOMATOR,
+                            f'new UiSelector().className("android.widget.FrameLayout").index({self.config.price_index}).clickable(true)'
+                        )
+                        self._click_element(target_price)
+                    else:
+                        if not self._try_select_any_price():
+                            if not self._try_select_price_by_resource():
+                                if not self._try_select_price_by_layout():
+                                    print("未找到票价容器，继续下一步")
+
+                # if not self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR,
+                #                              'new UiSelector().textMatches(".*799.*|.*\\d+元.*")'):
+                #     return False
+
+            # 4.5 票档确认（右下角确定/购买）
+            print("确认票档...")
+            # 直接点击右下角按钮，避免误点左下角价格
+            self._tap_right_bottom()
+
+            # 5. 数量选择
+            print("选择数量...")
+            if len(self.config.users) <= 1:
+                pass
+            elif self.driver.find_elements(by=By.ID, value='layout_num'):
                 clicks_needed = len(self.config.users) - 1
                 if clicks_needed > 0:
                     try:
@@ -1323,68 +931,73 @@ class DamaiBot:
                             })
                             time.sleep(0.02)
                     except Exception as e:
-                        logger.error(f"快速点击加号失败: {e}")
+                        print(f"快速点击加号失败: {e}")
 
             # if self.driver.find_elements(by=By.ID, value='layout_num') and self.config.users is not None:
             #     for i in range(len(self.config.users) - 1):
             #         self.driver.find_element(by=By.ID, value='img_jia').click()
 
-            # 5. 确定购买
-            logger.info("确定购买...")
-            if not self.ultra_fast_click(By.ID, "btn_buy_view"):
-                # 备用按钮文本
-                self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*确定.*|.*购买.*")')
+            # 6. 确定购买
+            print("确定购买...")
+            if self.config.fast_mode:
+                if not self._tap_from_dump(
+                    "cn.damai:id/btn_buy_view",
+                    index=0,
+                    class_name="android.widget.LinearLayout",
+                ):
+                    # 底部右侧按钮区域兜底点击
+                    size = self._adb_screen_size()
+                    if size:
+                        self._adb_tap(size["width"] * 0.85, size["height"] * 0.94)
+            else:
+                if not self._tap_from_dump(
+                    "cn.damai:id/btn_buy_view",
+                    index=0,
+                    class_name="android.widget.LinearLayout",
+                ):
+                    if not self.ultra_fast_click(By.ID, "btn_buy_view"):
+                        # 备用按钮文本
+                        self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*确定.*|.*购买.*")')
 
-            post_buy_probe = self.wait_for_page_state({"order_confirm_page"}, timeout=5)
-            if post_buy_probe["state"] != "order_confirm_page":
-                # 6. 批量选择用户
-                logger.info("选择用户...")
-                user_clicks = [(AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{user}")') for user in
-                               self.config.users]
-                # self.batch_click(user_clicks, delay=0.05)  # 极短延迟
-                self.ultra_batch_click(user_clicks)
-                post_buy_probe = self.wait_for_page_state({"order_confirm_page"}, timeout=5)
+            # 7. 批量选择用户
+            print("选择用户...")
+            time.sleep(0.3 if self.config.fast_mode else 1.0)
+            self._dump_page_source(path="/tmp/damai_confirm.xml", force=True)
+            for user in self.config.users:
+                if not self._tap_text_from_dump("/tmp/damai_confirm.xml", user, exact=True):
+                    if not self._tap_text_from_dump("/tmp/damai_confirm.xml", user, exact=False):
+                        if not self.config.fast_mode:
+                            user_clicks = [(AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{user}")')]
+                            self.ultra_batch_click(user_clicks)
 
-            if post_buy_probe["state"] != "order_confirm_page":
-                logger.warning("未进入订单确认页，请检查票档可用性或观演人配置")
-                return False
+            # 8. 提交订单
+            if self.config.if_commit_order:
+                print("提交订单...")
+                if self.config.fast_mode:
+                    if not self._tap_text_from_dump("/tmp/damai_confirm.xml", "立即提交"):
+                        if not self._tap_text_from_dump("/tmp/damai_confirm.xml", "提交"):
+                            size = self._adb_screen_size()
+                            if size:
+                                self._adb_tap(size["width"] * 0.85, size["height"] * 0.94)
+                else:
+                    submit_selectors = [
+                        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+                        (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
+                        (By.XPATH, '//*[contains(@text,"提交")]')
+                    ]
+                    submit_success = self.smart_wait_and_click(*submit_selectors[0], submit_selectors[1:])
+                    if not submit_success:
+                        print("⚠ 提交订单按钮未找到，请手动确认订单状态")
+            else:
+                print("已配置不提交订单，停止在确认页")
 
-            submit_selectors = [
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
-                (By.XPATH, '//*[contains(@text,"提交")]')
-            ]
-            if not self.config.if_commit_order:
-                logger.info("if_commit_order=False，等待确认页就绪后停止在提交订单前")
-                if not self.smart_wait_for_element(*submit_selectors[0], submit_selectors[1:]):
-                    logger.warning("确认页提交按钮未找到，请手动确认是否已到订单确认页")
-                    return False
-
-                end_time = time.time()
-                logger.info(f"已到订单确认页，未提交订单，耗时: {end_time - start_time:.2f}秒")
-                return True
-
-            # 7. 提交订单
-            logger.info("提交订单...")
-            submit_success = self.smart_wait_and_click(*submit_selectors[0], submit_selectors[1:])
-            if not submit_success:
-                logger.warning("提交订单按钮未找到，请手动确认订单状态")
-
-            # 8. 验证订单结果
-            result = self.verify_order_result()
-            if result == "success":
-                end_time = time.time()
-                logger.info(f"抢票成功！耗时: {end_time - start_time:.2f}秒")
-                return True
-            elif result in ("sold_out", "captcha", "existing_order"):
-                return False
-            # timeout/unknown — optimistically return True (submit may have worked)
             end_time = time.time()
-            logger.info(f"抢票流程完成，耗时: {end_time - start_time:.2f}秒")
+            print(f"抢票流程完成，耗时: {end_time - start_time:.2f}秒")
             return True
 
         except Exception as e:
-            logger.error(f"抢票过程发生错误: {e}")
+            self.last_error = str(e)
+            print(f"抢票过程发生错误: {e}")
             return False
         finally:
             time.sleep(1)  # 给最后的操作一点时间
@@ -1392,40 +1005,25 @@ class DamaiBot:
     def run_with_retry(self, max_retries=3):
         """带重试机制的抢票"""
         for attempt in range(max_retries):
-            logger.info(f"第 {attempt + 1} 次尝试...")
+            print(f"第 {attempt + 1} 次尝试...")
             if self.run_ticket_grabbing():
-                logger.info("抢票成功！")
+                print("抢票成功！")
                 return True
+            else:
+                print(f"第 {attempt + 1} 次尝试失败")
+                # 保持快速模式，不切换到慢速调试
+                if attempt < max_retries - 1:
+                    retry_sleep = 0.2 if self.config.fast_mode else 2
+                    print(f"{retry_sleep}秒后重试...")
+                    time.sleep(retry_sleep)
+                    # 重新初始化驱动
+                    try:
+                        self.driver.quit()
+                    except Exception:
+                        pass
+                    self._setup_driver()
 
-            if self._terminal_failure_reason:
-                logger.error(f"检测到不可重试失败，停止后续重试: {self._terminal_failure_reason}")
-                break
-
-            # Fast retry within same session
-            for fast_attempt in range(self.config.fast_retry_count):
-                logger.info(f"快速重试 {fast_attempt + 1}/{self.config.fast_retry_count}...")
-                time.sleep(self.config.fast_retry_interval_ms / 1000)
-                if self._fast_retry_from_current_state():
-                    logger.info("快速重试成功！")
-                    return True
-                if self._terminal_failure_reason:
-                    logger.error(f"快速重试遇到不可重试失败，停止后续重试: {self._terminal_failure_reason}")
-                    break
-
-            if self._terminal_failure_reason:
-                break
-
-            # Full driver recreation
-            logger.warning(f"第 {attempt + 1} 次尝试及快速重试均失败")
-            if attempt < max_retries - 1:
-                logger.info("重建驱动后重试...")
-                try:
-                    self.driver.quit()
-                except Exception:
-                    pass
-                self._setup_driver()
-
-        logger.error("所有尝试均失败")
+        print("所有尝试均失败")
         return False
 
 

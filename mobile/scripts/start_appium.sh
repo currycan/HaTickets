@@ -23,6 +23,12 @@ echo "✅ 环境变量已设置"
 echo "   ANDROID_HOME: $ANDROID_HOME"
 echo "   ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT"
 
+# 优先使用SDK自带的adb
+ADB="$ANDROID_HOME/platform-tools/adb"
+if [ ! -x "$ADB" ]; then
+    ADB="adb"
+fi
+
 # 检查Node.js版本
 NODE_VERSION=$(node --version | cut -d'v' -f2)
 echo "📦 Node.js版本: $NODE_VERSION"
@@ -36,7 +42,7 @@ fi
 
 # 检查Android设备
 echo "📱 检查Android设备..."
-DEVICES=$(adb devices | grep -c "device$")
+DEVICES=$($ADB devices | grep -c "device$")
 if [ $DEVICES -eq 0 ]; then
     echo "⚠️  未检测到Android设备"
     echo "   请启动模拟器或连接真机"
@@ -44,21 +50,15 @@ if [ $DEVICES -eq 0 ]; then
     exit 1
 else
     echo "✅ 检测到 $DEVICES 个Android设备"
-    adb devices
 fi
 
 # 检查大麦APP是否安装
-if [ $DEVICES -eq 1 ]; then
-    SERIAL=$(adb devices | awk 'NR>1 && $2=="device" {print $1; exit}')
-    if ! adb -s "$SERIAL" shell pm list packages | grep -q "cn.damai"; then
-        echo "⚠️  大麦APP未安装"
-        echo "   请在设备上安装大麦APP"
-        exit 1
-    else
-        echo "✅ 大麦APP已安装"
-    fi
+if ! $ADB shell pm list packages | grep -q "cn.damai"; then
+    echo "⚠️  大麦APP未安装"
+    echo "   请在设备上安装大麦APP"
+    exit 1
 else
-    echo "ℹ️  检测到多个设备，请在 mobile/config.jsonc 中填写目标设备的 udid"
+    echo "✅ 大麦APP已安装"
 fi
 
 # 启动Appium服务器
