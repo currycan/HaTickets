@@ -22,7 +22,7 @@ pub const SEC_CH_UA: &str =
     "\"Google Chrome\";v=\"146\", \"Chromium\";v=\"146\", \";Not A Brand\";v=\"24\"";
 
 // 各接口独立版本号（出现在 URL path 中）
-pub const API_VERSION_DETAIL: &str = "1.0"; // mtop.damai.item.detail.getdetail
+pub const API_VERSION_DETAIL: &str = "1.2"; // mtop.alibaba.damai.detail.getdetail
 pub const API_VERSION_SKU: &str = "2.0"; // mtop.alibaba.detail.subpage.getdetail
 pub const API_VERSION_ORDER_BUILD: &str = "1.0"; // mtop.damai.trade.order.build.h5
 pub const API_VERSION_ORDER_CREATE: &str = "1.0"; // mtop.damai.trade.order.create.h5

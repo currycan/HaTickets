@@ -38,7 +38,7 @@ const lastCountDownVal = computed(() => countDownVal.value + timeFix.value)
 // 从 store 获取 form
 const form = computed(() => store.state.dm.form)
 async function getProductInfo() {
-    const data = `{"itemId":"${form.value.itemId}","bizCode":"ali.china.damai","scenario":"itemsku","exParams":"{\\"dataType\\":4,\\"dataId\\":\\"\\",\\"privilegeActId\\":\\"\\"}","dmChannel":"damai@damaih5_h5"}`;
+    const data = `{"itemId":"${form.value.itemId}","bizCode":"ali.china.damai","scenario":"itemsku","exParams":"{\\"dataType\\":4,\\"dataId\\":\\"\\",\\"privilegeActId\\":\\"\\"}","platform":"8","comboChannel":"2","dmChannel":"damai@damaih5_h5"}`;
     const [t, sign] = getSign(data, form.value.token);
 
     try {

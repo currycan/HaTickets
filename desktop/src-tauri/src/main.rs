@@ -59,16 +59,19 @@ async fn get_info(
     address: String,
 ) -> Result<String, Box<dyn Error>> {
     let base = dm_config::build_base_url(
-        "mtop.damai.item.detail.getdetail",
+        "mtop.alibaba.damai.detail.getdetail",
         dm_config::API_VERSION_DETAIL,
         t, sign,
     );
     let url = format!(
-        "{}&api=mtop.damai.item.detail.getdetail&v=1.0&H5Request=true\
-         &type=json&timeout=10000&dataType=json&valueType=string\
-         &forceAntiCreep=true&AntiCreep=true\
-         &data=%7B%22itemId%22%3A%22{}%22%2C%22platform%22%3A%228%22\
-         %2C%22comboChannel%22%3A%222%22%2C%22dmChannel%22%3A%22damai%40damaih5_h5%22%7D",
+        "{}&type=originaljson&dataType=json&v=2.0&H5Request=true\
+         &AntiCreep=true&forceAntiCreep=true&timeout=10000\
+         &api=mtop.alibaba.damai.detail.getdetail\
+         &data=%7B%22itemId%22%3A%22{}%22%2C%22bizCode%22%3A%22ali.china.damai%22\
+         %2C%22scenario%22%3A%22itemsku%22%2C%22exParams%22%3A%22%7B%5C%22dataType%5C%22%3A4\
+         %2C%5C%22dataId%5C%22%3A%5C%22%5C%22%2C%5C%22privilegeActId%5C%22%3A%5C%22%5C%22%7D%22\
+         %2C%22platform%22%3A%228%22%2C%22comboChannel%22%3A%222%22\
+         %2C%22dmChannel%22%3A%22damai%40damaih5_h5%22%7D",
         base, itemid
     );
 
