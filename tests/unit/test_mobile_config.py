@@ -9,6 +9,11 @@ from mobile.config import Config, _strip_jsonc_comments
 
 _VALID = dict(
     server_url="http://localhost:4723",
+    device_name="Android",
+    udid=None,
+    platform_version=None,
+    app_package="cn.damai",
+    app_activity=".launcher.splash.SplashMainActivity",
     keyword="周深",
     users=["张三"],
     city="深圳",
@@ -59,8 +64,18 @@ class TestMobileConfigInit:
             price_index=1,
             if_commit_order=True,
             probe_only=True,
+            device_name="Pixel 8",
+            udid="R58M123456A",
+            platform_version="14",
+            app_package="cn.damai",
+            app_activity=".launcher.splash.SplashMainActivity",
         )
         assert cfg.server_url == "http://localhost:4723"
+        assert cfg.device_name == "Pixel 8"
+        assert cfg.udid == "R58M123456A"
+        assert cfg.platform_version == "14"
+        assert cfg.app_package == "cn.damai"
+        assert cfg.app_activity == ".launcher.splash.SplashMainActivity"
         assert cfg.keyword == "周深"
         assert cfg.users == ["张三", "李四"]
         assert cfg.city == "深圳"
@@ -117,9 +132,33 @@ class TestMobileConfigValidation:
         with pytest.raises(ValueError, match="keyword"):
             Config(**_make(keyword=123))
 
+    def test_if_commit_order_non_bool_raises(self):
+        with pytest.raises(ValueError, match="if_commit_order"):
+            Config(**_make(if_commit_order="no"))
+
     def test_probe_only_non_bool_raises(self):
         with pytest.raises(ValueError, match="probe_only"):
             Config(**_make(probe_only="yes"))
+
+    def test_device_name_empty_raises(self):
+        with pytest.raises(ValueError, match="device_name"):
+            Config(**_make(device_name=""))
+
+    def test_udid_empty_raises(self):
+        with pytest.raises(ValueError, match="udid"):
+            Config(**_make(udid=""))
+
+    def test_platform_version_empty_raises(self):
+        with pytest.raises(ValueError, match="platform_version"):
+            Config(**_make(platform_version=""))
+
+    def test_app_package_empty_raises(self):
+        with pytest.raises(ValueError, match="app_package"):
+            Config(**_make(app_package=""))
+
+    def test_app_activity_empty_raises(self):
+        with pytest.raises(ValueError, match="app_activity"):
+            Config(**_make(app_activity=""))
 
 
 class TestMobileConfigLoadConfig:
@@ -130,6 +169,11 @@ class TestMobileConfigLoadConfig:
         # Re-create since chdir changed
         config_data = {
             "server_url": "http://127.0.0.1:4723",
+            "device_name": "Pixel 8",
+            "udid": "R58M123456A",
+            "platform_version": "14",
+            "app_package": "cn.damai",
+            "app_activity": ".launcher.splash.SplashMainActivity",
             "keyword": "test",
             "users": ["A"],
             "city": "北京",
@@ -144,6 +188,11 @@ class TestMobileConfigLoadConfig:
 
         cfg = Config.load_config()
         assert cfg.server_url == "http://127.0.0.1:4723"
+        assert cfg.device_name == "Pixel 8"
+        assert cfg.udid == "R58M123456A"
+        assert cfg.platform_version == "14"
+        assert cfg.app_package == "cn.damai"
+        assert cfg.app_activity == ".launcher.splash.SplashMainActivity"
         assert cfg.keyword == "test"
         assert cfg.users == ["A"]
         assert cfg.city == "北京"
@@ -185,5 +234,8 @@ class TestMobileConfigLoadConfig:
         (tmp_path / "config.jsonc").write_text(jsonc_content, encoding="utf-8")
         cfg = Config.load_config()
         assert cfg.server_url == "http://127.0.0.1:4723"
+        assert cfg.device_name == "Android"
+        assert cfg.udid is None
+        assert cfg.platform_version is None
         assert cfg.price_index == 0
         assert cfg.probe_only is True

@@ -38,7 +38,7 @@ vim mobile/config.jsonc
 cd mobile && poetry run python damai_app.py
 ```
 
-需要：Android 设备/模拟器 + Appium 3.1+ + Node.js 20.19+
+需要：Android 真机或模拟器 + Appium 3.1+ + Node.js 20.19+
 
 ### Desktop 端
 
@@ -99,6 +99,11 @@ HaTickets/
 ```json
 {
   "server_url": "http://127.0.0.1:4723",
+  "device_name": "Android",
+  "udid": "emulator-5554",
+  "platform_version": "15",
+  "app_package": "cn.damai",
+  "app_activity": ".launcher.splash.SplashMainActivity",
   "keyword": "刘若英",
   "users": ["张三", "李四"],
   "city": "泉州",
@@ -113,6 +118,8 @@ HaTickets/
 </details>
 
 首次使用建议把 `probe_only` 设为 `true`，先只验证当前页面是不是目标演出详情页、关键控件是否就绪。当前 `mobile` MVP 仍要求用户先手动打开目标演出详情页，不依赖稳定的 App 内搜索或 deeplink 导航。
+
+真机接入时，先运行 `adb devices`，把手机序列号填到 `udid`。如果只连一台设备，`device_name` 用默认 `Android` 即可。
 
 ## 关键设计
 

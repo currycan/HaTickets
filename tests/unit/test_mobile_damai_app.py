@@ -377,6 +377,96 @@ class TestRunTicketGrabbing:
 
         assert result is True
 
+    def test_run_ticket_grabbing_stops_before_submit_when_commit_disabled(self, bot):
+        """if_commit_order=False waits for confirm page but never clicks submit."""
+        bot.config.if_commit_order = False
+
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": True,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "smart_wait_and_click", return_value=True) as smart_click, \
+             patch.object(bot, "smart_wait_for_element", return_value=True) as wait_for_element, \
+             patch.object(bot, "ultra_fast_click", return_value=True), \
+             patch.object(bot, "ultra_batch_click"), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 1.2]
+            mock_price_container = Mock()
+            mock_target = _make_mock_element()
+            mock_price_container.find_element.return_value = mock_target
+            bot.driver.find_element.return_value = mock_price_container
+            bot.driver.find_elements.return_value = []
+
+            result = bot.run_ticket_grabbing()
+
+        assert result is True
+        assert smart_click.call_count == 2
+        wait_for_element.assert_called_once()
+
+    def test_run_ticket_grabbing_continues_from_sku_page_when_commit_disabled(self, bot):
+        """sku_page can continue directly to confirm page without returning to detail."""
+        bot.config.if_commit_order = False
+
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "sku_page",
+                 "purchase_button": False,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "smart_wait_and_click") as smart_click, \
+             patch.object(bot, "smart_wait_for_element", return_value=True) as wait_for_element, \
+             patch.object(bot, "ultra_fast_click", return_value=True), \
+             patch.object(bot, "ultra_batch_click"), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 0.8]
+            mock_price_container = Mock()
+            mock_target = _make_mock_element()
+            mock_price_container.find_element.return_value = mock_target
+            bot.driver.find_element.return_value = mock_price_container
+            bot.driver.find_elements.return_value = []
+
+            result = bot.run_ticket_grabbing()
+
+        assert result is True
+        smart_click.assert_not_called()
+        wait_for_element.assert_called_once()
+
+    def test_run_ticket_grabbing_returns_false_when_confirm_page_not_ready_and_commit_disabled(self, bot, caplog):
+        """Commit-disabled mode fails safely if the confirm page never becomes ready."""
+        bot.config.if_commit_order = False
+
+        with caplog.at_level("WARNING", logger="mobile.damai_app"), \
+             patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": True,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "smart_wait_and_click", return_value=True), \
+             patch.object(bot, "smart_wait_for_element", return_value=False), \
+             patch.object(bot, "ultra_fast_click", return_value=True), \
+             patch.object(bot, "ultra_batch_click"), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.return_value = 0.0
+            mock_price_container = Mock()
+            mock_target = _make_mock_element()
+            mock_price_container.find_element.return_value = mock_target
+            bot.driver.find_element.return_value = mock_price_container
+            bot.driver.find_elements.return_value = []
+
+            result = bot.run_ticket_grabbing()
+
+        assert result is False
+        assert "确认页提交按钮未找到" in caplog.text
+
     def test_run_ticket_grabbing_city_fail(self, bot):
         """City selection fails, returns False immediately."""
         with patch.object(bot, "dismiss_startup_popups"), \

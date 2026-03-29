@@ -23,6 +23,11 @@ class TestConfigToBotInit:
         monkeypatch.chdir(tmp_path)
         config_data = {
             "server_url": "http://127.0.0.1:4723",
+            "device_name": "Android",
+            "udid": None,
+            "platform_version": None,
+            "app_package": "cn.damai",
+            "app_activity": ".launcher.splash.SplashMainActivity",
             "keyword": "test",
             "users": ["A"],
             "city": "北京",
@@ -56,6 +61,11 @@ class TestFullTicketGrabbingFlow:
 
         mock_config = Config(
             server_url="http://127.0.0.1:4723",
+            device_name="Android",
+            udid=None,
+            platform_version=None,
+            app_package="cn.damai",
+            app_activity=".launcher.splash.SplashMainActivity",
             keyword="test", users=["A"], city="深圳",
             date="12.06", price="799元", price_index=1,
             if_commit_order=True,
@@ -84,6 +94,51 @@ class TestFullTicketGrabbingFlow:
                 result = bot.run_ticket_grabbing()
             assert result is True
 
+    def test_flow_stops_before_submit_when_commit_disabled(self):
+        """Commit-disabled mode reaches confirm page and exits before submit."""
+        mock_driver = Mock()
+        mock_driver.update_settings = Mock()
+        mock_driver.quit = Mock()
+        mock_el = _make_mock_element()
+
+        mock_config = Config(
+            server_url="http://127.0.0.1:4723",
+            device_name="Android",
+            udid=None,
+            platform_version=None,
+            app_package="cn.damai",
+            app_activity=".launcher.splash.SplashMainActivity",
+            keyword="test", users=["A"], city="深圳",
+            date="12.06", price="799元", price_index=1,
+            if_commit_order=False,
+            probe_only=False,
+        )
+
+        with patch("mobile.damai_app.Config.load_config", return_value=mock_config), \
+             patch("mobile.damai_app.webdriver.Remote", return_value=mock_driver), \
+             patch("mobile.damai_app.AppiumOptions"), \
+             patch("mobile.damai_app.WebDriverWait") as mock_wait, \
+             patch("mobile.damai_app.time.sleep"):
+            mock_wait.return_value.until = Mock(return_value=mock_el)
+            mock_driver.find_element = Mock(return_value=mock_el)
+            mock_driver.find_elements = Mock(return_value=[mock_el])
+            mock_driver.execute_script = Mock()
+
+            bot = DamaiBot()
+            with patch.object(bot, "dismiss_startup_popups"), \
+                 patch.object(bot, "probe_current_page", return_value={
+                     "state": "detail_page",
+                     "purchase_button": True,
+                     "price_container": True,
+                     "quantity_picker": True,
+                     "submit_button": True,
+                 }), \
+                 patch.object(bot, "smart_wait_for_element", return_value=True) as wait_for_element:
+                result = bot.run_ticket_grabbing()
+
+            assert result is True
+            wait_for_element.assert_called_once()
+
 
 class TestRetryWithDriverRecreation:
 
@@ -95,6 +150,11 @@ class TestRetryWithDriverRecreation:
 
         mock_config = Config(
             server_url="http://127.0.0.1:4723",
+            device_name="Android",
+            udid=None,
+            platform_version=None,
+            app_package="cn.damai",
+            app_activity=".launcher.splash.SplashMainActivity",
             keyword="test", users=["A"], city="深圳",
             date="12.06", price="799元", price_index=1,
             if_commit_order=True,

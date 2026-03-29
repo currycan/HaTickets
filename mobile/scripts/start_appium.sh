@@ -44,15 +44,21 @@ if [ $DEVICES -eq 0 ]; then
     exit 1
 else
     echo "✅ 检测到 $DEVICES 个Android设备"
+    adb devices
 fi
 
 # 检查大麦APP是否安装
-if ! adb shell pm list packages | grep -q "cn.damai"; then
-    echo "⚠️  大麦APP未安装"
-    echo "   请在设备上安装大麦APP"
-    exit 1
+if [ $DEVICES -eq 1 ]; then
+    SERIAL=$(adb devices | awk 'NR>1 && $2=="device" {print $1; exit}')
+    if ! adb -s "$SERIAL" shell pm list packages | grep -q "cn.damai"; then
+        echo "⚠️  大麦APP未安装"
+        echo "   请在设备上安装大麦APP"
+        exit 1
+    else
+        echo "✅ 大麦APP已安装"
+    fi
 else
-    echo "✅ 大麦APP已安装"
+    echo "ℹ️  检测到多个设备，请在 mobile/config.jsonc 中填写目标设备的 udid"
 fi
 
 # 启动Appium服务器

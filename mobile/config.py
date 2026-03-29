@@ -26,7 +26,8 @@ def _strip_jsonc_comments(text):
 
 class Config:
     def __init__(self, server_url, keyword, users, city, date, price, price_index, if_commit_order,
-                 probe_only=False):
+                 probe_only=False, device_name="Android", udid=None, platform_version=None,
+                 app_package="cn.damai", app_activity=".launcher.splash.SplashMainActivity"):
         # Validate server_url
         validate_url(server_url, "server_url")
 
@@ -41,8 +42,26 @@ class Config:
         if not isinstance(keyword, str) or len(keyword.strip()) == 0:
             raise ValueError(f"keyword 必须是非空字符串，实际值: {keyword!r}")
 
+        if not isinstance(if_commit_order, bool):
+            raise ValueError(f"if_commit_order 必须是布尔值，实际值: {if_commit_order!r}")
+
         if not isinstance(probe_only, bool):
             raise ValueError(f"probe_only 必须是布尔值，实际值: {probe_only!r}")
+
+        if not isinstance(device_name, str) or len(device_name.strip()) == 0:
+            raise ValueError(f"device_name 必须是非空字符串，实际值: {device_name!r}")
+
+        if udid is not None and (not isinstance(udid, str) or len(udid.strip()) == 0):
+            raise ValueError(f"udid 必须是非空字符串或 null，实际值: {udid!r}")
+
+        if platform_version is not None and (not isinstance(platform_version, str) or len(platform_version.strip()) == 0):
+            raise ValueError(f"platform_version 必须是非空字符串或 null，实际值: {platform_version!r}")
+
+        if not isinstance(app_package, str) or len(app_package.strip()) == 0:
+            raise ValueError(f"app_package 必须是非空字符串，实际值: {app_package!r}")
+
+        if not isinstance(app_activity, str) or len(app_activity.strip()) == 0:
+            raise ValueError(f"app_activity 必须是非空字符串，实际值: {app_activity!r}")
 
         self.server_url = server_url
         self.keyword = keyword
@@ -53,6 +72,11 @@ class Config:
         self.price_index = price_index
         self.if_commit_order = if_commit_order
         self.probe_only = probe_only
+        self.device_name = device_name
+        self.udid = udid
+        self.platform_version = platform_version
+        self.app_package = app_package
+        self.app_activity = app_activity
 
     @staticmethod
     def load_config():
@@ -80,4 +104,9 @@ class Config:
                       config['price'],
                       config['price_index'],
                       config['if_commit_order'],
-                      config.get('probe_only', False))
+                      config.get('probe_only', False),
+                      config.get('device_name', 'Android'),
+                      config.get('udid'),
+                      config.get('platform_version'),
+                      config.get('app_package', 'cn.damai'),
+                      config.get('app_activity', '.launcher.splash.SplashMainActivity'))

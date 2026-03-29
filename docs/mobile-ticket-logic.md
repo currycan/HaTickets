@@ -20,6 +20,11 @@
 ## 配置项 (`config.jsonc`)
 
 - `server_url`: Appium 服务器地址
+- `device_name`: Appium 设备名，模拟器/真机通用
+- `udid`: 设备序列号；真机建议填写 `adb devices` 的序列号
+- `platform_version`: 可选，设备 Android 版本
+- `app_package`: 大麦 App 包名
+- `app_activity`: 大麦启动 Activity
 - `keyword`: 搜索关键词
 - `users`: 观演人姓名列表
 - `city`: 目标城市
@@ -58,7 +63,9 @@ run_with_retry(max_retries=3)
 **Appium Capabilities**:
 ```python
 platformName: "Android"
-deviceName: "emulator-5554"
+deviceName: config.device_name
+udid: config.udid            # 可选，真机推荐填写
+platformVersion: config.platform_version   # 可选
 automationName: "UiAutomator2"
 noReset: True           # 保持 APP 登录态
 disableWindowAnimation: True  # 禁用动画提速
@@ -66,6 +73,8 @@ disableWindowAnimation: True  # 禁用动画提速
 
 说明：
 - 当前实现不再硬编码 `platformVersion`
+- `deviceName`、`udid`、`appPackage`、`appActivity` 都从配置文件读取
+- 因此同一套代码可以切换安卓模拟器和安卓真机
 - 这样可以避免 Appium 因设备实际 Android 版本和代码常量不一致而拒绝创建会话
 
 **激进性能优化**:
@@ -193,7 +202,13 @@ driver.execute_script("mobile: clickGesture", {
 - **仅 Android**: capabilities 硬编码 Android + UiAutomator2
 - **不支持 iOS**: 需要 XCUITest 引擎 + 完全不同的元素定位方式
 - **不支持选座**: 流程中没有选座步骤
-- 设备名硬编码为 `emulator-5554`（Android 模拟器默认端口）
+
+## 真机配置建议
+
+1. 用 `adb devices` 确认真机已经连上
+2. 把设备序列号填进 `config.jsonc` 的 `udid`
+3. `device_name` 可以保持 `Android`，也可以写成你自己的机型名
+4. 如果大麦版本或 ROM 定制导致启动页不同，再覆盖 `app_activity`
 
 ## 性能设计理念
 

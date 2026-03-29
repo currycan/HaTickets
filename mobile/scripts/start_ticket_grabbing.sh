@@ -42,7 +42,7 @@ echo "✅ 配置文件存在"
 
 # 显示当前配置
 echo "📋 当前配置:"
-echo "   $(cat "$CONFIG_FILE" | grep -E '"keyword"|"city"|"users"|"probe_only"' | head -4)"
+echo "   $(cat "$CONFIG_FILE" | grep -E '"device_name"|"udid"|"keyword"|"city"|"users"|"probe_only"' | head -6)"
 
 # 确认是否继续
 read -p "🤔 确认开始抢票？(y/N): " -n 1 -r

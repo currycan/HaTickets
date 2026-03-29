@@ -30,6 +30,11 @@ poetry run python web/check_environment.py
 ```json
 {
   "server_url": "http://127.0.0.1:4723",
+  "device_name": "Android",
+  "udid": "emulator-5554",
+  "platform_version": "15",
+  "app_package": "cn.damai",
+  "app_activity": ".launcher.splash.SplashMainActivity",
   "keyword": "刘若英",
   "users": [
     "观演人1",
@@ -45,6 +50,7 @@ poetry run python web/check_environment.py
 ```
 
 首次使用建议先把 `probe_only` 设为 `true`，确认当前页面已经是目标演出详情页，且购票按钮和票档区域都已出现。
+如果改用真机，把 `adb devices` 里显示的序列号填到 `udid`。
 
 ## 🔧 常见问题解决
 
@@ -63,6 +69,12 @@ $ANDROID_HOME/emulator/emulator -avd <your_avd_name>
 $ANDROID_HOME/platform-tools/adb devices
 ```
 
+真机模式：
+```bash
+adb devices
+# 把输出里的设备序列号填进 mobile/config.jsonc 的 udid
+```
+
 ### 问题3：Appium服务器未启动
 ```bash
 # 设置环境变量并启动
@@ -76,6 +88,7 @@ appium --port 4723
 1. **环境检查**：`poetry run python web/check_environment.py`
 2. **启动服务**：`./mobile/scripts/start_appium.sh`
 3. **准备设备**：在模拟器上打开大麦APP
+也可以改成安卓真机，前提是已经打开 USB 调试并通过 `adb devices` 识别
 4. **配置参数**：编辑 `config.jsonc`
 5. **开始抢票**：`./mobile/scripts/start_ticket_grabbing.sh`
 

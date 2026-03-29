@@ -1,5 +1,10 @@
 {
   "server_url": "http://127.0.0.1:4723",
+  "device_name": "Android",
+  "udid": "emulator-5554",
+  "platform_version": "15",
+  "app_package": "cn.damai",
+  "app_activity": ".launcher.splash.SplashMainActivity",
   "keyword": "演出名称",
   "users": [
     "张三",
