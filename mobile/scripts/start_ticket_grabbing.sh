@@ -32,15 +32,22 @@ echo "✅ Appium服务器运行正常"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOBILE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-CONFIG_FILE="$MOBILE_DIR/config.jsonc"
+LOCAL_CONFIG_FILE="$MOBILE_DIR/config.local.jsonc"
+DEFAULT_CONFIG_FILE="$MOBILE_DIR/config.jsonc"
+if [ -f "$LOCAL_CONFIG_FILE" ]; then
+    CONFIG_FILE="$LOCAL_CONFIG_FILE"
+else
+    CONFIG_FILE="$DEFAULT_CONFIG_FILE"
+fi
 
 # 检查配置文件
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "❌ 配置文件不存在: $CONFIG_FILE"
+    echo "   可先复制模板: cp mobile/config.example.jsonc mobile/config.local.jsonc"
     exit 1
 fi
 
-echo "✅ 配置文件存在"
+echo "✅ 配置文件存在: $CONFIG_FILE"
 
 # 显示当前配置
 echo "📋 当前配置:"

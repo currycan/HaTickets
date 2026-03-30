@@ -28,12 +28,12 @@ poetry run python web/check_environment.py
 
 ## ⚙️ 配置抢票参数
 
-编辑 `mobile/config.jsonc` 文件：
+优先编辑 `mobile/config.local.jsonc` 文件：
 
 如果这个文件还不存在，先执行：
 
 ```bash
-cp mobile/config.example.jsonc mobile/config.jsonc
+cp mobile/config.example.jsonc mobile/config.local.jsonc
 ```
 
 ```json
@@ -98,7 +98,7 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 要求：
 1. 如果本机没有项目，请先从 https://github.com/currycan/HaTickets 下载，并进入 master 分支
 2. 自行检查并准备依赖环境；如果 Appium 服务没启动，请先启动
-3. 如果 mobile/config.jsonc 不存在，先从 mobile/config.example.jsonc 复制一份
+3. 如果 mobile/config.local.jsonc 不存在，先从 mobile/config.example.jsonc 复制一份
 4. 如果当前配置里已有 udid、platform_version、app_package，就尽量保留；如果没有，就自己通过 adb 获取
 5. 根据我提供的大麦详情页链接，提取 itemId，并填充到 item_url
 6. city、date、price 尽量使用大麦 App 当前页面上实际可见的原文或稳定子串
@@ -107,7 +107,7 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 9. 先把 probe_only 设为 true
 10. 先把 if_commit_order 设为 false
 11. 确保 auto_navigate 设为 true，keyword 可设为 null
-12. 修改 mobile/config.jsonc 后，先检查字段和类型是否正确
+12. 修改 mobile/config.local.jsonc 后，先检查字段和类型是否正确
 13. 运行验证时，如果 ./mobile/scripts/start_ticket_grabbing.sh 需要交互确认，请你自己处理确认输入；也可以直接进入 mobile 目录运行 poetry run python damai_app.py
 14. 先做一次页面探测
 15. 如果探测通过，再继续做一次“到确认页但不提交订单、不支付”的验证
@@ -144,7 +144,7 @@ $ANDROID_HOME/platform-tools/adb devices
 真机模式：
 ```bash
 adb devices
-# 把输出里的设备序列号填进 mobile/config.jsonc 的 udid
+# 把输出里的设备序列号填进 mobile/config.local.jsonc 的 udid
 ```
 
 ### 问题3：Appium服务器未启动
@@ -161,7 +161,7 @@ appium --port 4723
 2. **启动服务**：`./mobile/scripts/start_appium.sh`
 3. **准备设备**：在模拟器上打开大麦APP
 也可以改成安卓真机，前提是已经打开 USB 调试并通过 `adb devices` 识别
-4. **配置参数**：编辑 `config.jsonc`
+4. **配置参数**：编辑 `config.local.jsonc`
 5. **开始抢票**：`./mobile/scripts/start_ticket_grabbing.sh --yes`
 
 ## ⚠️ 重要提醒

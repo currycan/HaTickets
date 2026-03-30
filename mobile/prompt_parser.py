@@ -116,7 +116,7 @@ def _parse_city(prompt: str) -> Optional[str]:
     return None
 
 
-def _clean_prompt_for_keyword(prompt: str) -> str:
+def _clean_prompt_for_keyword(prompt: str, removable_tokens: Optional[Iterable[str]] = None) -> str:
     cleaned = prompt
     cleaned = re.sub(r"https?://\S+", " ", cleaned)
     cleaned = re.sub(r"\d{1,2}\s*月\s*\d{1,2}\s*[号日好]?", " ", cleaned)
@@ -124,11 +124,16 @@ def _clean_prompt_for_keyword(prompt: str) -> str:
     cleaned = re.sub(r"[0-9零一二两三四五六七八九十]+\s*张", " ", cleaned)
     for word in _REQUEST_STOPWORDS:
         cleaned = cleaned.replace(word, " ")
+    for token in removable_tokens or ():
+        if token:
+            cleaned = cleaned.replace(token, " ")
+    cleaned = re.sub(r"\b\d+\s*元?\b", " ", cleaned)
+    cleaned = cleaned.replace("的", " ")
     return _normalize_whitespace(cleaned)
 
 
-def _parse_artist_and_keyword(prompt: str) -> tuple[Optional[str], Optional[str], list[str]]:
-    cleaned = _clean_prompt_for_keyword(prompt)
+def _parse_artist_and_keyword(prompt: str, removable_tokens: Optional[Iterable[str]] = None) -> tuple[Optional[str], Optional[str], list[str]]:
+    cleaned = _clean_prompt_for_keyword(prompt, removable_tokens=removable_tokens)
 
     artist = None
     artist_match = re.search(r"([\u4e00-\u9fffA-Za-z0-9·•]+?)(?:的)?(?:演唱会|音乐会|演出|live|LIVE|巡演)", cleaned)
@@ -185,14 +190,29 @@ def parse_prompt(prompt: str) -> PromptIntent:
         raise ValueError("prompt 不能为空")
 
     normalized_prompt = _normalize_whitespace(prompt)
-    artist, keyword, candidate_keywords = _parse_artist_and_keyword(normalized_prompt)
+    parsed_date = _parse_date(normalized_prompt)
+    parsed_city = _parse_city(normalized_prompt)
     price_hint, seat_hint, numeric_price = _parse_price_hints(normalized_prompt)
+    removable_tokens = []
+    if parsed_city:
+        removable_tokens.extend([parsed_city, f"{parsed_city}站"])
+    if seat_hint:
+        removable_tokens.append(seat_hint)
+    if price_hint:
+        removable_tokens.append(price_hint)
+    if numeric_price is not None:
+        removable_tokens.extend([str(numeric_price), f"{numeric_price}元"])
+
+    artist, keyword, candidate_keywords = _parse_artist_and_keyword(
+        normalized_prompt,
+        removable_tokens=removable_tokens,
+    )
 
     intent = PromptIntent(
         raw_prompt=normalized_prompt,
         quantity=_parse_quantity(normalized_prompt),
-        date=_parse_date(normalized_prompt),
-        city=_parse_city(normalized_prompt),
+        date=parsed_date,
+        city=parsed_city,
         artist=artist,
         search_keyword=keyword,
         candidate_keywords=candidate_keywords,

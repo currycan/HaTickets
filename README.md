@@ -39,7 +39,7 @@
 ./mobile/scripts/run_from_prompt.sh "帮我抢一张 4 月 6 号张杰的演唱会门票，内场"
 ```
 
-现在脚本会先自动解析提示词，去大麦 App 搜索目标演出，抓取当前可见的场次和票档摘要，再把摘要展示出来供你确认。确认后可以直接写入 [mobile/config.jsonc](./mobile/config.jsonc)，也可以继续执行 `probe` / `confirm` 模式。
+现在脚本会先自动解析提示词，去大麦 App 搜索目标演出，抓取当前可见的场次和票档摘要，再把摘要展示出来供你确认。确认后会优先写入本地配置 [mobile/config.local.jsonc](./mobile/config.local.jsonc)，如果该文件不存在才回退到 [mobile/config.jsonc](./mobile/config.jsonc)，也可以继续执行 `probe` / `confirm` 模式。
 
 ## 推荐阅读顺序
 
@@ -129,7 +129,7 @@ appium --port 4723
 
 ### 第 4 步：修改配置
 
-编辑 [mobile/config.jsonc](./mobile/config.jsonc)。
+优先编辑本地配置 [mobile/config.local.jsonc](./mobile/config.local.jsonc)；如果你还没有这个文件，可以从模板复制一份。
 
 推荐你第一次先填成这种“安全模式”：
 
@@ -211,7 +211,7 @@ appium --port 4723
 
 ### 第 6 步：做“不支付验证”
 
-把 [mobile/config.jsonc](./mobile/config.jsonc) 改成：
+把本地配置 [mobile/config.local.jsonc](./mobile/config.local.jsonc) 改成：
 
 ```jsonc
 "probe_only": false,
@@ -271,7 +271,7 @@ export PATH="$ANDROID_HOME/platform-tools:$PATH"
 
 最常见原因是：
 
-- [mobile/config.jsonc](./mobile/config.jsonc) 里的 `users` 写的是占位符，不是真实名字
+- [mobile/config.local.jsonc](./mobile/config.local.jsonc) 里的 `users` 写的是占位符，不是真实名字
 - 你的大麦账号里还没有配置对应观演人
 
 ### 5. 脚本没有进入确认页

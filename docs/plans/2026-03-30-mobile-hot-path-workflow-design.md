@@ -90,7 +90,7 @@ flowchart TD
 ```mermaid
 flowchart TD
     A[用户手动停在抢票界面] --> B[执行 benchmark_hot_path.sh]
-    B --> C[读取 mobile/config.jsonc]
+    B --> C[优先读取 mobile/config.local.jsonc]
     C --> D[用命令行参数临时覆盖 price / price_index / city / date]
     D --> E[强制安全模式运行]
     E --> F[连续执行 N 轮 run_ticket_grabbing]

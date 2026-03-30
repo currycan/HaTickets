@@ -9,6 +9,11 @@ from mobile.config import Config, _strip_jsonc_comments, load_config_dict, save_
 
 _VALID = dict(
     server_url="http://localhost:4723",
+    device_name="Android",
+    udid=None,
+    platform_version=None,
+    app_package="cn.damai",
+    app_activity=".launcher.splash.SplashMainActivity",
     keyword="周深",
     users=["张三"],
     city="深圳",
@@ -16,6 +21,7 @@ _VALID = dict(
     price="799元",
     price_index=0,
     if_commit_order=False,
+    probe_only=False,
 )
 
 
@@ -57,6 +63,7 @@ class TestMobileConfigInit:
             price="799元",
             price_index=1,
             if_commit_order=True,
+            probe_only=True,
             device_name="Pixel 8",
             udid="R58M123456A",
             platform_version="14",
@@ -76,18 +83,7 @@ class TestMobileConfigInit:
         assert cfg.price == "799元"
         assert cfg.price_index == 1
         assert cfg.if_commit_order is True
-
-    def test_config_defaults(self):
-        cfg = Config(**_VALID)
-        assert cfg.city_index == 0
-        assert cfg.date_index == 0
-        assert cfg.date_strict is False
-        assert cfg.fast_mode is True
-        assert cfg.device_name == "emulator-5554"
-        assert cfg.platform_version == "16"
-        assert cfg.udid is None
-        assert cfg.app_package == "cn.damai"
-        assert cfg.automation_name == "UiAutomator2"
+        assert cfg.probe_only is True
 
 
 class TestMobileConfigValidation:
@@ -136,35 +132,120 @@ class TestMobileConfigValidation:
         with pytest.raises(ValueError, match="keyword"):
             Config(**_make(keyword=123))
 
-    def test_if_commit_order_stored(self):
-        cfg = Config(**_make(if_commit_order=True))
-        assert cfg.if_commit_order is True
+    def test_keyword_can_be_none_when_item_url_is_provided(self):
+        cfg = Config(**_make(
+            keyword=None,
+            item_url="https://m.damai.cn/shows/item.html?itemId=1016133935724",
+        ))
+        assert cfg.keyword is None
+        assert cfg.item_url.endswith("1016133935724")
 
-    def test_city_index_stored(self):
-        cfg = Config(**_make(city_index=2))
-        assert cfg.city_index == 2
+    def test_item_id_invalid_raises(self):
+        with pytest.raises(ValueError, match="item_id"):
+            Config(**_make(item_id="abc123"))
 
-    def test_date_index_stored(self):
-        cfg = Config(**_make(date_index=3))
-        assert cfg.date_index == 3
+    def test_target_title_empty_raises(self):
+        with pytest.raises(ValueError, match="target_title"):
+            Config(**_make(target_title=""))
 
-    def test_date_strict_stored(self):
-        cfg = Config(**_make(date_strict=True))
-        assert cfg.date_strict is True
+    def test_target_venue_empty_raises(self):
+        with pytest.raises(ValueError, match="target_venue"):
+            Config(**_make(target_venue=""))
 
-    def test_fast_mode_stored(self):
-        cfg = Config(**_make(fast_mode=False))
-        assert cfg.fast_mode is False
+    def test_auto_navigate_non_bool_raises(self):
+        with pytest.raises(ValueError, match="auto_navigate"):
+            Config(**_make(auto_navigate="yes"))
 
-    def test_automation_name_stored(self):
-        cfg = Config(**_make(automation_name="Espresso"))
-        assert cfg.automation_name == "Espresso"
+    def test_if_commit_order_non_bool_raises(self):
+        with pytest.raises(ValueError, match="if_commit_order"):
+            Config(**_make(if_commit_order="no"))
+
+    def test_probe_only_non_bool_raises(self):
+        with pytest.raises(ValueError, match="probe_only"):
+            Config(**_make(probe_only="yes"))
+
+    def test_device_name_empty_raises(self):
+        with pytest.raises(ValueError, match="device_name"):
+            Config(**_make(device_name=""))
+
+    def test_udid_empty_raises(self):
+        with pytest.raises(ValueError, match="udid"):
+            Config(**_make(udid=""))
+
+    def test_platform_version_empty_raises(self):
+        with pytest.raises(ValueError, match="platform_version"):
+            Config(**_make(platform_version=""))
+
+    def test_app_package_empty_raises(self):
+        with pytest.raises(ValueError, match="app_package"):
+            Config(**_make(app_package=""))
+
+    def test_app_activity_empty_raises(self):
+        with pytest.raises(ValueError, match="app_activity"):
+            Config(**_make(app_activity=""))
+
+
+class TestMobileConfigNewFields:
+
+    def test_sell_start_time_valid_iso(self):
+        cfg = Config(**_make(sell_start_time="2026-04-01T20:00:00+08:00"))
+        assert cfg.sell_start_time == "2026-04-01T20:00:00+08:00"
+
+    def test_sell_start_time_invalid_raises(self):
+        with pytest.raises(ValueError, match="sell_start_time"):
+            Config(**_make(sell_start_time="not-a-date"))
+
+    def test_sell_start_time_none_is_valid(self):
+        cfg = Config(**_make(sell_start_time=None))
+        assert cfg.sell_start_time is None
+
+    def test_countdown_lead_ms_default(self):
+        cfg = Config(**_make())
+        assert cfg.countdown_lead_ms == 3000
+
+    def test_countdown_lead_ms_negative_raises(self):
+        with pytest.raises(ValueError, match="countdown_lead_ms"):
+            Config(**_make(countdown_lead_ms=-1))
+
+    def test_wait_cta_ready_timeout_ms_default(self):
+        cfg = Config(**_make())
+        assert cfg.wait_cta_ready_timeout_ms == 0
+
+    def test_wait_cta_ready_timeout_ms_negative_raises(self):
+        with pytest.raises(ValueError, match="wait_cta_ready_timeout_ms"):
+            Config(**_make(wait_cta_ready_timeout_ms=-1))
+
+    def test_fast_retry_count_default(self):
+        cfg = Config(**_make())
+        assert cfg.fast_retry_count == 8
+
+    def test_fast_retry_count_negative_raises(self):
+        with pytest.raises(ValueError, match="fast_retry_count"):
+            Config(**_make(fast_retry_count=-1))
+
+    def test_fast_retry_interval_ms_negative_raises(self):
+        with pytest.raises(ValueError, match="fast_retry_interval_ms"):
+            Config(**_make(fast_retry_interval_ms=-1))
+
+    def test_rush_mode_default_false(self):
+        cfg = Config(**_make())
+        assert cfg.rush_mode is False
+
+    def test_rush_mode_non_bool_raises(self):
+        with pytest.raises(ValueError, match="rush_mode"):
+            Config(**_make(rush_mode="yes"))
+
+    def test_fast_retry_interval_ms_default(self):
+        cfg = Config(**_make())
+        assert cfg.fast_retry_interval_ms == 120
 
 
 class TestMobileConfigLoadConfig:
 
-    def test_load_config_success(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
+    def test_load_config_success(self, mock_mobile_config_file, monkeypatch):
+        mock_mobile_config_file()
+        monkeypatch.chdir(mock_mobile_config_file.__wrapped__ if hasattr(mock_mobile_config_file, '__wrapped__') else mock_mobile_config_file().parent)
+        # Re-create since chdir changed
         config_data = {
             "server_url": "http://127.0.0.1:4723",
             "device_name": "Pixel 8",
@@ -179,8 +260,10 @@ class TestMobileConfigLoadConfig:
             "price": "100元",
             "price_index": 0,
             "if_commit_order": False,
+            "probe_only": True,
         }
-        (tmp_path / "config.jsonc").write_text(json.dumps(config_data), encoding="utf-8")
+        with open("config.jsonc", "w", encoding="utf-8") as f:
+            json.dump(config_data, f)
 
         cfg = Config.load_config()
         assert cfg.server_url == "http://127.0.0.1:4723"
@@ -193,10 +276,11 @@ class TestMobileConfigLoadConfig:
         assert cfg.users == ["A"]
         assert cfg.city == "北京"
         assert cfg.if_commit_order is False
+        assert cfg.probe_only is True
 
     def test_load_config_file_not_found(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        with pytest.raises(FileNotFoundError, match="config.jsonc"):
+        with pytest.raises(FileNotFoundError, match="config.local.jsonc 或 config.jsonc"):
             Config.load_config()
 
     def test_load_config_invalid_json(self, tmp_path, monkeypatch):
@@ -223,35 +307,43 @@ class TestMobileConfigLoadConfig:
   "price": "100元",
   /* price index */
   "price_index": 0,
-  "if_commit_order": false
+  "if_commit_order": false,
+  "probe_only": true
 }"""
         (tmp_path / "config.jsonc").write_text(jsonc_content, encoding="utf-8")
         cfg = Config.load_config()
         assert cfg.server_url == "http://127.0.0.1:4723"
-        assert cfg.device_name == "emulator-5554"
+        assert cfg.device_name == "Android"
         assert cfg.udid is None
-        assert cfg.platform_version == "16"
+        assert cfg.platform_version is None
         assert cfg.price_index == 0
+        assert cfg.probe_only is True
 
-    def test_load_config_uses_defaults_for_optional_fields(self, tmp_path, monkeypatch):
+    def test_load_config_accepts_item_url_without_keyword(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         config_data = {
             "server_url": "http://127.0.0.1:4723",
-            "keyword": "test",
+            "device_name": "Android",
+            "udid": "device-1",
+            "platform_version": "16",
+            "app_package": "cn.damai",
+            "app_activity": ".launcher.splash.SplashMainActivity",
+            "item_url": "https://m.damai.cn/shows/item.html?itemId=1016133935724",
             "users": ["A"],
             "city": "北京",
-            "date": "01.01",
-            "price": "100元",
+            "date": "04.06",
+            "price": "380元",
             "price_index": 0,
             "if_commit_order": False,
+            "probe_only": True,
+            "auto_navigate": True,
         }
         (tmp_path / "config.jsonc").write_text(json.dumps(config_data), encoding="utf-8")
+
         cfg = Config.load_config()
-        assert cfg.city_index == 0
-        assert cfg.date_index == 0
-        assert cfg.date_strict is False
-        assert cfg.fast_mode is True
-        assert cfg.automation_name == "UiAutomator2"
+        assert cfg.keyword is None
+        assert cfg.item_url.endswith("1016133935724")
+        assert cfg.auto_navigate is True
 
     def test_load_and_save_config_dict_round_trip(self, tmp_path):
         path = tmp_path / "config.jsonc"
@@ -263,15 +355,101 @@ class TestMobileConfigLoadConfig:
             "app_package": "cn.damai",
             "app_activity": ".launcher.splash.SplashMainActivity",
             "keyword": "张杰 演唱会",
+            "target_title": "张杰演唱会北京站",
+            "target_venue": "国家体育场-鸟巢",
             "users": ["张三"],
             "city": "北京",
             "date": "04.06",
             "price": "1280元",
             "price_index": 6,
             "if_commit_order": False,
+            "probe_only": True,
+            "auto_navigate": True,
+            "wait_cta_ready_timeout_ms": 60000,
+            "rush_mode": True,
         }
 
-        save_config_dict(str(path), source)
+        save_config_dict(source, str(path))
         loaded = load_config_dict(str(path))
 
         assert loaded == source
+
+    def test_load_config_reads_rush_mode(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        config_data = {
+            "server_url": "http://127.0.0.1:4723",
+            "keyword": "test",
+            "users": ["A"],
+            "city": "北京",
+            "date": "01.01",
+            "price": "100元",
+            "price_index": 0,
+            "if_commit_order": False,
+            "probe_only": True,
+            "rush_mode": True,
+        }
+        (tmp_path / "config.jsonc").write_text(json.dumps(config_data), encoding="utf-8")
+
+        cfg = Config.load_config()
+        assert cfg.rush_mode is True
+
+    def test_load_config_reads_wait_cta_ready_timeout_ms(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        config_data = {
+            "server_url": "http://127.0.0.1:4723",
+            "keyword": "test",
+            "users": ["A"],
+            "city": "北京",
+            "date": "01.01",
+            "price": "100元",
+            "price_index": 0,
+            "if_commit_order": False,
+            "probe_only": True,
+            "wait_cta_ready_timeout_ms": 45000,
+        }
+        (tmp_path / "config.jsonc").write_text(json.dumps(config_data), encoding="utf-8")
+
+        cfg = Config.load_config()
+        assert cfg.wait_cta_ready_timeout_ms == 45000
+
+    def test_load_config_prefers_config_local_jsonc(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        shared_fields = {
+            "server_url": "http://127.0.0.1:4723",
+            "users": ["A"],
+            "city": "北京",
+            "date": "01.01",
+            "price": "100元",
+            "price_index": 0,
+            "if_commit_order": False,
+        }
+        (tmp_path / "config.jsonc").write_text(json.dumps({
+            **shared_fields,
+            "keyword": "from-default",
+        }), encoding="utf-8")
+        (tmp_path / "config.local.jsonc").write_text(json.dumps({
+            **shared_fields,
+            "keyword": "from-local",
+        }), encoding="utf-8")
+
+        cfg = Config.load_config()
+
+        assert cfg.keyword == "from-local"
+
+    def test_save_config_dict_defaults_to_config_local_jsonc(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        source = {
+            "server_url": "http://127.0.0.1:4723",
+            "keyword": "test",
+            "users": ["A"],
+            "city": "北京",
+            "date": "01.01",
+            "price": "100元",
+            "price_index": 0,
+            "if_commit_order": False,
+        }
+
+        save_config_dict(source)
+
+        assert (tmp_path / "config.local.jsonc").exists()
+        assert load_config_dict() == source

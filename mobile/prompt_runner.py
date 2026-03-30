@@ -33,7 +33,11 @@ def _repo_root() -> Path:
 
 
 def _config_path() -> Path:
-    return _repo_root() / "mobile" / "config.jsonc"
+    mobile_dir = _repo_root() / "mobile"
+    local_path = mobile_dir / "config.local.jsonc"
+    if local_path.exists():
+        return local_path
+    return mobile_dir / "config.jsonc"
 
 
 def _split_city_and_venue(venue_text: str) -> tuple[str | None, str]:
@@ -165,13 +169,15 @@ def build_updated_config(base_config: dict, intent, discovery: dict, date_text: 
     candidate = (discovery.get("search_results") or [{}])[0]
 
     inferred_city, inferred_venue = _split_city_and_venue(summary.get("venue") or "")
+    title = summary.get("title") or candidate.get("title")
+    venue = inferred_venue or candidate.get("venue")
     config_data = dict(base_config)
     config_data.update({
         "item_url": None,
         "item_id": None,
         "keyword": discovery["used_keyword"],
-        "target_title": summary.get("title") or candidate.get("title") or base_config.get("target_title"),
-        "target_venue": inferred_venue or candidate.get("venue") or base_config.get("target_venue"),
+        "target_title": title if title and title != "未识别" else None,
+        "target_venue": venue if venue and venue != "未识别" else None,
         "users": base_config["users"],
         "city": intent.city or candidate.get("city") or inferred_city or base_config.get("city"),
         "date": date_text,

@@ -5,20 +5,35 @@
   "platform_version": "15",
   "app_package": "cn.damai",
   "app_activity": ".launcher.splash.SplashMainActivity",
-  "keyword": "演出名称",
+  // 推荐填写大麦详情页链接，脚本会自动提取 itemId 并尽量自动生成搜索关键词
+  "item_url": "https://m.damai.cn/shows/item.html?itemId=1016133935724",
+  // 如果 item_url 解析失败，可保留 keyword 作为兜底；否则可写 null
+  "keyword": null,
+  // 如果是通过自然语言查询后写入的配置，这里会落精确标题/场馆，帮助自动搜索更稳定
+  "target_title": null,
+  "target_venue": null,
   "users": [
     "张三",
     "李四"
   ],
   "city": "深圳",
-  // 场次与票档（索引从 0 开始）
   "date": "12.06",
-  "date_index": 0,
-  "price": "498",
-  "price_index": 0,
-  "city_index": 0,
-  // 提交订单（测试时可设 false）
-  "if_commit_order": false,
-  // 快速模式
-  "fast_mode": true
+  "price": "内场1199元",
+  "price_index": 5,
+  "if_commit_order": true,
+  "probe_only": false,
+  // 自动从大麦首页/搜索页导航到目标演出
+  "auto_navigate": true,
+  // 开售时间 (ISO格式，用于倒计时等待，null=立即购买)
+  "sell_start_time": null,
+  // 提前轮询时间 (毫秒)
+  "countdown_lead_ms": 3000,
+  // 如果你会手动停在倒计时详情页，可不填 sell_start_time，改为等待 CTA 变成“立即预定/立即购买”
+  "wait_cta_ready_timeout_ms": 60000,
+  // 快速重试次数 (不重建driver，第一轮会立即重试)
+  "fast_retry_count": 8,
+  // 快速重试间隔 (毫秒)
+  "fast_retry_interval_ms": 120,
+  // 抢票实战模式：更激进地信任 price_index，减少票档文本读取和确认等待
+  "rush_mode": false
 }

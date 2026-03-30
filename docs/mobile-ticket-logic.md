@@ -14,10 +14,11 @@
 |------|------|
 | `damai_app.py` | 当前版本：`DamaiBot` 类，移动端抢票主流程 |
 | `config.py` | 配置容器 + `load_config()` 静态方法 |
-| `config.jsonc` | 用户本地配置文件 |
+| `config.local.jsonc` | 用户本地配置文件（默认优先读取） |
+| `config.jsonc` | 仓库内安全模板 / 回退配置 |
 | `config.example.jsonc` | 配置样例 |
 
-## 配置项 (`config.jsonc`)
+## 配置项 (`config.local.jsonc` / `config.jsonc`)
 
 - `server_url`: Appium 服务器地址
 - `device_name`: Appium 设备名，模拟器/真机通用
@@ -38,14 +39,16 @@
 - `auto_navigate`: 是否从大麦首页/搜索页自动进入目标演出
 - `sell_start_time`: 开售时间（ISO 格式字符串），null 表示立即购买
 - `countdown_lead_ms`: 提前轮询时间（毫秒），默认 3000
-- `fast_retry_count`: 快速重试次数（不重建 driver），默认 5
-- `fast_retry_interval_ms`: 快速重试间隔（毫秒），默认 500
+- `wait_cta_ready_timeout_ms`: 当用户已手动停在倒计时详情页时，允许脚本直接等待 CTA 变成 `立即预定/立即购买` 的最长时长；默认 0 表示关闭
+- `fast_retry_count`: 快速重试次数（不重建 driver），默认 8
+- `fast_retry_interval_ms`: 快速重试间隔（毫秒），默认 120
+- `rush_mode`: 抢票实战模式；更激进地信任 `price_index`，减少热路径中的 UI 读取和等待
 
 ## 主流程
 
 ```
 DamaiBot.__init__()
-  ├── Config.load_config()    # 读取 config.jsonc
+  ├── Config.load_config()    # 默认优先读取 config.local.jsonc
   ├── _prepare_runtime_config()  # 解析 item_url/item_id，必要时自动补 keyword
   └── _setup_driver()         # 初始化 Appium 连接
 
@@ -56,11 +59,11 @@ run_with_retry(max_retries=3)
         ├── probe_current_page()           # 探测当前页面状态
         │   ├── 非目标演出页 => navigate_to_target_event()
         │   └── probe_only => 验证控件后提前结束
-        ├── wait_for_sale_start()          # 倒计时等待（可选）
+        ├── wait_for_sale_start()          # 倒计时等待 / CTA 就绪等待（可选）
         ├── 0. 选择场次日期
         ├── 1. 选择城市
         ├── 2. 点击预约按钮
-        ├── 3. 选择票价（文本匹配 → 索引回退）
+        ├── 3. 选择票价（实战模式下优先直接按 `price_index` 点击）
         ├── 4. 选择数量
         ├── 5. 确定购买
         ├── 6. 选择用户
@@ -190,6 +193,51 @@ driver.execute_script("mobile: clickGesture", {
    - 配置中的 `price_index` 就是为此设计的
    - 先尝试 `find_element` 直接查找（不等待），失败后走 `WebDriverWait`
 
+**`rush_mode=true` 时的额外优化**:
+- 详情页“立即购票”按钮会走更短等待的快速二次尝试，但仍保留稳定的选择器路径
+- 票档优先直接按 `price_index` 点击，不再先扫描所有可见票档文本
+- SKU 页“确定购买”会走连续快速点击，并缩短确认页轮询间隔
+- 这是偏实战的模式，核心目标是压缩热路径；前提是你已经通过 `probe_only` / 到确认页验证过 `price_index` 没配错
+
+**手动倒计时页实战模式**:
+- 用户自己先进入目标演出详情页，并停在倒计时抢票界面
+- 配置 `auto_navigate=false`、`rush_mode=true`
+- 如果不想依赖精确开售时间，可把 `sell_start_time=null`，同时设置 `wait_cta_ready_timeout_ms`
+- 脚本会先预选日期/城市，然后只等待 CTA 变成 `立即预定/立即购买`，一旦就绪就直接进入热路径
+- 如果本轮失败，快速重试会优先在当前会话里回退到演出详情页再重进，不会先重建 driver 把页面打回首页
+- 详细工作流图见 [2026-03-30-mobile-hot-path-workflow-design.md](./plans/2026-03-30-mobile-hot-path-workflow-design.md)
+- 可编辑图源: [移动端热路径工作流.drawio](./移动端热路径工作流.drawio)
+- 静态图片: [移动端热路径工作流.png](./images/移动端热路径工作流.png)
+
+```mermaid
+flowchart TD
+    A[用户手动停在目标演出详情页或 SKU 页] --> B[run_ticket_grabbing]
+    B --> C[probe_current_page]
+    C -->|detail_page| D[预选日期/城市]
+    D --> E[等待 CTA 就绪或直接点击 立即购票]
+    C -->|sku_page| F[直接进入票档选择]
+    E --> F
+    F --> G[按 price_index 直点票档]
+    G --> H[选择数量]
+    H --> I[点击 确定购买]
+    I --> J{立即提交是否出现}
+    J -->|否| K[勾选观演人]
+    K --> L[_wait_for_submit_ready]
+    J -->|是| M[订单确认页]
+    L --> M
+    M --> N{if_commit_order}
+    N -->|false| O[停在 立即提交 前]
+    N -->|true| P[_submit_order_fast]
+```
+
+**手动起跑热路径压测脚本**:
+- 入口: `./mobile/scripts/benchmark_hot_path.sh`
+- 默认优先读取 `mobile/config.local.jsonc`，否则回退到 `mobile/config.jsonc`；不会写回配置
+- 会强制使用安全参数: `if_commit_order=false`、`auto_navigate=false`、`rush_mode=true`
+- 常用示例:
+  `./mobile/scripts/benchmark_hot_path.sh --runs 5`
+  `./mobile/scripts/benchmark_hot_path.sh --runs 5 --price 580元 --price-index 2 --city 成都 --date 04.18`
+
 **数量选择**:
 - 查找 `+` 按钮（`img_jia`）
 - 获取坐标后用 `clickGesture` 点击 (用户数 - 1) 次
@@ -209,7 +257,7 @@ driver.execute_script("mobile: clickGesture", {
 `run_with_retry(max_retries=3)`:
 - 最多尝试 3 次
 - 每次失败后先执行 `fast_retry_count` 次快速重试（不重建 driver）
-- 快速重试间隔由 `fast_retry_interval_ms` 控制（默认 500ms）
+- 第一轮快速重试会立即执行，后续重试间隔由 `fast_retry_interval_ms` 控制（默认 120ms）
 - 快速重试根据当前页面状态决定策略：detail/sku 页重跑全流程，order_confirm 页直接提交，其他页按返回键后重跑
 - 如果处于 `if_commit_order=false` 且已经在确认页，快速重试只验证“立即提交”按钮存在，不会误提交
 - 如果识别到 `reservation_only`、登录失效等不可重试场景，会直接停止后续重试，缩短整体耗时
@@ -220,8 +268,8 @@ driver.execute_script("mobile: clickGesture", {
 
 `wait_for_sale_start()`:
 - 当 `sell_start_time` 配置不为 null 时，在开售前 `countdown_lead_ms` 毫秒进入休眠等待
-- 休眠结束后进入 ~200ms 间隔的紧密轮询循环，检测"立即购买"等可购买按钮出现
-- 超时 5 秒后自动继续执行，避免死锁
+- 休眠结束后进入 ~80ms 间隔的紧密轮询循环，同时检测详情页 CTA、SKU 页、确认页等多个开售信号
+- 超时 8 秒后自动继续执行，避免死锁
 - `sell_start_time` 为 null 时立即购买，不等待
 
 ### 8. 订单结果验证
@@ -281,7 +329,7 @@ driver.execute_script("mobile: clickGesture", {
 ## 真机配置建议
 
 1. 用 `adb devices` 确认真机已经连上
-2. 把设备序列号填进 `config.jsonc` 的 `udid`
+2. 把设备序列号填进 `config.local.jsonc` 的 `udid`
 3. `device_name` 可以保持 `Android`，也可以写成你自己的机型名
 4. 如果大麦版本或 ROM 定制导致启动页不同，再覆盖 `app_activity`
 

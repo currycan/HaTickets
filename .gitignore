@@ -38,3 +38,10 @@ htmlcov/
 # Real config files (use *.example as template)
 web/config.local.json
 mobile/config.local.jsonc
+
+# Appium / local debug artifacts
+.appium/
+tmp_*.png
+tmp_*.xml
+mobile/tmp_*.png
+mobile/tmp_*.xml
