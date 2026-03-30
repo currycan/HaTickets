@@ -173,3 +173,119 @@ class TestRetryWithDriverRecreation:
                     # quit called between retries (2 times for 3 attempts)
                     assert mock_driver.quit.call_count == 2
                     assert mock_setup.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Extended: DamaiBot helper methods
+# ---------------------------------------------------------------------------
+
+def _make_bot(config_overrides=None):
+    mock_driver = Mock()
+    mock_driver.update_settings = Mock()
+    mock_driver.quit = Mock()
+
+    cfg = _make_config(**(config_overrides or {}))
+
+    with patch("mobile.damai_app.Config.load_config", return_value=cfg), \
+         patch("mobile.damai_app.webdriver.Remote", return_value=mock_driver), \
+         patch("mobile.damai_app.AppiumOptions"), \
+         patch("mobile.damai_app.ClientConfig"), \
+         patch("mobile.damai_app.RemoteConnection"):
+        bot = DamaiBot()
+
+    bot.driver = mock_driver
+    return bot, mock_driver
+
+
+class TestBotHelperMethods:
+
+    def test_ultra_fast_click_returns_true_on_success(self):
+        """ultra_fast_click returns True when element found and clicked."""
+        bot, mock_driver = _make_bot()
+        from appium.webdriver.common.appiumby import AppiumBy
+        from selenium.webdriver.support import expected_conditions as EC
+        el = _make_mock_element()
+
+        with patch("mobile.damai_app.WebDriverWait") as mock_wait_cls:
+            mock_wait = Mock()
+            mock_wait.until = Mock(return_value=el)
+            mock_wait_cls.return_value = mock_wait
+            with patch.object(bot, "_click_element", return_value=True):
+                result = bot.ultra_fast_click(AppiumBy.ID, "some.id", timeout=0.5)
+
+        assert result is True
+
+    def test_ultra_fast_click_returns_false_on_timeout(self):
+        """ultra_fast_click returns False when element not found (TimeoutException)."""
+        bot, mock_driver = _make_bot()
+        from selenium.common.exceptions import TimeoutException
+        from appium.webdriver.common.appiumby import AppiumBy
+
+        with patch("mobile.damai_app.WebDriverWait") as mock_wait_cls:
+            mock_wait = Mock()
+            mock_wait.until = Mock(side_effect=TimeoutException())
+            mock_wait_cls.return_value = mock_wait
+            result = bot.ultra_fast_click(AppiumBy.ID, "nonexistent", timeout=0.1)
+
+        assert result is False
+
+    def test_batch_click_calls_ultra_fast_click(self):
+        """batch_click calls ultra_fast_click for each (by, value) pair."""
+        bot, mock_driver = _make_bot()
+        from appium.webdriver.common.appiumby import AppiumBy
+
+        elements_info = [
+            (AppiumBy.ID, "btn1"),
+            (AppiumBy.ID, "btn2"),
+        ]
+
+        with patch.object(bot, "ultra_fast_click", return_value=True) as mock_click, \
+             patch("mobile.damai_app.time"):
+            bot.batch_click(elements_info, delay=0)
+
+        assert mock_click.call_count == len(elements_info)
+
+    def test_run_with_retry_succeeds_first_attempt(self):
+        """run_with_retry returns True immediately when first attempt succeeds."""
+        bot, mock_driver = _make_bot()
+
+        with patch.object(bot, "run_ticket_grabbing", return_value=True):
+            result = bot.run_with_retry(max_retries=3)
+
+        assert result is True
+        mock_driver.quit.assert_not_called()
+
+    def test_run_with_retry_retries_on_false(self):
+        """run_with_retry retries when run_ticket_grabbing returns False."""
+        bot, mock_driver = _make_bot()
+
+        call_count = {"n": 0}
+        def side_effect():
+            call_count["n"] += 1
+            return call_count["n"] >= 3  # succeed on 3rd attempt
+
+        with patch.object(bot, "run_ticket_grabbing", side_effect=side_effect), \
+             patch.object(bot, "_setup_driver"), \
+             patch("mobile.damai_app.time"):
+            result = bot.run_with_retry(max_retries=3)
+
+        assert result is True
+        assert call_count["n"] == 3
+
+
+class TestBotConfigPropagation:
+
+    def test_fast_mode_config_accessible(self):
+        """Bot exposes fast_mode from config."""
+        bot, _ = _make_bot({"fast_mode": True})
+        assert bot.config.fast_mode is True
+
+    def test_commit_order_disabled_config_accessible(self):
+        """Bot exposes if_commit_order from config."""
+        bot, _ = _make_bot({"if_commit_order": False})
+        assert bot.config.if_commit_order is False
+
+    def test_users_list_accessible(self):
+        """Bot config has users list."""
+        bot, _ = _make_bot({"users": ["Alice", "Bob"]})
+        assert bot.config.users == ["Alice", "Bob"]

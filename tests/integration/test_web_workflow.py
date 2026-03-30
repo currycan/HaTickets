@@ -137,3 +137,118 @@ class TestOrderFlowMobile:
 
             result = con.select_date_on_page()
             assert result is False or result is True
+
+
+# ---------------------------------------------------------------------------
+# Extended: Ticket selection fallback scenarios
+# ---------------------------------------------------------------------------
+
+class TestTicketSelectionFallbacks:
+
+    def _make_concert(self, city=None, dates=None, prices=None, fast_mode=True):
+        config = Config(
+            index_url="https://www.damai.cn/",
+            login_url="https://passport.damai.cn/login",
+            target_url="https://detail.damai.cn/item.htm?id=1",
+            users=["A"], city=city, dates=dates, prices=prices,
+            if_listen=False, if_commit_order=False,
+            fast_mode=fast_mode, page_load_delay=0,
+        )
+        mock_driver = Mock()
+        mock_driver.current_url = "https://detail.damai.cn/item.htm?id=1"
+        mock_driver.find_element = Mock(side_effect=NoSuchElementException)
+        mock_driver.find_elements = Mock(return_value=[])
+
+        with patch("concert.get_chromedriver_path", return_value="/fake"), \
+             patch("concert.webdriver.Chrome", return_value=mock_driver), \
+             patch("selenium.webdriver.chrome.service.Service"):
+            con = Concert(config)
+        con.driver = mock_driver
+        return con
+
+    def test_select_date_with_no_matching_elements_returns_false(self):
+        """When driver returns no elements, date selection returns False."""
+        con = self._make_concert(dates=["2026-05-01"])
+        result = con.select_date_on_page_pc()
+        assert result is False
+
+    def test_select_price_with_no_matching_elements_returns_false(self):
+        """When driver returns no elements, price selection returns False."""
+        con = self._make_concert(prices=["680"])
+        result = con.select_price_on_page_pc()
+        assert result is False
+
+    def test_select_city_with_no_elements_returns_false(self):
+        """City selection with empty elements returns False."""
+        con = self._make_concert(city="上海")
+        result = con.select_city_on_page_pc()
+        assert result is False
+
+    def test_select_quantity_no_buttons_returns_true(self):
+        """Quantity selection is non-blocking: returns True even when buttons not found."""
+        con = self._make_concert()
+        result = con.select_quantity_on_page()
+        assert result is True
+
+    def test_no_city_config_skips_city_selection(self):
+        """When city is None in config, select_details_page_pc skips city step."""
+        con = self._make_concert(city=None, dates=["2026-05-01"], prices=["680"])
+        # Should not raise even with no city
+        con.select_details_page_pc()
+
+    def test_fast_mode_true_does_not_raise(self):
+        """fast_mode=True completes without exception on empty page."""
+        con = self._make_concert(city="上海", dates=["2026-05-01"], prices=["680"], fast_mode=True)
+        con.select_details_page_pc()  # no raise expected
+
+
+# ---------------------------------------------------------------------------
+# Extended: Status gating
+# ---------------------------------------------------------------------------
+
+class TestStatusGating:
+
+    def test_choose_ticket_skips_when_status_not_2(self):
+        """choose_ticket() returns early if status != 2."""
+        config = Config(
+            index_url="https://www.damai.cn/",
+            login_url="https://passport.damai.cn/login",
+            target_url="https://detail.damai.cn/item.htm?id=1",
+            users=["A"], city=None, dates=None, prices=None,
+            if_listen=False, if_commit_order=False,
+            fast_mode=True, page_load_delay=0,
+        )
+        mock_driver = Mock()
+        mock_driver.find_elements = Mock(return_value=[])
+        mock_driver.find_element = Mock(side_effect=NoSuchElementException)
+
+        with patch("concert.get_chromedriver_path", return_value="/fake"), \
+             patch("concert.webdriver.Chrome", return_value=mock_driver), \
+             patch("selenium.webdriver.chrome.service.Service"):
+            con = Concert(config)
+
+        con.status = 0  # not 2
+        con.choose_ticket()  # should return immediately without touching driver
+        mock_driver.find_elements.assert_not_called()
+
+    def test_commit_order_skips_when_status_not_3(self):
+        """commit_order() returns early if status != 3."""
+        config = Config(
+            index_url="https://www.damai.cn/",
+            login_url="https://passport.damai.cn/login",
+            target_url="https://detail.damai.cn/item.htm?id=1",
+            users=["A"], city=None, dates=None, prices=None,
+            if_listen=False, if_commit_order=True,
+            fast_mode=True, page_load_delay=0,
+        )
+        mock_driver = Mock()
+        mock_driver.find_elements = Mock(return_value=[])
+
+        with patch("concert.get_chromedriver_path", return_value="/fake"), \
+             patch("concert.webdriver.Chrome", return_value=mock_driver), \
+             patch("selenium.webdriver.chrome.service.Service"):
+            con = Concert(config)
+
+        con.status = 0
+        con.commit_order()  # should return early
+        mock_driver.find_elements.assert_not_called()

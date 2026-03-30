@@ -148,3 +148,13 @@ class TestWebConfigValidation:
     def test_page_load_delay_float_is_valid(self):
         cfg = Config(**_make(page_load_delay=1.5))
         assert cfg.page_load_delay == 1.5
+
+    def test_dates_with_non_string_element_raises(self):
+        """dates list containing non-string element should raise."""
+        with pytest.raises(ValueError):
+            Config(**_make(dates=["2026-05-01", 123]))
+
+    def test_prices_with_non_string_element_raises(self):
+        """prices list containing non-string element should raise."""
+        with pytest.raises(ValueError):
+            Config(**_make(prices=["580", None]))

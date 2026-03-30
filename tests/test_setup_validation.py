@@ -150,7 +150,7 @@ class TestCoverageConfiguration:
         # Check coverage settings
         assert "--cov=web" in content
         assert "--cov=mobile" in content
-        assert "--cov-fail-under=80" in content
+        assert "--cov-fail-under=84" in content
         assert "htmlcov" in content
         assert "coverage.xml" in content
 
