@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 """Unit tests for mobile/damai_app.py — DamaiBot class."""
 
+from itertools import chain, repeat
 import time as _time_module
 from datetime import datetime, timezone, timedelta
 
@@ -1283,7 +1284,7 @@ class TestWaitForSaleStart:
     def test_wait_for_sale_start_waits_for_cta_without_sell_start_time(self, bot):
         bot.config.sell_start_time = None
         bot.config.wait_cta_ready_timeout_ms = 5000
-        time_values = [0.0, 0.2, 0.4]
+        time_values = chain([0.0, 0.2, 0.4], repeat(0.4))
 
         with patch("mobile.damai_app.time.time", side_effect=time_values), \
              patch("mobile.damai_app.time.sleep") as mock_sleep, \
@@ -1297,7 +1298,7 @@ class TestWaitForSaleStart:
         bot.config.sell_start_time = None
         bot.config.wait_cta_ready_timeout_ms = 100
 
-        with patch("mobile.damai_app.time.time", side_effect=[0.0, 0.05, 0.11]), \
+        with patch("mobile.damai_app.time.time", side_effect=chain([0.0, 0.05, 0.11], repeat(0.11))), \
              patch("mobile.damai_app.time.sleep") as mock_sleep, \
              patch.object(bot, "_is_sale_ready", return_value=False):
             bot.wait_for_sale_start()
@@ -1319,6 +1320,119 @@ class TestWaitForSaleStart:
         assert result is True
         select_date.assert_called_once()
         select_city.assert_called_once_with(timeout=0.6)
+
+    def test_prepare_detail_page_hot_path_returns_false_outside_detail_page(self, bot):
+        with patch.object(bot, "probe_current_page", return_value={"state": "homepage"}), \
+             patch.object(bot, "select_performance_date") as select_date, \
+             patch.object(bot, "_select_city_from_detail_page") as select_city:
+            result = bot._prepare_detail_page_hot_path()
+
+        assert result is False
+        select_date.assert_not_called()
+        select_city.assert_not_called()
+
+
+class TestDetailPagePurchaseEntry:
+    def test_select_city_from_detail_page_uses_fallback_selectors(self, bot):
+        with patch.object(bot, "smart_wait_and_click", return_value=True) as smart_click:
+            result = bot._select_city_from_detail_page(timeout=0.8)
+
+        assert result is True
+        smart_click.assert_called_once_with(
+            AppiumBy.ANDROID_UIAUTOMATOR,
+            'new UiSelector().text("深圳")',
+            [
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("深圳")'),
+                (By.XPATH, '//*[@text="深圳"]'),
+            ],
+            timeout=0.8,
+        )
+
+    def test_enter_purchase_flow_returns_none_when_city_selection_fails(self, bot):
+        with patch.object(bot, "select_performance_date") as select_date, \
+             patch.object(bot, "_select_city_from_detail_page", return_value=False) as select_city:
+            result = bot._enter_purchase_flow_from_detail_page(prepared=False)
+
+        assert result is None
+        select_date.assert_called_once()
+        select_city.assert_called_once_with(timeout=1.0)
+
+    def test_enter_purchase_flow_uses_rush_mode_fast_path(self, bot):
+        bot.config.rush_mode = True
+        next_probe = {"state": "sku_page", "reservation_mode": False}
+
+        with patch.object(bot, "ultra_fast_click", return_value=True) as fast_click, \
+             patch.object(bot, "_wait_for_purchase_entry_result", return_value=next_probe) as wait_result:
+            result = bot._enter_purchase_flow_from_detail_page(prepared=True)
+
+        assert result == next_probe
+        fast_click.assert_called_once_with(
+            By.ID,
+            "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl",
+            timeout=0.25,
+        )
+        wait_result.assert_called_once_with(timeout=0.7, poll_interval=0.03)
+
+    def test_enter_purchase_flow_falls_back_to_book_selectors(self, bot):
+        next_probe = {"state": "order_confirm_page", "submit_button": True}
+
+        with patch.object(bot, "ultra_fast_click", return_value=False), \
+             patch.object(bot, "smart_wait_and_click", return_value=True) as smart_click, \
+             patch.object(bot, "_wait_for_purchase_entry_result", return_value=next_probe) as wait_result:
+            result = bot._enter_purchase_flow_from_detail_page(prepared=True)
+
+        assert result == next_probe
+        smart_click.assert_called_once()
+        wait_result.assert_called_once_with(timeout=5, poll_interval=0.08)
+
+    def test_enter_purchase_flow_returns_none_when_all_clicks_fail(self, bot):
+        with patch.object(bot, "ultra_fast_click", return_value=False), \
+             patch.object(bot, "smart_wait_and_click", return_value=False):
+            result = bot._enter_purchase_flow_from_detail_page(prepared=True)
+
+        assert result is None
+
+
+class TestSaleReadiness:
+    def test_purchase_bar_text_ready_returns_false_when_bar_missing(self, bot):
+        bot.driver.find_element.side_effect = Exception("missing")
+        assert bot._purchase_bar_text_ready() is False
+
+    def test_purchase_bar_text_ready_returns_false_when_descendants_are_empty(self, bot):
+        purchase_bar = Mock()
+        with patch.object(bot.driver, "find_element", return_value=purchase_bar), \
+             patch.object(bot, "_collect_descendant_texts", return_value=["", "   "]):
+            assert bot._purchase_bar_text_ready() is False
+
+    def test_is_sale_ready_detects_ready_selector(self, bot):
+        with patch.object(
+            bot,
+            "_has_element",
+            side_effect=lambda by, value: value == 'new UiSelector().textContains("立即购买")',
+        ):
+            assert bot._is_sale_ready() is True
+
+    def test_is_sale_ready_uses_sku_mode_to_block_reservation(self, bot):
+        present = {(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout")}
+
+        with patch.object(bot, "_has_element", side_effect=lambda by, value: (by, value) in present), \
+             patch.object(bot, "is_reservation_sku_mode", return_value=True):
+            assert bot._is_sale_ready() is False
+
+        with patch.object(bot, "_has_element", side_effect=lambda by, value: (by, value) in present), \
+             patch.object(bot, "is_reservation_sku_mode", return_value=False):
+            assert bot._is_sale_ready() is True
+
+    def test_is_sale_ready_uses_purchase_bar_text_when_detail_cta_present(self, bot):
+        present = {(By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl")}
+
+        with patch.object(bot, "_has_element", side_effect=lambda by, value: (by, value) in present), \
+             patch.object(bot, "_purchase_bar_text_ready", return_value=True):
+            assert bot._is_sale_ready() is True
+
+    def test_is_sale_ready_returns_false_without_any_signal(self, bot):
+        with patch.object(bot, "_has_element", return_value=False):
+            assert bot._is_sale_ready() is False
 
 
 # ---------------------------------------------------------------------------
@@ -1389,6 +1503,62 @@ class TestFastRetry:
         assert result is True
         smart_click.assert_called_once()
 
+    def test_fast_retry_from_order_confirm_page_in_safe_mode_waits_for_submit_button(self, bot):
+        bot.config.if_commit_order = False
+
+        with patch.object(bot, "probe_current_page", return_value={
+                "state": "order_confirm_page",
+                "purchase_button": False,
+                "price_container": False,
+                "quantity_picker": False,
+                "submit_button": True,
+             }), \
+             patch.object(bot, "smart_wait_for_element", return_value=True) as wait_element:
+            result = bot._fast_retry_from_current_state()
+
+        assert result is True
+        wait_element.assert_called_once()
+
+    def test_fast_retry_switches_to_auto_navigation_when_wrong_detail_page(self, bot):
+        bot.item_detail = _make_item_detail()
+        bot.config.auto_navigate = True
+
+        with patch.object(bot, "probe_current_page", return_value={
+                "state": "detail_page",
+                "purchase_button": True,
+                "price_container": True,
+                "quantity_picker": False,
+                "submit_button": False,
+             }), \
+             patch.object(bot, "_current_page_matches_target", return_value=False), \
+             patch.object(bot, "navigate_to_target_event", return_value=True) as navigate, \
+             patch.object(bot, "run_ticket_grabbing", return_value=True) as run_tg:
+            result = bot._fast_retry_from_current_state()
+
+        assert result is True
+        navigate.assert_called_once()
+        run_tg.assert_called_once()
+
+    def test_fast_retry_stops_in_manual_mode_when_wrong_detail_page(self, bot):
+        bot.item_detail = _make_item_detail()
+        bot.config.auto_navigate = False
+
+        with patch.object(bot, "probe_current_page", return_value={
+                "state": "detail_page",
+                "purchase_button": True,
+                "price_container": True,
+                "quantity_picker": False,
+                "submit_button": False,
+             }), \
+             patch.object(bot, "_current_page_matches_target", return_value=False), \
+             patch.object(bot, "navigate_to_target_event") as navigate, \
+             patch.object(bot, "run_ticket_grabbing") as run_tg:
+            result = bot._fast_retry_from_current_state()
+
+        assert result is False
+        navigate.assert_not_called()
+        run_tg.assert_not_called()
+
     def test_fast_retry_from_unknown_recovers_locally_then_reruns(self, bot):
         """Manual-start retry recovers locally before re-running the flow."""
         bot.config.auto_navigate = False
@@ -1439,6 +1609,24 @@ class TestFastRetry:
         recover_local.assert_called_once()
         run_tg.assert_not_called()
         assert result is False
+
+    def test_fast_retry_from_unknown_uses_auto_navigation_when_enabled(self, bot):
+        bot.config.auto_navigate = True
+
+        with patch.object(bot, "probe_current_page", return_value={
+                "state": "unknown",
+                "purchase_button": False,
+                "price_container": False,
+                "quantity_picker": False,
+                "submit_button": False,
+             }), \
+             patch.object(bot, "navigate_to_target_event", return_value=True) as navigate, \
+             patch.object(bot, "run_ticket_grabbing", return_value=True) as run_tg:
+            result = bot._fast_retry_from_current_state()
+
+        assert result is True
+        navigate.assert_called_once()
+        run_tg.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -1620,6 +1808,114 @@ class TestCheckSessionValid:
 
         assert result is False
         assert "登录提示" in caplog.text
+
+
+class TestSkuInspectionHelpers:
+    def test_dismiss_startup_popups_returns_false_when_nothing_is_clickable(self, bot):
+        with patch.object(bot, "_has_element", return_value=False), \
+             patch.object(bot, "ultra_fast_click") as fast_click:
+            assert bot.dismiss_startup_popups() is False
+
+        fast_click.assert_not_called()
+
+    def test_is_reservation_sku_mode_detects_indicator(self, bot):
+        with patch.object(
+            bot,
+            "_has_element",
+            side_effect=lambda by, value: value == 'new UiSelector().text("预约想看场次")',
+        ):
+            assert bot.is_reservation_sku_mode() is True
+
+    def test_get_visible_date_options_deduplicates_blank_values(self, bot):
+        element_a = Mock(text="04.04")
+        element_b = Mock(text="04.04")
+        element_c = Mock(text="  ")
+        element_d = Mock(text="04.05")
+        bot.driver.find_elements.return_value = [element_a, element_b, element_c, element_d]
+
+        assert bot.get_visible_date_options() == ["04.04", "04.05"]
+
+    def test_get_visible_price_options_returns_empty_when_container_missing(self, bot):
+        bot.driver.find_element.side_effect = Exception("missing")
+        assert bot.get_visible_price_options() == []
+
+    def test_get_visible_price_options_returns_empty_when_cards_are_not_a_sequence(self, bot):
+        price_container = Mock()
+        price_container.find_elements.side_effect = lambda by=None, value=None: Mock()
+        bot.driver.find_element.return_value = price_container
+
+        assert bot.get_visible_price_options() == []
+
+    def test_get_detail_venue_text_uses_second_resource_id(self, bot):
+        with patch.object(bot, "_safe_element_text", side_effect=["", "浦发银行东方体育中心"]):
+            assert bot._get_detail_venue_text() == "浦发银行东方体育中心"
+
+    def test_ensure_sku_page_for_inspection_returns_existing_sku_page(self, bot):
+        page_probe = {"state": "sku_page", "reservation_mode": False}
+        assert bot.ensure_sku_page_for_inspection(page_probe) == page_probe
+
+    def test_ensure_sku_page_for_inspection_returns_non_detail_probe_as_is(self, bot):
+        page_probe = {"state": "homepage"}
+        assert bot.ensure_sku_page_for_inspection(page_probe) == page_probe
+
+    def test_ensure_sku_page_for_inspection_enters_sku_from_detail_page(self, bot):
+        bot.config.date = "04.04"
+        bot.config.city = "上海"
+        next_probe = {"state": "sku_page", "reservation_mode": False}
+
+        with patch.object(bot, "select_performance_date") as select_date, \
+             patch.object(bot, "smart_wait_and_click", return_value=True) as smart_click, \
+             patch.object(bot, "wait_for_page_state", return_value=next_probe) as wait_state:
+            result = bot.ensure_sku_page_for_inspection({"state": "detail_page"})
+
+        assert result == next_probe
+        select_date.assert_called_once()
+        assert smart_click.call_count == 2
+        wait_state.assert_called_once_with({"sku_page", "order_confirm_page"}, timeout=5)
+
+    def test_ensure_sku_page_for_inspection_returns_probe_when_click_fails(self, bot):
+        with patch.object(bot, "select_performance_date") as select_date, \
+             patch.object(bot, "smart_wait_and_click", return_value=False), \
+             patch.object(bot, "probe_current_page", return_value={"state": "detail_page"}) as probe:
+            result = bot.ensure_sku_page_for_inspection({"state": "detail_page"})
+
+        assert result == {"state": "detail_page"}
+        select_date.assert_called_once()
+        probe.assert_called_once()
+
+    def test_inspect_current_target_event_collects_dates_and_prices(self, bot):
+        sku_probe = {"state": "sku_page", "reservation_mode": True}
+        prices = [{"index": 5, "text": "看台 899元", "tag": "可选", "source": "ui"}]
+
+        with patch.object(bot, "_get_detail_title_text", side_effect=["", "马思唯上海站"]), \
+             patch.object(bot, "_get_detail_venue_text", side_effect=["", "上海市 · 浦发银行东方体育中心"]), \
+             patch.object(bot, "ensure_sku_page_for_inspection", return_value=sku_probe), \
+             patch.object(bot, "get_visible_date_options", return_value=["04.04"]), \
+             patch.object(bot, "get_visible_price_options", return_value=prices):
+            summary = bot.inspect_current_target_event({"state": "detail_page"})
+
+        assert summary == {
+            "state": "sku_page",
+            "title": "马思唯上海站",
+            "venue": "上海市 · 浦发银行东方体育中心",
+            "dates": ["04.04"],
+            "price_options": prices,
+            "reservation_mode": True,
+        }
+
+    def test_inspect_current_target_event_skips_price_reads_outside_sku_page(self, bot):
+        with patch.object(bot, "_get_detail_title_text", return_value="马思唯上海站"), \
+             patch.object(bot, "_get_detail_venue_text", return_value="浦发银行东方体育中心"), \
+             patch.object(bot, "ensure_sku_page_for_inspection", return_value={"state": "detail_page"}), \
+             patch.object(bot, "get_visible_date_options") as get_dates, \
+             patch.object(bot, "get_visible_price_options") as get_prices:
+            summary = bot.inspect_current_target_event({"state": "detail_page"})
+
+        assert summary["state"] == "detail_page"
+        assert summary["dates"] == []
+        assert summary["price_options"] == []
+        get_dates.assert_not_called()
+        get_prices.assert_not_called()
 
     def test_check_session_valid_register_prompt(self, bot, caplog):
         """'登录/注册' text detected on page, returns False."""
