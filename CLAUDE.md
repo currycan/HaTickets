@@ -49,13 +49,27 @@ cargo test --manifest-path src-tauri/Cargo.toml   # Rust tests
 
 ### Web (`web/`)
 - `damai.py` — Entry point: validates config, loads `Config`, orchestrates `Concert`
-- `concert.py` — Core automation: Selenium WebDriver lifecycle, cookie-based auth, ticket selection polling loop, order submission. Uses `self.status` state machine (0=init, 2=logged in, 3=selecting)
+- `concert.py` — Core automation: Selenium WebDriver lifecycle, multi-session festival support, ticket selection polling loop. Uses `self.status` state machine (0=init, 2=logged in, 3=selecting)
 - `config.py` — Config container (URL, users, city, dates, prices, retry count, fast_mode, page_load_delay)
+- `session_manager.py` — Cookie-based auth persistence with 24-hour expiry checks
+- `ticket_selector.py` — Selects dates/prices/cities/quantities using fuzzy matching and multiple fallback strategies (PC + mobile layouts)
+- `user_selector.py` — Selects attendees on order page via four cascading methods (div, checkbox, click, JS)
+- `order_submitter.py` — Finds and clicks submit button with text/attribute/CSS/XPath fallbacks
 - `check_environment.py` — ChromeDriver auto-detection/installation; called automatically by `Concert.__init__`
+- `quick_diagnosis.py` — Diagnoses Chrome/ChromeDriver version mismatches
+- `logger.py` — Unified logging (Shanghai timezone, console INFO+ / file DEBUG+)
 
 ### Mobile (`mobile/`)
 - `damai_app.py` — `DamaiBot` with coordinate-based gesture clicks (faster than element.click()), aggressive timeout tuning, batch coordinate collection
 - `config.py` — Mobile config via `load_config()` reading `config.jsonc`
+- `item_resolver.py` — Fetches event metadata (name, venue, dates, prices) from item URLs via Damai mobile API
+- `prompt_parser.py` — Parses natural-language prompts into structured intent (quantity, date, city, price) with scoring
+- `prompt_runner.py` — CLI entrypoint for natural-language ticket discovery and bot invocation
+- `logger.py` — Unified logging (Shanghai timezone, console INFO+ / file DEBUG+)
+
+### Shared (`shared/`)
+- `config_validator.py` — Validates URL format, non-empty lists, positive integers (used by both web and mobile)
+- `xpath_utils.py` — XPath string literal escaping via `concat()` to handle single/double quotes
 
 ### Desktop (`desktop/`)
 - **Frontend** (`desktop/src/`): Vue 3 + Vuex + Vue Router + Arco Design UI, bundled by Vite
