@@ -1,9 +1,13 @@
-"""Unit tests for mobile/prompt_runner.py"""
+"""Unit tests for mobile/prompt_runner.py."""
 
-import pytest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
+
+from mobile.config import Config
 from mobile.prompt_parser import PromptIntent, parse_prompt
+from mobile import prompt_runner
 from mobile.prompt_runner import (
     _config_path,
     _format_price_option,
@@ -19,26 +23,61 @@ from mobile.prompt_runner import (
 )
 
 
-def test_build_updated_config_for_probe_mode():
-    base_config = {
-        "server_url": "http://127.0.0.1:4723",
-        "device_name": "Android",
-        "udid": "ABC",
-        "platform_version": "16",
-        "app_package": "cn.damai",
-        "app_activity": ".launcher.splash.SplashMainActivity",
-        "item_url": "https://old.example/item",
-        "item_id": "123456",
-        "keyword": "旧关键词",
-        "users": ["张志涛"],
-        "city": "北京",
-        "date": "04.05",
-        "price": "380元",
-        "price_index": 0,
-        "if_commit_order": True,
-        "probe_only": False,
-        "auto_navigate": False,
+def _make_base_config() -> Config:
+    return Config(
+        server_url="http://127.0.0.1:4723",
+        device_name="Android",
+        udid="ABC123",
+        platform_version="16",
+        app_package="cn.damai",
+        app_activity=".launcher.splash.SplashMainActivity",
+        keyword="旧关键词",
+        users=["张志涛"],
+        city="上海",
+        date="04.04",
+        price="899元",
+        price_index=5,
+        if_commit_order=False,
+        probe_only=True,
+        auto_navigate=False,
+        rush_mode=False,
+        target_title="旧标题",
+        target_venue="旧场馆",
+    )
+
+
+def _make_massiwei_discovery():
+    return {
+        "used_keyword": "马思唯 演唱会",
+        "page_probe": {"state": "detail_page"},
+        "search_results": [
+            {
+                "score": 92,
+                "title": "【上海】马思唯-乐透人生 The Lottery TOUR 巡回演唱会-上海站",
+                "city": "上海",
+                "venue": "浦发银行东方体育中心",
+                "time": "2026-04-04 19:00",
+            }
+        ],
     }
+
+
+def _make_massiwei_summary():
+    return {
+        "title": "【上海】马思唯-乐透人生 The Lottery TOUR 巡回演唱会-上海站",
+        "venue": "上海市 · 浦发银行东方体育中心",
+        "state": "detail_page",
+        "reservation_mode": False,
+        "dates": ["04.04", "04.05"],
+        "price_options": [
+            {"index": 5, "text": "看台 899元", "tag": "可选"},
+            {"index": 6, "text": "内场 1299元", "tag": "可选", "source": "ocr"},
+        ],
+    }
+
+
+def test_build_updated_config_for_probe_mode():
+    base_config = _make_base_config().to_dict()
     intent = parse_prompt("帮我抢一张 4 月 6 号张杰的演唱会门票，1280元")
     discovery = {
         "used_keyword": "张杰 演唱会",
@@ -56,7 +95,7 @@ def test_build_updated_config_for_probe_mode():
     }
     selected_price = {"index": 6, "text": "1280元", "tag": "可预约"}
 
-    updated = build_updated_config(base_config, intent, discovery, "04.06", selected_price, "probe")
+    updated = prompt_runner.build_updated_config(base_config, intent, discovery, "04.06", selected_price, "probe")
 
     assert updated["item_url"] is None
     assert updated["item_id"] is None
@@ -73,27 +112,17 @@ def test_build_updated_config_for_probe_mode():
 
 
 def test_build_updated_config_drops_stale_target_when_summary_is_unknown():
-    base_config = {
-        "server_url": "http://127.0.0.1:4723",
-        "device_name": "Android",
-        "udid": "ABC",
-        "platform_version": "16",
-        "app_package": "cn.damai",
-        "app_activity": ".launcher.splash.SplashMainActivity",
-        "item_url": None,
-        "item_id": None,
-        "keyword": "旧关键词",
+    base_config = _make_base_config().to_dict()
+    base_config.update({
         "target_title": "旧演出标题",
         "target_venue": "旧场馆",
-        "users": ["张志涛"],
+        "keyword": "旧关键词",
         "city": "上海",
         "date": "04.04",
         "price": "899元",
         "price_index": 5,
-        "if_commit_order": False,
-        "probe_only": True,
         "auto_navigate": True,
-    }
+    })
     intent = parse_prompt("帮我买一张马思唯的上海 4 月 4 日的看台票 899")
     discovery = {
         "used_keyword": "马思唯 演唱会",
@@ -105,10 +134,11 @@ def test_build_updated_config_drops_stale_target_when_summary_is_unknown():
     }
     selected_price = {"index": 5, "text": "899元", "tag": "", "source": "ocr"}
 
-    updated = build_updated_config(base_config, intent, discovery, "04.04", selected_price, "apply")
+    updated = prompt_runner.build_updated_config(base_config, intent, discovery, "04.04", selected_price, "apply")
 
     assert updated["target_title"] is None
     assert updated["target_venue"] is None
+
 
 # ---------------------------------------------------------------------------
 # _split_city_and_venue
@@ -658,3 +688,28 @@ class TestMain:
         with patch("mobile.prompt_runner._repo_root", return_value=tmp_path):
             path = _config_path()
         assert path.name == "config.local.jsonc"
+
+
+def test_main_summary_mode_output_format(tmp_path, capsys):
+    config_path = tmp_path / "config.local.jsonc"
+    base_config = _make_base_config()
+    bot = Mock()
+    bot.driver = Mock()
+    discovery = _make_massiwei_discovery()
+    summary = _make_massiwei_summary()
+    discovery["summary"] = summary
+    bot.discover_target_event.return_value = discovery
+    bot.inspect_current_target_event.return_value = summary
+
+    with patch("mobile.prompt_runner._config_path", return_value=config_path), \
+         patch("mobile.prompt_runner.load_config_dict", return_value=base_config.to_dict()), \
+         patch("mobile.prompt_runner.Config.load_config", return_value=base_config), \
+         patch("mobile.prompt_runner.DamaiBot", return_value=bot), \
+         patch("mobile.prompt_runner.choose_price_option", return_value=summary["price_options"][0]):
+        assert prompt_runner.main(["帮我买一张马思唯的上海 4 月 4 日的看台票 899"]) == 0
+
+    output = capsys.readouterr().out
+    assert "匹配结果:" in output
+    assert "推荐票档: [5] 看台 899元 [可选]" in output
+    bot.dismiss_startup_popups.assert_called_once()
+    bot.driver.quit.assert_called_once()

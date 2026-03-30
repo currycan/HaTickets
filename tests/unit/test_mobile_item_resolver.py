@@ -304,3 +304,27 @@ class TestDamaiItemResolver:
         with patch.object(resolver, "_request", return_value="ok"):
             with pytest.raises(DamaiItemResolveError, match="_m_h5_tk"):
                 resolver._prime_token("123", "https://referer.example", "{}")
+
+    def test_request_reads_response_body(self):
+        resolver = self._make_resolver()
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"ok": true}'
+        resolver.opener = Mock()
+        resolver.opener.open.return_value = response
+
+        body = resolver._request("https://example.com/api", "https://referer.example")
+
+        assert body == '{"ok": true}'
+        request = resolver.opener.open.call_args.args[0]
+        assert request.full_url == "https://example.com/api"
+        assert request.header_items()
+
+    def test_prime_token_returns_cookie_prefix(self):
+        resolver = self._make_resolver()
+        cookie = Mock()
+        cookie.name = "_m_h5_tk"
+        cookie.value = "token_part_12345_suffix"
+        resolver.cookie_jar = [cookie]
+
+        with patch.object(resolver, "_request", return_value="ok"):
+            assert resolver._prime_token("123", "https://referer.example", "{}") == "token"

@@ -4,7 +4,15 @@ import os
 
 import pytest
 
-from mobile.config import Config, _strip_jsonc_comments, load_config_dict, save_config_dict
+from mobile.config import (
+    Config,
+    _load_config_dict_from_path,
+    _resolve_existing_config_path,
+    _resolve_writable_config_path,
+    _strip_jsonc_comments,
+    load_config_dict,
+    save_config_dict,
+)
 
 
 _VALID = dict(
@@ -140,6 +148,10 @@ class TestMobileConfigValidation:
         assert cfg.keyword is None
         assert cfg.item_url.endswith("1016133935724")
 
+    def test_keyword_none_without_item_reference_raises(self):
+        with pytest.raises(ValueError, match="keyword 不能为空"):
+            Config(**_make(keyword=None))
+
     def test_item_id_invalid_raises(self):
         with pytest.raises(ValueError, match="item_id"):
             Config(**_make(item_id="abc123"))
@@ -190,6 +202,10 @@ class TestMobileConfigNewFields:
     def test_sell_start_time_valid_iso(self):
         cfg = Config(**_make(sell_start_time="2026-04-01T20:00:00+08:00"))
         assert cfg.sell_start_time == "2026-04-01T20:00:00+08:00"
+
+    def test_sell_start_time_non_string_raises(self):
+        with pytest.raises(ValueError, match="sell_start_time 必须是 ISO 格式"):
+            Config(**_make(sell_start_time=123))
 
     def test_sell_start_time_invalid_raises(self):
         with pytest.raises(ValueError, match="sell_start_time"):
@@ -242,6 +258,23 @@ class TestMobileConfigNewFields:
 
 class TestMobileConfigLoadConfig:
 
+    def test_load_config_dict_from_missing_path_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match=f"配置文件未找到: {tmp_path / 'missing.jsonc'}"):
+            _load_config_dict_from_path(tmp_path / "missing.jsonc")
+
+    def test_resolve_existing_config_path_prefers_local(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config.local.jsonc").write_text("{}", encoding="utf-8")
+        (tmp_path / "config.jsonc").write_text("{}", encoding="utf-8")
+
+        assert _resolve_existing_config_path() == "config.local.jsonc"
+
+    def test_resolve_writable_config_path_falls_back_to_shared(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config.jsonc").write_text("{}", encoding="utf-8")
+
+        assert _resolve_writable_config_path() == "config.jsonc"
+
     def test_load_config_success(self, mock_mobile_config_file, monkeypatch):
         mock_mobile_config_file()
         monkeypatch.chdir(mock_mobile_config_file.__wrapped__ if hasattr(mock_mobile_config_file, '__wrapped__') else mock_mobile_config_file().parent)
@@ -293,6 +326,22 @@ class TestMobileConfigLoadConfig:
         monkeypatch.chdir(tmp_path)
         (tmp_path / "config.jsonc").write_text('{"server_url": "x"}', encoding="utf-8")
         with pytest.raises(KeyError, match="缺少必需字段"):
+            Config.load_config()
+
+    def test_load_config_requires_keyword_or_item_reference(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        config_data = {
+            "server_url": "http://127.0.0.1:4723",
+            "users": ["A"],
+            "city": "北京",
+            "date": "01.01",
+            "price": "100元",
+            "price_index": 0,
+            "if_commit_order": False,
+        }
+        (tmp_path / "config.jsonc").write_text(json.dumps(config_data), encoding="utf-8")
+
+        with pytest.raises(KeyError, match="keyword 或 item_url 或 item_id"):
             Config.load_config()
 
     def test_load_config_jsonc_with_comments(self, tmp_path, monkeypatch):
