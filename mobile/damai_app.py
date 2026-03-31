@@ -581,20 +581,31 @@ class DamaiBot:
 
     def _ensure_attendees_selected_on_confirm_page(self, require_attendee_section=False):
         """Make sure required attendee checkboxes are selected before submit."""
-        attendee_section_visible = self._has_element(
-            AppiumBy.ANDROID_UIAUTOMATOR,
-            'new UiSelector().textContains("实名观演人")',
-        )
         checkbox_elements = self._attendee_checkbox_elements()
 
-        if not attendee_section_visible:
-            return not require_attendee_section
-        if not checkbox_elements:
-            logger.warning("确认页存在观演人区域，但未找到可勾选观演人，请手动检查")
-            return False
+        if self.config.rush_mode:
+            # 极速模式：checkbox 存在即说明观演人区域可见，跳过额外的 UiSelector 文本查找。
+            # required_count 直接取 config.users 长度，避免再发一次 UiSelector 查询（~100ms）。
+            if not checkbox_elements:
+                return not require_attendee_section
+            required_count = max(1, len(self.config.users or []))
+        else:
+            attendee_section_visible = self._has_element(
+                AppiumBy.ANDROID_UIAUTOMATOR,
+                'new UiSelector().textContains("实名观演人")',
+            )
+            if not attendee_section_visible:
+                return not require_attendee_section
+            if not checkbox_elements:
+                logger.warning("确认页存在观演人区域，但未找到可勾选观演人，请手动检查")
+                return False
+            required_count = self._attendee_required_count_on_confirm_page()
 
-        required_count = self._attendee_required_count_on_confirm_page()
-        selected_count = self._attendee_selected_count(checkbox_elements)
+        # rush_mode 下跳过 page_source 全页 XML dump（~300-500ms），直接用 get_attribute 结果。
+        selected_count = self._attendee_selected_count(
+            checkbox_elements,
+            use_source_fallback=not self.config.rush_mode,
+        )
         if selected_count >= required_count:
             return True
 

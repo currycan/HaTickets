@@ -260,55 +260,88 @@ class TestRequireDetailStart:
 # summarize_results
 # ---------------------------------------------------------------------------
 
-def test_summarize_results_calculates_elapsed_and_recovery():
+def test_summarize_results_separates_cold_and_warm():
+    # run1=cold(8.1s), run2=warm(5.9s) — avg/min/max should be from warm only
     summary = summarize_results([
         {"success": True, "elapsed_seconds": 8.1, "recovery_seconds": 3.6},
         {"success": False, "elapsed_seconds": 5.9, "recovery_seconds": None},
     ])
 
-    assert summary == {
-        "runs": 2,
-        "success_count": 1,
-        "avg_elapsed_seconds": 7.0,
-        "min_elapsed_seconds": 5.9,
-        "max_elapsed_seconds": 8.1,
-        "avg_recovery_seconds": 3.6,
-    }
+    assert summary["runs"] == 2
+    assert summary["success_count"] == 1
+    assert summary["cold_start_seconds"] == 8.1
+    assert summary["cold_start_success"] is True
+    # warm stats from run2 only
+    assert summary["avg_elapsed_seconds"] == 5.9
+    assert summary["min_elapsed_seconds"] == 5.9
+    assert summary["max_elapsed_seconds"] == 5.9
+    # recovery covers all runs: run1 had 3.6s, run2 had None → avg = 3.6
+    assert summary["avg_recovery_seconds"] == 3.6
 
 
 class TestSummarizeResults:
-    def test_no_recovery_returns_none_avg(self):
+    def test_single_run_uses_it_as_both_cold_and_warm(self):
         results = [
+            {"elapsed_seconds": 5.0, "success": True, "recovery_seconds": None},
+        ]
+        summary = summarize_results(results)
+        assert summary["cold_start_seconds"] == 5.0
+        assert summary["cold_start_success"] is True
+        assert summary["avg_elapsed_seconds"] == 5.0
+        assert summary["avg_recovery_seconds"] is None
+
+    def test_no_recovery_returns_none_avg(self):
+        # All runs have no recovery → avg should be None
+        results = [
+            {"elapsed_seconds": 8.0, "success": True, "recovery_seconds": None},
             {"elapsed_seconds": 5.0, "success": True, "recovery_seconds": None},
             {"elapsed_seconds": 7.0, "success": True, "recovery_seconds": None},
         ]
         summary = summarize_results(results)
+        assert summary["cold_start_seconds"] == 8.0
         assert summary["avg_recovery_seconds"] is None
-        assert summary["runs"] == 2
-        assert summary["success_count"] == 2
+        assert summary["runs"] == 3
+        assert summary["success_count"] == 3
         assert summary["avg_elapsed_seconds"] == 6.0
 
     def test_with_recovery_values(self):
         results = [
+            {"elapsed_seconds": 9.0, "success": True, "recovery_seconds": 2.0},
             {"elapsed_seconds": 5.0, "success": True, "recovery_seconds": 3.0},
             {"elapsed_seconds": 7.0, "success": False, "recovery_seconds": 4.0},
         ]
         summary = summarize_results(results)
-        assert summary["avg_recovery_seconds"] == 3.5
-        assert summary["success_count"] == 1
+        assert summary["cold_start_seconds"] == 9.0
+        assert summary["avg_recovery_seconds"] == 3.0  # all 3 runs: (2+3+4)/3
+        assert summary["success_count"] == 2
 
     def test_mixed_recovery_values(self):
         results = [
+            {"elapsed_seconds": 9.0, "success": True, "recovery_seconds": 2.0},
             {"elapsed_seconds": 5.0, "success": True, "recovery_seconds": 3.0},
             {"elapsed_seconds": 7.0, "success": True, "recovery_seconds": None},
         ]
         summary = summarize_results(results)
-        assert summary["avg_recovery_seconds"] == 3.0
+        assert summary["avg_recovery_seconds"] == 2.5  # (2+3)/2, None excluded
 
 
 # ---------------------------------------------------------------------------
 # run_benchmark
 # ---------------------------------------------------------------------------
+
+def test_run_one_returns_success_elapsed_and_timeline():
+    from mobile.hot_path_benchmark import _run_one
+    bot = Mock()
+    bot.run_ticket_grabbing.return_value = True
+    bot.probe_current_page.return_value = {"state": "order_confirm_page", "submit_button": True}
+
+    with patch("mobile.hot_path_benchmark.time.time", side_effect=[0.0, 3.5]):
+        success, elapsed, final_probe, timeline = _run_one(bot, {"state": "detail_page"}, "第 1 轮")
+
+    assert success is True
+    assert elapsed == 3.5
+    assert final_probe["state"] == "order_confirm_page"
+
 
 def test_run_benchmark_rejects_invalid_runs():
     with pytest.raises(ValueError, match="runs 必须大于等于 1"):
@@ -340,10 +373,16 @@ def test_run_benchmark_collects_results_and_recovery():
     assert payload["title"] == "【成都】顽童MJ116 OGS巡回演唱会-成都站"
     assert payload["summary"]["runs"] == 2
     assert payload["summary"]["success_count"] == 2
-    assert payload["summary"]["avg_elapsed_seconds"] == 7.0
+    # cold start = run1
+    assert payload["summary"]["cold_start_seconds"] == 8.1
+    assert payload["summary"]["cold_start_success"] is True
+    # warm avg/min/max from run2 only
+    assert payload["summary"]["avg_elapsed_seconds"] == 5.9
     assert payload["summary"]["avg_recovery_seconds"] == 3.6
+    assert payload["results"][0]["cold_start"] is True
     assert payload["results"][0]["elapsed_seconds"] == 8.1
     assert payload["results"][0]["recovery_seconds"] == 3.6
+    assert payload["results"][1]["cold_start"] is False
     assert payload["results"][1]["elapsed_seconds"] == 5.9
     assert payload["results"][1]["recovery_seconds"] is None
 
@@ -351,6 +390,19 @@ def test_run_benchmark_collects_results_and_recovery():
 # ---------------------------------------------------------------------------
 # format_report
 # ---------------------------------------------------------------------------
+
+def _make_summary(cold_seconds, cold_success, warm_avg, warm_min, warm_max, recovery_avg, runs, success_count):
+    return {
+        "runs": runs,
+        "success_count": success_count,
+        "cold_start_seconds": cold_seconds,
+        "cold_start_success": cold_success,
+        "avg_elapsed_seconds": warm_avg,
+        "min_elapsed_seconds": warm_min,
+        "max_elapsed_seconds": warm_max,
+        "avg_recovery_seconds": recovery_avg,
+    }
+
 
 def test_format_report_includes_summary_lines():
     payload = {
@@ -362,30 +414,39 @@ def test_format_report_includes_summary_lines():
         "results": [
             {
                 "run": 1,
+                "cold_start": True,
                 "success": True,
                 "elapsed_seconds": 8.11,
                 "final_state": "order_confirm_page",
                 "submit_button_ready": True,
                 "recovery_seconds": 3.83,
-                "recovery_state": "sku_page",
+                "recovery_state": "detail_page",
                 "step_timeline": [],
-            }
+            },
+            {
+                "run": 2,
+                "cold_start": False,
+                "success": True,
+                "elapsed_seconds": 2.5,
+                "final_state": "order_confirm_page",
+                "submit_button_ready": True,
+                "recovery_seconds": None,
+                "recovery_state": "order_confirm_page",
+                "step_timeline": [],
+            },
         ],
-        "summary": {
-            "runs": 1,
-            "success_count": 1,
-            "avg_elapsed_seconds": 8.11,
-            "min_elapsed_seconds": 8.11,
-            "max_elapsed_seconds": 8.11,
-            "avg_recovery_seconds": 3.83,
-        },
+        "summary": _make_summary(8.11, True, 2.5, 2.5, 2.5, 3.83, 2, 2),
     }
 
     report = format_report(payload)
 
     assert "演出: 【成都】顽童MJ116 OGS巡回演唱会-成都站" in report
-    assert "1. 8.11s | success | final=order_confirm_page | submit_ready=True | recover=3.83s -> sku_page" in report
-    assert "runs=1, success=1/1" in report
+    assert "1. [冷启动] 8.11s | success" in report
+    assert "2. 2.50s | success" in report
+    assert "runs=2, success=2/2" in report
+    assert "冷启动 = 8.11s (success)" in report
+    assert "热重试" in report
+    assert "recovery avg = 3.83s" in report
 
 
 def test_format_report_no_recovery():
@@ -398,6 +459,7 @@ def test_format_report_no_recovery():
         "results": [
             {
                 "run": 1,
+                "cold_start": True,
                 "success": False,
                 "elapsed_seconds": 3.5,
                 "final_state": "detail_page",
@@ -407,14 +469,7 @@ def test_format_report_no_recovery():
                 "step_timeline": [],
             }
         ],
-        "summary": {
-            "runs": 1,
-            "success_count": 0,
-            "avg_elapsed_seconds": 3.5,
-            "min_elapsed_seconds": 3.5,
-            "max_elapsed_seconds": 3.5,
-            "avg_recovery_seconds": None,
-        },
+        "summary": _make_summary(3.5, False, 3.5, 3.5, 3.5, None, 1, 0),
     }
     report = format_report(payload)
     assert "recover=" not in report
@@ -432,6 +487,7 @@ def test_format_report_no_title():
         "results": [
             {
                 "run": 1,
+                "cold_start": True,
                 "success": True,
                 "elapsed_seconds": 2.0,
                 "final_state": "order_confirm_page",
@@ -441,14 +497,7 @@ def test_format_report_no_title():
                 "step_timeline": [],
             }
         ],
-        "summary": {
-            "runs": 1,
-            "success_count": 1,
-            "avg_elapsed_seconds": 2.0,
-            "min_elapsed_seconds": 2.0,
-            "max_elapsed_seconds": 2.0,
-            "avg_recovery_seconds": None,
-        },
+        "summary": _make_summary(2.0, True, 2.0, 2.0, 2.0, None, 1, 1),
     }
     report = format_report(payload)
     assert "未识别" in report
@@ -477,6 +526,8 @@ def test_main_prints_human_report_and_quits_driver(capsys):
         "summary": {
             "runs": 2,
             "success_count": 2,
+            "cold_start_seconds": 8.0,
+            "cold_start_success": True,
             "avg_elapsed_seconds": 2.0,
             "min_elapsed_seconds": 1.9,
             "max_elapsed_seconds": 2.1,
@@ -501,6 +552,8 @@ def test_main_prints_json_and_returns_one_when_any_run_fails(capsys):
         "summary": {
             "runs": 2,
             "success_count": 1,
+            "cold_start_seconds": 8.0,
+            "cold_start_success": True,
             "avg_elapsed_seconds": 2.0,
             "min_elapsed_seconds": 1.9,
             "max_elapsed_seconds": 2.1,
@@ -531,6 +584,7 @@ def test_main_success_returns_0():
         "results": [
             {
                 "run": 1,
+                "cold_start": True,
                 "success": True,
                 "elapsed_seconds": 3.5,
                 "final_state": "order_confirm_page",
@@ -540,14 +594,7 @@ def test_main_success_returns_0():
                 "step_timeline": [],
             }
         ],
-        "summary": {
-            "runs": 1,
-            "success_count": 1,
-            "avg_elapsed_seconds": 3.5,
-            "min_elapsed_seconds": 3.5,
-            "max_elapsed_seconds": 3.5,
-            "avg_recovery_seconds": None,
-        },
+        "summary": _make_summary(3.5, True, 3.5, 3.5, 3.5, None, 1, 1),
     }
     with patch("mobile.hot_path_benchmark.Config.load_config") as mock_load, \
          patch("mobile.hot_path_benchmark.build_benchmark_config") as mock_build, \
@@ -570,12 +617,11 @@ def test_main_bot_driver_quit_called():
         "price": "580元",
         "price_index": 0,
         "results": [
-            {"run": 1, "success": True, "elapsed_seconds": 3.0, "final_state": "order_confirm_page",
-             "submit_button_ready": True, "recovery_seconds": None, "recovery_state": "order_confirm_page",
-             "step_timeline": []},
+            {"run": 1, "cold_start": True, "success": True, "elapsed_seconds": 3.0,
+             "final_state": "order_confirm_page", "submit_button_ready": True,
+             "recovery_seconds": None, "recovery_state": "order_confirm_page", "step_timeline": []},
         ],
-        "summary": {"runs": 1, "success_count": 1, "avg_elapsed_seconds": 3.0,
-                    "min_elapsed_seconds": 3.0, "max_elapsed_seconds": 3.0, "avg_recovery_seconds": None},
+        "summary": _make_summary(3.0, True, 3.0, 3.0, 3.0, None, 1, 1),
     }
     mock_driver = Mock()
     with patch("mobile.hot_path_benchmark.Config.load_config") as mock_load, \
@@ -601,6 +647,7 @@ def test_format_report_includes_step_timeline_lines():
         "results": [
             {
                 "run": 1,
+                "cold_start": True,
                 "success": True,
                 "elapsed_seconds": 6.2,
                 "final_state": "order_confirm_page",
@@ -613,14 +660,7 @@ def test_format_report_includes_step_timeline_lines():
                 ],
             }
         ],
-        "summary": {
-            "runs": 1,
-            "success_count": 1,
-            "avg_elapsed_seconds": 6.2,
-            "min_elapsed_seconds": 6.2,
-            "max_elapsed_seconds": 6.2,
-            "avg_recovery_seconds": None,
-        },
+        "summary": _make_summary(6.2, True, 6.2, 6.2, 6.2, None, 1, 1),
     }
 
     report = format_report(payload)

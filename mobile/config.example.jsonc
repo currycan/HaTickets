@@ -39,7 +39,7 @@
   // 快速重试次数 (不重建driver，第一轮会立即重试)
   "fast_retry_count": 8,
   // 快速重试间隔 (毫秒)
-  "fast_retry_interval_ms": 120,
-  // 抢票实战模式：更激进地信任 price_index，减少票档文本读取和确认等待
-  "rush_mode": false
+  "fast_retry_interval_ms": 80,
+  // 抢票实战模式：更激进地信任 price_index，跳过冗余 UI 读取，热路径耗时可压缩到 2 秒以内；推荐开启
+  "rush_mode": true
 }

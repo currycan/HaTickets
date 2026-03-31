@@ -41,8 +41,8 @@
 - `countdown_lead_ms`: 提前轮询时间（毫秒），默认 3000
 - `wait_cta_ready_timeout_ms`: 当用户已手动停在倒计时详情页时，允许脚本直接等待 CTA 变成 `立即预定/立即购买` 的最长时长；默认 0 表示关闭
 - `fast_retry_count`: 快速重试次数（不重建 driver），默认 8
-- `fast_retry_interval_ms`: 快速重试间隔（毫秒），默认 120
-- `rush_mode`: 抢票实战模式；更激进地信任 `price_index`，减少热路径中的 UI 读取和等待
+- `fast_retry_interval_ms`: 快速重试间隔（毫秒），默认 80
+- `rush_mode`: 抢票实战模式；更激进地信任 `price_index`，跳过冗余 UI 读取，热路径耗时可压缩到 2 秒以内；推荐开启
 
 ## 主流程
 
@@ -97,7 +97,7 @@ disableWindowAnimation: True  # 禁用动画提速
 waitForIdleTimeout: 0       # 不等待页面空闲
 actionAcknowledgmentTimeout: 0  # 禁止等待动作确认
 keyInjectionDelay: 0        # 禁止输入延迟
-waitForSelectorTimeout: 300  # 元素查找超时 300ms
+waitForSelectorTimeout: 100  # 元素查找超时 100ms
 enableNotificationListener: False  # 禁用通知监听
 ```
 
@@ -234,6 +234,7 @@ flowchart TD
 - 入口: `./mobile/scripts/benchmark_hot_path.sh`
 - 默认读取 `mobile/config.jsonc`；如果开发者显式设置 `--config` 或 `HATICKETS_CONFIG_PATH`，则按指定路径读取；不会写回配置
 - 会强制使用安全参数: `if_commit_order=false`、`auto_navigate=false`、`rush_mode=true`
+- 报告分两段：**第 1 轮标记为 `[冷启动]`**（App SKU 数据未缓存，约 2-3s）；**热重试 avg/min/max** 仅统计第 2 轮起（缓存已热，约 1-2s）；真实抢票中只有冷启动这一次最关键
 - 常用示例:
   `./mobile/scripts/benchmark_hot_path.sh --runs 5`
   `./mobile/scripts/benchmark_hot_path.sh --runs 5 --price 580元 --price-index 2 --city 成都 --date 04.18`
@@ -257,7 +258,7 @@ flowchart TD
 `run_with_retry(max_retries=3)`:
 - 最多尝试 3 次
 - 每次失败后先执行 `fast_retry_count` 次快速重试（不重建 driver）
-- 第一轮快速重试会立即执行，后续重试间隔由 `fast_retry_interval_ms` 控制（默认 120ms）
+- 第一轮快速重试会立即执行，后续重试间隔由 `fast_retry_interval_ms` 控制（默认 80ms）
 - 快速重试根据当前页面状态决定策略：detail/sku 页重跑全流程，order_confirm 页直接提交，其他页按返回键后重跑
 - 如果处于 `if_commit_order=false` 且已经在确认页，快速重试只验证“立即提交”按钮存在，不会误提交
 - 如果识别到 `reservation_only`、登录失效等不可重试场景，会直接停止后续重试，缩短整体耗时

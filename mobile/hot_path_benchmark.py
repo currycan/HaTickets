@@ -178,12 +178,25 @@ def _require_detail_start(bot: DamaiBot, run_label: str) -> dict:
 
 
 def summarize_results(results: list[dict]) -> dict:
-    elapsed_values = [item["elapsed_seconds"] for item in results]
+    """Summarise benchmark results.
+
+    Run 1 (index 0) is always the cold-start measurement and is reported
+    separately.  avg/min/max are computed from warm runs (index 1+) so they
+    reflect steady-state retry performance.  When only one run was requested
+    the single result doubles as both cold-start and warm stats.
+    """
+    cold = results[0]
+    warm = results[1:] if len(results) > 1 else results
+
+    elapsed_values = [item["elapsed_seconds"] for item in warm]
+    # Recovery spans all runs: cold-run recovery prepares the first warm run.
     recovery_values = [item["recovery_seconds"] for item in results if item["recovery_seconds"] is not None]
 
     return {
         "runs": len(results),
         "success_count": sum(1 for item in results if item["success"]),
+        "cold_start_seconds": cold["elapsed_seconds"],
+        "cold_start_success": cold["success"],
         "avg_elapsed_seconds": round(mean(elapsed_values), 2),
         "min_elapsed_seconds": round(min(elapsed_values), 2),
         "max_elapsed_seconds": round(max(elapsed_values), 2),
@@ -191,8 +204,28 @@ def summarize_results(results: list[dict]) -> dict:
     }
 
 
+def _run_one(bot: DamaiBot, run_start_probe: dict, run_label: str) -> tuple[bool, float, dict, list]:
+    """Execute one timed ticket-grabbing attempt and return (success, elapsed, final_probe, timeline)."""
+    recorder, attached_loggers = _attach_timeline_recorder()
+    try:
+        start_time = time.time()
+        success = bot.run_ticket_grabbing(initial_page_probe=run_start_probe)
+        elapsed_seconds = round(time.time() - start_time, 2)
+    finally:
+        _detach_timeline_recorder(recorder, attached_loggers)
+    final_probe = bot.probe_current_page()
+    return bool(success), elapsed_seconds, final_probe, recorder.events
+
+
 def run_benchmark(bot: DamaiBot, runs: int) -> dict:
-    """Run repeated safe hot-path measurements from the current manual-start page."""
+    """Run repeated safe hot-path measurements from the current manual-start page.
+
+    Run 1 is the cold-start measurement (App SKU data not yet cached).
+    Runs 2+ measure the warm retry path (data cached from run 1).
+    Summary stats (avg/min/max) are computed from warm runs only, so they
+    reflect the steady-state retry performance that matters for optimisation.
+    The cold-start time is reported separately in the summary.
+    """
     if runs < 1:
         raise ValueError("runs 必须大于等于 1")
 
@@ -203,20 +236,12 @@ def run_benchmark(bot: DamaiBot, runs: int) -> dict:
 
     results = []
     for index in range(runs):
-        # 第一轮直接复用 initial_probe，节省一次全量 probe（~1-2s）。
-        # 后续轮次需要确认页面已恢复到 detail_page。
+        # 第一轮直接复用 initial_probe（冷启动），后续轮次重新确认页面。
         run_start_probe = initial_probe if index == 0 else _require_detail_start(bot, f"第 {index + 1} 轮开始")
 
-        recorder, attached_loggers = _attach_timeline_recorder()
-        try:
-            start_time = time.time()
-            success = bot.run_ticket_grabbing(initial_page_probe=run_start_probe)
-            elapsed_seconds = round(time.time() - start_time, 2)
-        finally:
-            _detach_timeline_recorder(recorder, attached_loggers)
-        # 使用 bot 自身的 probe 获取最终状态（包含 submit_button 等字段）。
-        # 注意：这不在计时范围内，所以不影响 elapsed_seconds。
-        final_probe = bot.probe_current_page()
+        success, elapsed_seconds, final_probe, timeline = _run_one(
+            bot, run_start_probe, f"第 {index + 1} 轮"
+        )
 
         recovery_seconds = None
         recovery_state = final_probe["state"]
@@ -228,13 +253,14 @@ def run_benchmark(bot: DamaiBot, runs: int) -> dict:
 
         results.append({
             "run": index + 1,
-            "success": bool(success),
+            "cold_start": index == 0,
+            "success": success,
             "elapsed_seconds": elapsed_seconds,
             "final_state": final_probe["state"],
             "submit_button_ready": bool(final_probe.get("submit_button")),
             "recovery_seconds": recovery_seconds,
             "recovery_state": recovery_state,
-            "step_timeline": recorder.events,
+            "step_timeline": timeline,
         })
 
     return {
@@ -259,8 +285,9 @@ def format_report(payload: dict) -> str:
     ]
 
     for item in payload["results"]:
+        label = "[冷启动] " if item.get("cold_start") else ""
         line = (
-            f"{item['run']}. {item['elapsed_seconds']:.2f}s | "
+            f"{item['run']}. {label}{item['elapsed_seconds']:.2f}s | "
             f"{'success' if item['success'] else 'fail'} | "
             f"final={item['final_state']} | submit_ready={item['submit_button_ready']}"
         )
@@ -276,13 +303,23 @@ def format_report(payload: dict) -> str:
                 )
 
     summary = payload["summary"]
+    cold_label = (
+        f"{summary['cold_start_seconds']:.2f}s "
+        f"({'success' if summary['cold_start_success'] else 'fail'})"
+    )
+    warm_runs = summary["runs"] - 1
     lines.extend([
         "",
         "汇总:",
         f"runs={summary['runs']}, success={summary['success_count']}/{summary['runs']}",
+        f"冷启动 = {cold_label}",
         (
-            f"elapsed avg/min/max = {summary['avg_elapsed_seconds']:.2f}s / "
+            f"热重试 avg/min/max = {summary['avg_elapsed_seconds']:.2f}s / "
             f"{summary['min_elapsed_seconds']:.2f}s / {summary['max_elapsed_seconds']:.2f}s"
+            f"  (n={warm_runs})" if warm_runs > 0 else
+            f"热重试 avg/min/max = {summary['avg_elapsed_seconds']:.2f}s / "
+            f"{summary['min_elapsed_seconds']:.2f}s / {summary['max_elapsed_seconds']:.2f}s"
+            f"  (仅1轮，同冷启动)"
         ),
         (
             "recovery avg = "
