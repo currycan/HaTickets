@@ -11,7 +11,9 @@ from mobile.prompt_parser import PromptIntent, parse_prompt
 from mobile import prompt_runner
 from mobile.prompt_runner import (
     _auto_sync_device_config,
+    _bootstrap_default_config_if_missing,
     _config_path,
+    _load_base_config_dict,
     _format_price_option,
     _format_summary,
     _prompt_choice,
@@ -883,6 +885,41 @@ class TestMain:
     def test_config_path_uses_explicit_argument(self):
         path = _config_path("/tmp/custom.jsonc")
         assert path == Path("/tmp/custom.jsonc")
+
+
+class TestConfigBootstrap:
+    def test_load_base_config_dict_bootstraps_default_config_from_template(self, tmp_path):
+        mobile_dir = tmp_path / "mobile"
+        mobile_dir.mkdir()
+        config_path = mobile_dir / "config.jsonc"
+        template_path = mobile_dir / "config.example.jsonc"
+        template_path.write_text('{"server_url":"http://127.0.0.1:4723","keyword":"张杰","users":["张三"],"city":"北京","date":"04.06","price":"580元","price_index":0,"if_commit_order":false}', encoding="utf-8")
+
+        with patch("mobile.prompt_runner._repo_root", return_value=tmp_path):
+            config_dict = _load_base_config_dict(config_path)
+
+        assert config_path.exists()
+        assert config_dict["keyword"] == "张杰"
+        assert config_dict["users"] == ["张三"]
+
+    def test_bootstrap_only_for_default_config_filename(self, tmp_path):
+        mobile_dir = tmp_path / "mobile"
+        mobile_dir.mkdir()
+        custom_path = mobile_dir / "config.local.jsonc"
+        (mobile_dir / "config.example.jsonc").write_text("{}", encoding="utf-8")
+
+        with patch("mobile.prompt_runner._repo_root", return_value=tmp_path):
+            with pytest.raises(FileNotFoundError):
+                _load_base_config_dict(custom_path)
+
+    def test_bootstrap_requires_template(self, tmp_path):
+        mobile_dir = tmp_path / "mobile"
+        mobile_dir.mkdir()
+        config_path = mobile_dir / "config.jsonc"
+
+        with patch("mobile.prompt_runner._repo_root", return_value=tmp_path):
+            with pytest.raises(FileNotFoundError, match="配置模板未找到"):
+                _bootstrap_default_config_if_missing(config_path)
 
 
 def test_main_summary_mode_output_format(tmp_path, capsys):

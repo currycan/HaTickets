@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -115,6 +116,29 @@ def _config_path_description(config_path: Path) -> str:
     if config_path.name == "config.local.jsonc":
         return f"{config_path}（开发者本地覆盖配置）"
     return str(config_path)
+
+
+def _bootstrap_default_config_if_missing(config_path: Path):
+    """Auto-create default config.jsonc from template when the default file is missing."""
+    if config_path.name != "config.jsonc":
+        return
+
+    template_path = _repo_root() / "mobile" / "config.example.jsonc"
+    if not template_path.exists():
+        raise FileNotFoundError(f"配置模板未找到: {template_path}")
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(template_path, config_path)
+    logger.warning(f"检测到配置文件不存在，已从模板自动创建: {config_path}")
+
+
+def _load_base_config_dict(config_path: Path) -> dict:
+    """Load base config dict and bootstrap default config when needed."""
+    try:
+        return load_config_dict(str(config_path))
+    except FileNotFoundError:
+        _bootstrap_default_config_if_missing(config_path)
+        return load_config_dict(str(config_path))
 
 
 def _list_connected_device_ids() -> list[str] | None:
@@ -566,7 +590,7 @@ def main(argv=None):
     config_path = _config_path(args.config)
     bot = None
     try:
-        base_config_dict = load_config_dict(str(config_path))
+        base_config_dict = _load_base_config_dict(config_path)
         try:
             intent = parse_prompt(args.prompt)
         except ValueError as exc:

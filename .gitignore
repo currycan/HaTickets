@@ -42,6 +42,7 @@ mobile/config.local.jsonc
 
 # Appium / local debug artifacts
 .appium/
+tmp/
 tmp_*.png
 tmp_*.xml
 mobile/tmp_*.png
