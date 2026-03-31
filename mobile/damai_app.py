@@ -119,6 +119,7 @@ class DamaiBot:
             "probe_ready": "探测成功：已到目标演出页，购票控件已就绪",
             "validation_ready": "开发验证成功：已到订单确认页，未提交订单",
             "order_submitted": "抢票成功：已提交订单",
+            "order_pending_payment": "抢票成功：检测到未支付订单，请立即前往支付完成下单",
             "order_flow_completed": "抢票流程完成：已执行提交，等待后续结果确认",
         }
         logger.info(f"{prefix}{outcome_messages.get(self._last_run_outcome, '本轮执行成功')}")
@@ -430,6 +431,149 @@ class DamaiBot:
 
         return False
 
+    def _attendee_required_count_on_confirm_page(self):
+        """Infer how many attendees must be selected on the confirm page."""
+        hint_text = self._safe_element_text(
+            self.driver,
+            AppiumBy.ANDROID_UIAUTOMATOR,
+            'new UiSelector().textContains("仅需选择")',
+        )
+        match = re.search(r"仅需选择\s*(\d+)\s*位", hint_text or "")
+        if match:
+            return max(1, int(match.group(1)))
+        return max(1, len(self.config.users or []))
+
+    def _attendee_checkbox_elements(self):
+        try:
+            return self.driver.find_elements(By.ID, "cn.damai:id/checkbox")
+        except Exception:
+            return []
+
+    @staticmethod
+    def _is_checkbox_selected(checkbox):
+        try:
+            return str(checkbox.get_attribute("checked")).lower() == "true"
+        except Exception:
+            return False
+
+    def _attendee_selected_count(self, checkbox_elements=None):
+        """Count selected attendee checkboxes, with XML fallback for flaky checked attrs."""
+        elements = checkbox_elements if checkbox_elements is not None else self._attendee_checkbox_elements()
+        selected_count = sum(1 for checkbox in elements if self._is_checkbox_selected(checkbox))
+        if selected_count > 0:
+            return selected_count
+
+        try:
+            source = self.driver.page_source or ""
+        except Exception:
+            return selected_count
+        if not isinstance(source, str):
+            return selected_count
+
+        states = re.findall(
+            r'resource-id="cn\.damai:id/checkbox"[^>]*checked="(true|false)"',
+            source,
+        )
+        if not states:
+            return selected_count
+        return sum(1 for state in states if state == "true")
+
+    def _click_attendee_checkbox(self, checkbox):
+        """Try multiple click paths and verify checkbox becomes selected."""
+        before_selected = self._attendee_selected_count()
+        click_actions = [
+            lambda: self._click_element_center(checkbox, duration=35),
+            lambda: checkbox.click(),
+            lambda: self._burst_click_element_center(checkbox, count=2, interval_ms=30, duration=30),
+        ]
+
+        for action in click_actions:
+            try:
+                action()
+            except Exception:
+                continue
+            time.sleep(0.05)
+            if self._is_checkbox_selected(checkbox):
+                return True
+            if self._attendee_selected_count() > before_selected:
+                return True
+        return False
+
+    def _select_attendee_checkbox_by_name(self, user_name):
+        checkbox_xpaths = [
+            (
+                f'//*[@resource-id="cn.damai:id/text_name" and normalize-space(@text)="{user_name}"]'
+                '/ancestor::*[.//*[@resource-id="cn.damai:id/checkbox"]][1]'
+                '//*[@resource-id="cn.damai:id/checkbox"]'
+            ),
+            (
+                f'//*[@resource-id="cn.damai:id/text_name" and contains(normalize-space(@text), "{user_name}")]'
+                '/ancestor::*[.//*[@resource-id="cn.damai:id/checkbox"]][1]'
+                '//*[@resource-id="cn.damai:id/checkbox"]'
+            ),
+        ]
+
+        for checkbox_xpath in checkbox_xpaths:
+            try:
+                checkboxes = self.driver.find_elements(By.XPATH, checkbox_xpath)
+            except Exception:
+                checkboxes = []
+
+            for checkbox in checkboxes:
+                if self._is_checkbox_selected(checkbox):
+                    return True
+                if self._click_attendee_checkbox(checkbox):
+                    return True
+        return False
+
+    def _ensure_attendees_selected_on_confirm_page(self):
+        """Make sure required attendee checkboxes are selected before submit."""
+        attendee_section_visible = self._has_element(
+            AppiumBy.ANDROID_UIAUTOMATOR,
+            'new UiSelector().textContains("实名观演人")',
+        )
+        checkbox_elements = self._attendee_checkbox_elements()
+
+        if not attendee_section_visible:
+            return True
+        if not checkbox_elements:
+            logger.warning("确认页存在观演人区域，但未找到可勾选观演人，请手动检查")
+            return False
+
+        required_count = self._attendee_required_count_on_confirm_page()
+        selected_count = self._attendee_selected_count(checkbox_elements)
+        if selected_count >= required_count:
+            return True
+
+        logger.info(f"检测到观演人未选择完成，尝试自动补选（已选 {selected_count}/{required_count}）")
+
+        unmatched_users = []
+        for user_name in self.config.users or []:
+            if selected_count >= required_count:
+                break
+            if self._select_attendee_checkbox_by_name(user_name):
+                selected_count = self._attendee_selected_count()
+            else:
+                unmatched_users.append(user_name)
+
+        if unmatched_users and selected_count < required_count:
+            logger.warning(f"未能按姓名定位观演人: {'、'.join(unmatched_users)}，将尝试按勾选框兜底")
+
+        if selected_count < required_count:
+            for checkbox in self._attendee_checkbox_elements():
+                if selected_count >= required_count:
+                    break
+                if self._is_checkbox_selected(checkbox):
+                    continue
+                if not self._click_attendee_checkbox(checkbox):
+                    continue
+                selected_count = self._attendee_selected_count()
+
+        if selected_count < required_count:
+            logger.warning(f"观演人选择不足（需要 {required_count} 位，当前 {selected_count} 位）")
+            return False
+        return True
+
     def _has_element(self, by, value):
         """快速判断元素是否存在，不等待点击状态。"""
         try:
@@ -457,6 +601,16 @@ class DamaiBot:
             "mobile: clickGesture",
             {"x": x, "y": y, "duration": duration},
         )
+
+    def _press_keycode_safe(self, keycode, context=""):
+        """Press an Android keycode with error handling to avoid hard crashes."""
+        try:
+            self.driver.press_keycode(keycode)
+            return True
+        except Exception as exc:
+            suffix = f"（{context}）" if context else ""
+            logger.warning(f"按键事件失败{suffix}: keycode={keycode}, err={exc}")
+            return False
 
     def _burst_click_element_center(self, element, count=2, interval_ms=35, duration=30):
         """Click an element center repeatedly for low-latency race-mode actions."""
@@ -541,7 +695,7 @@ class DamaiBot:
             return ""
 
         for element in elements:
-            text = (element.text or "").strip()
+            text = self._normalize_element_text(getattr(element, "text", ""))
             if text:
                 return text
         return ""
@@ -556,7 +710,7 @@ class DamaiBot:
         texts = []
         seen = set()
         for element in elements:
-            text = (element.text or "").strip()
+            text = self._normalize_element_text(getattr(element, "text", ""))
             if not text or text in seen:
                 continue
             texts.append(text)
@@ -574,7 +728,7 @@ class DamaiBot:
 
         for element in descendants:
             try:
-                text = (element.text or "").strip()
+                text = self._normalize_element_text(getattr(element, "text", ""))
             except Exception:
                 text = ""
             if not text or text in seen:
@@ -582,6 +736,13 @@ class DamaiBot:
             texts.append(text)
             seen.add(text)
         return texts
+
+    @staticmethod
+    def _normalize_element_text(value):
+        """Normalize UI text values; ignore non-string placeholders from mocked elements."""
+        if isinstance(value, str):
+            return value.strip()
+        return ""
 
     def _build_compound_price_text(self, container):
         """Build a human-readable price string from split price fields."""
@@ -648,7 +809,8 @@ class DamaiBot:
 
     def _normalize_ocr_price_text(self, ocr_output):
         """Extract the leading ticket price from noisy OCR output."""
-        digits = "".join(re.findall(r"\d", ocr_output or ""))
+        normalized_text = ocr_output if isinstance(ocr_output, str) else ""
+        digits = "".join(re.findall(r"\d", normalized_text))
         if len(digits) >= 4:
             leading_four = int(digits[:4])
             if 1000 <= leading_four <= 1999:
@@ -699,7 +861,8 @@ class DamaiBot:
 
     def _extract_price_digits(self, text):
         """Extract the numeric portion of a ticket price label."""
-        match = re.search(r"([1-9]\d{1,4})", text or "")
+        normalized_text = text if isinstance(text, str) else ""
+        match = re.search(r"([1-9]\d{1,4})", normalized_text)
         if match:
             return int(match.group(1))
         return None
@@ -945,7 +1108,8 @@ class DamaiBot:
             if self._current_page_matches_target(current_probe):
                 return current_probe
 
-            self.driver.press_keycode(4)
+            if not self._press_keycode_safe(4, context="退出非目标演出页"):
+                break
             time.sleep(back_delay)
             self.dismiss_startup_popups()
             current_probe = self.probe_current_page()
@@ -960,7 +1124,8 @@ class DamaiBot:
             return current_probe
 
         for _ in range(max_back_steps):
-            self.driver.press_keycode(4)
+            if not self._press_keycode_safe(4, context="恢复导航起点"):
+                break
             time.sleep(0.4)
             current_probe = self.probe_current_page()
             if current_probe["state"] in navigable_states:
@@ -990,7 +1155,8 @@ class DamaiBot:
             return current_probe
 
         for _ in range(max_back_steps):
-            self.driver.press_keycode(4)
+            if not self._press_keycode_safe(4, context="本地快速回退"):
+                break
             time.sleep(back_delay)
             self.dismiss_startup_popups()
             current_probe = self.probe_current_page()
@@ -1053,7 +1219,8 @@ class DamaiBot:
         if (search_input.text or "").strip() != self.config.keyword:
             search_input.send_keys(self.config.keyword)
 
-        self.driver.press_keycode(66)
+        if not self._press_keycode_safe(66, context="提交搜索关键词"):
+            return False
         try:
             WebDriverWait(self.driver, 5).until(
                 lambda drv: len(drv.find_elements(By.ID, "cn.damai:id/ll_search_item")) > 0
@@ -1158,7 +1325,8 @@ class DamaiBot:
                     return True
 
                 logger.warning("已进入详情页，但标题与目标演出不一致，返回搜索结果继续尝试")
-                self.driver.press_keycode(4)
+                if not self._press_keycode_safe(4, context="返回搜索列表"):
+                    break
                 time.sleep(0.5)
             else:
                 logger.info(f"本屏搜索结果未找到明确匹配项，已扫描: {len(seen_titles)} 条")
@@ -1438,21 +1606,9 @@ class DamaiBot:
 
     def wait_for_sale_start(self):
         """等待开售时间，在开售前 countdown_lead_ms 毫秒开始轮询。"""
-        if self.config.sell_start_time is None and self.config.wait_cta_ready_timeout_ms <= 0:
-            return
-
         if self.config.sell_start_time is None:
-            wait_seconds = self.config.wait_cta_ready_timeout_ms / 1000
-            deadline = time.time() + wait_seconds
-            logger.info(
-                f"未配置 sell_start_time，等待详情页 CTA 变为可购状态，最长 {wait_seconds:.2f}秒"
-            )
-            while time.time() < deadline:
-                if self._is_sale_ready():
-                    logger.info("检测到可购买按钮，开售已开始")
-                    return
-                time.sleep(0.05)
-            logger.warning("等待 CTA 就绪超时，继续执行")
+            if self.config.wait_cta_ready_timeout_ms > 0:
+                logger.info("未配置 sell_start_time，已跳过 CTA 等待，直接开始执行")
             return
 
         _tz_shanghai = timezone(timedelta(hours=8))
@@ -1490,6 +1646,14 @@ class DamaiBot:
     def verify_order_result(self, timeout=5):
         """验证订单提交结果"""
         start = time.time()
+        payment_text_selectors = [
+            'new UiSelector().textContains("立即支付")',
+            'new UiSelector().textContains("去支付")',
+            'new UiSelector().textContains("确认支付")',
+            'new UiSelector().textContains("支付剩余时间")',
+            'new UiSelector().textContains("收银台")',
+        ]
+
         while time.time() - start < timeout:
             activity = self._get_current_activity()
 
@@ -1499,9 +1663,9 @@ class DamaiBot:
                 return "success"
 
             # Check page text for various outcomes
-            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("支付")'):
-                logger.info("订单提交成功，检测到支付页面")
-                return "success"
+            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("未支付")'):
+                logger.warning("已有未支付订单")
+                return "existing_order"
             if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("已售罄")') or \
                self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("库存不足")') or \
                self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("暂时无票")'):
@@ -1511,9 +1675,20 @@ class DamaiBot:
                self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("验证")'):
                 logger.warning("触发验证码")
                 return "captcha"
-            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("未支付")'):
-                logger.warning("已有未支付订单")
-                return "existing_order"
+            if any(self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, selector) for selector in payment_text_selectors):
+                submit_still_visible = self._has_element(
+                    AppiumBy.ANDROID_UIAUTOMATOR,
+                    'new UiSelector().text("立即提交")',
+                )
+                confirm_title_visible = self._has_element(
+                    AppiumBy.ANDROID_UIAUTOMATOR,
+                    'new UiSelector().textContains("确认购买")',
+                )
+                if submit_still_visible or confirm_title_visible:
+                    logger.warning("检测到支付相关文本，但仍在确认购买页，暂不判定提交成功")
+                else:
+                    logger.info("订单提交成功，检测到支付页关键控件")
+                    return "success"
 
             time.sleep(0.3)
 
@@ -1523,6 +1698,7 @@ class DamaiBot:
     def _submit_order_fast(self, submit_selectors):
         """Attempt submit quickly and retry within the confirm page before falling back."""
         attempt_count = 3
+        has_submitted_once = False
         for attempt in range(attempt_count):
             submit_success = False
             if self.ultra_fast_click(*submit_selectors[0], timeout=0.35):
@@ -1534,8 +1710,13 @@ class DamaiBot:
 
             if not submit_success:
                 logger.warning("提交订单按钮未找到，请手动确认订单状态")
+                if has_submitted_once:
+                    followup_result = self.verify_order_result(timeout=2)
+                    if followup_result != "timeout":
+                        return followup_result
                 return "timeout"
 
+            has_submitted_once = True
             verify_timeout = 1.2 if attempt < attempt_count - 1 else 3
             result = self.verify_order_result(timeout=verify_timeout)
             if result != "timeout":
@@ -1565,12 +1746,19 @@ class DamaiBot:
                     (By.XPATH, '//*[contains(@text,"提交")]')
                 ]
                 return self.smart_wait_for_element(*submit_selectors[0], submit_selectors[1:])
+            if not self._ensure_attendees_selected_on_confirm_page():
+                self._set_terminal_failure("attendee_unselected")
+                return False
             submit_selectors = [
                 (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
                 (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
                 (By.XPATH, '//*[contains(@text,"提交")]')
             ]
             return self.smart_wait_and_click(*submit_selectors[0], submit_selectors[1:])
+        elif state == "pending_order_dialog":
+            self._set_run_outcome("order_pending_payment")
+            logger.info("检测到未支付订单弹窗（已占单待支付），请立即前往订单页完成支付")
+            return True
         else:
             if self.config.auto_navigate:
                 return self.navigate_to_target_event(page_probe) and self.run_ticket_grabbing()
@@ -1761,10 +1949,19 @@ class DamaiBot:
             self._has_element(By.ID, "cn.damai:id/tv_price_name")
         quantity_picker = self._has_element(By.ID, "layout_num")
         submit_button = self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")')
+        pending_order_dialog = self._has_element(
+            AppiumBy.ANDROID_UIAUTOMATOR,
+            'new UiSelector().textContains("未支付订单")',
+        ) or (
+            self._has_element(By.ID, "cn.damai:id/damai_theme_dialog_confirm_btn")
+            and self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("查看订单")')
+        )
         reservation_mode = False
 
         if self._has_element(By.ID, "cn.damai:id/id_boot_action_agree"):
             state = "consent_dialog"
+        elif pending_order_dialog:
+            state = "pending_order_dialog"
         elif "MainActivity" in current_activity or \
                 self._has_element(By.ID, "cn.damai:id/homepage_header_search") or \
                 self._has_element(By.ID, "cn.damai:id/pioneer_homepage_header_search_btn"):
@@ -1791,6 +1988,7 @@ class DamaiBot:
             "quantity_picker": quantity_picker,
             "submit_button": submit_button,
             "reservation_mode": reservation_mode,
+            "pending_order_dialog": pending_order_dialog,
         }
 
         logger.info(f"当前页面状态: {result['state']}")
@@ -1822,6 +2020,10 @@ class DamaiBot:
                 return False
 
             page_probe = self.probe_current_page()
+            if page_probe["state"] == "pending_order_dialog":
+                self._set_run_outcome("order_pending_payment")
+                logger.info("检测到未支付订单弹窗（已占单待支付），请立即前往订单页完成支付")
+                return True
 
             if page_probe["state"] not in {"detail_page", "sku_page"} or \
                     (self.item_detail and not self._current_page_matches_target(page_probe)):
@@ -1830,6 +2032,10 @@ class DamaiBot:
                     if not self.navigate_to_target_event(page_probe):
                         return False
                     page_probe = self.probe_current_page()
+                    if page_probe["state"] == "pending_order_dialog":
+                        self._set_run_outcome("order_pending_payment")
+                        logger.info("检测到未支付订单弹窗（已占单待支付），请立即前往订单页完成支付")
+                        return True
                 else:
                     logger.warning("当前不在演出详情页，请先手动打开目标演出详情页")
                     return False
@@ -1952,6 +2158,11 @@ class DamaiBot:
                 logger.warning("未进入订单确认页，请检查票档可用性或观演人配置")
                 return False
 
+            if not self._ensure_attendees_selected_on_confirm_page():
+                self._set_terminal_failure("attendee_unselected")
+                logger.error("订单提交前观演人未选择完整，已停止自动提交")
+                return False
+
             submit_selectors = [
                 (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
                 (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
@@ -1972,13 +2183,23 @@ class DamaiBot:
                 end_time = time.time()
                 logger.info(f"抢票成功！耗时: {end_time - start_time:.2f}秒")
                 return True
-            elif result in ("sold_out", "captcha", "existing_order"):
+            if result == "existing_order":
+                self._set_run_outcome("order_pending_payment")
+                end_time = time.time()
+                logger.info(
+                    f"检测到未支付订单（已占单待支付），请立即前往订单页支付。耗时: {end_time - start_time:.2f}秒"
+                )
+                return True
+            elif result in ("sold_out", "captcha"):
                 return False
-            # timeout/unknown — optimistically return True (submit may have worked)
-            self._set_run_outcome("order_flow_completed")
+            # timeout/unknown — fail closed to avoid false positives and duplicate submissions
+            self._set_terminal_failure("submit_unverified")
             end_time = time.time()
-            logger.info(f"抢票流程完成，耗时: {end_time - start_time:.2f}秒")
-            return True
+            logger.error(
+                f"提交后未能确认成功状态（result={result}），"
+                f"为避免重复下单已停止自动重试，请手动检查订单列表。耗时: {end_time - start_time:.2f}秒"
+            )
+            return False
 
         except Exception as e:
             logger.error(f"抢票过程发生错误: {e}")

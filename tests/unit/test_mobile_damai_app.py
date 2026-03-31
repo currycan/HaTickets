@@ -460,6 +460,16 @@ class TestAutoNavigation:
         submit_keyword.assert_called_once()
         open_target.assert_called_once()
 
+    def test_recover_to_navigation_start_handles_back_key_failure(self, bot):
+        with patch.object(bot, "_press_keycode_safe", return_value=False), \
+             patch.object(bot, "probe_current_page", return_value={"state": "unknown"}), \
+             patch.object(bot.driver, "activate_app") as activate_app, \
+             patch("mobile.damai_app.time.sleep"):
+            result = bot._recover_to_navigation_start({"state": "unknown"})
+
+        activate_app.assert_called_once_with(bot.config.app_package)
+        assert result["state"] == "unknown"
+
     def test_fast_retry_does_not_submit_when_commit_disabled(self, bot):
         bot.config.if_commit_order = False
 
@@ -986,8 +996,8 @@ class TestRunTicketGrabbing:
 
         assert result is False
 
-    def test_run_ticket_grabbing_submit_timeout_still_returns_true(self, bot):
-        """Submit timeout still returns True because the order may have gone through."""
+    def test_run_ticket_grabbing_submit_timeout_returns_false_and_marks_terminal_failure(self, bot):
+        """Submit timeout should fail closed to avoid false success and duplicate submit."""
         with patch.object(bot, "dismiss_startup_popups"), \
              patch.object(bot, "probe_current_page", return_value={
                  "state": "detail_page",
@@ -1017,8 +1027,62 @@ class TestRunTicketGrabbing:
 
             result = bot.run_ticket_grabbing()
 
-        assert result is True
+        assert result is False
+        assert bot._terminal_failure_reason == "submit_unverified"
         submit_fast.assert_called_once()
+
+    def test_run_ticket_grabbing_existing_order_returns_success_with_pending_payment_outcome(self, bot):
+        """Existing unpaid order means submit flow already succeeded and only payment is pending."""
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": True,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "wait_for_sale_start"), \
+             patch.object(bot, "_enter_purchase_flow_from_detail_page", return_value={
+                 "state": "sku_page",
+                 "price_container": True,
+                 "reservation_mode": False,
+             }), \
+             patch.object(bot, "_wait_for_submit_ready", return_value=True), \
+             patch.object(bot, "_ensure_attendees_selected_on_confirm_page", return_value=True), \
+             patch.object(bot, "smart_wait_and_click", return_value=True), \
+             patch.object(bot, "ultra_fast_click", return_value=True), \
+             patch.object(bot, "ultra_batch_click"), \
+             patch.object(bot, "_submit_order_fast", return_value="existing_order"), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 1.0]
+            mock_price_container = Mock()
+            mock_target = _make_mock_element()
+            mock_price_container.find_element.return_value = mock_target
+            bot.driver.find_element.return_value = mock_price_container
+            bot.driver.find_elements.return_value = []
+
+            result = bot.run_ticket_grabbing()
+
+        assert result is True
+        assert bot._last_run_outcome == "order_pending_payment"
+        assert bot._terminal_failure_reason is None
+
+    def test_run_ticket_grabbing_returns_success_when_pending_order_dialog_detected_early(self, bot):
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "check_session_valid", return_value=True), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "pending_order_dialog",
+                 "purchase_button": False,
+                 "price_container": False,
+                 "quantity_picker": False,
+                 "submit_button": False,
+                 "reservation_mode": False,
+                 "pending_order_dialog": True,
+             }):
+            result = bot.run_ticket_grabbing()
+
+        assert result is True
+        assert bot._last_run_outcome == "order_pending_payment"
 
     def test_run_ticket_grabbing_no_driver_quit_in_finally(self, bot):
         """Verify driver.quit is NOT called inside run_ticket_grabbing's finally block."""
@@ -1110,6 +1174,76 @@ class TestPageStateHelpers:
     def test_wait_for_submit_ready_times_out(self, bot):
         with patch.object(bot, "_has_any_element", return_value=False):
             assert bot._wait_for_submit_ready(timeout=0.01, poll_interval=0) is False
+
+    def test_ensure_attendees_selected_auto_selects_missing_checkbox(self, bot):
+        checked_state = {"value": "false"}
+        checkbox = Mock()
+        checkbox.get_attribute.side_effect = lambda name: checked_state["value"] if name == "checked" else ""
+
+        def _select_side_effect(_user_name):
+            checked_state["value"] = "true"
+            return True
+
+        with patch.object(
+                bot,
+                "_has_element",
+                side_effect=lambda by, value: 'textContains("实名观演人")' in value
+             ), \
+             patch.object(bot, "_attendee_checkbox_elements", return_value=[checkbox]), \
+             patch.object(bot, "_attendee_required_count_on_confirm_page", return_value=1), \
+             patch.object(bot, "_select_attendee_checkbox_by_name", side_effect=_select_side_effect):
+            assert bot._ensure_attendees_selected_on_confirm_page() is True
+
+    def test_attendee_selected_count_falls_back_to_page_source(self, bot):
+        checkbox = Mock()
+        checkbox.get_attribute.side_effect = lambda name: "false" if name == "checked" else ""
+        bot.driver.page_source = (
+            '<node resource-id="cn.damai:id/checkbox" checked="true"/>'
+            '<node resource-id="cn.damai:id/checkbox" checked="false"/>'
+        )
+
+        assert bot._attendee_selected_count([checkbox]) == 1
+
+    def test_click_attendee_checkbox_falls_back_when_center_click_fails(self, bot):
+        checkbox = Mock()
+        checkbox.click = Mock()
+
+        with patch.object(bot, "_click_element_center", side_effect=Exception("center failed")), \
+             patch.object(bot, "_burst_click_element_center", return_value=None), \
+             patch.object(bot, "_is_checkbox_selected", return_value=False), \
+             patch.object(bot, "_attendee_selected_count", side_effect=[0, 1]):
+            assert bot._click_attendee_checkbox(checkbox) is True
+
+        checkbox.click.assert_called_once()
+
+    def test_select_attendee_checkbox_by_name_uses_contains_fallback_xpath(self, bot):
+        checkbox = Mock()
+        seen_xpaths = []
+
+        def _find_elements_side_effect(by=None, value=None):
+            if by != By.XPATH:
+                return []
+            seen_xpaths.append(value)
+            if "contains(normalize-space(@text)" in value:
+                return [checkbox]
+            return []
+
+        with patch.object(bot.driver, "find_elements", side_effect=_find_elements_side_effect), \
+             patch.object(bot, "_is_checkbox_selected", return_value=False), \
+             patch.object(bot, "_click_attendee_checkbox", return_value=True) as click_checkbox:
+            assert bot._select_attendee_checkbox_by_name("张志涛") is True
+
+        assert any("contains(normalize-space(@text)" in xpath for xpath in seen_xpaths)
+        click_checkbox.assert_called_once_with(checkbox)
+
+    def test_ensure_attendees_selected_fails_when_section_visible_but_no_checkbox(self, bot):
+        with patch.object(
+                bot,
+                "_has_element",
+                side_effect=lambda by, value: 'textContains("实名观演人")' in value
+             ), \
+             patch.object(bot, "_attendee_checkbox_elements", return_value=[]):
+            assert bot._ensure_attendees_selected_on_confirm_page() is False
 
     def test_get_buy_button_coordinates_returns_first_match_center(self, bot):
         element = _make_mock_element(x=20, y=40, width=100, height=60)
@@ -1235,6 +1369,18 @@ class TestPageStateHelpers:
 
             assert result["state"] == "sku_page"
             assert result["reservation_mode"] is True
+
+    def test_probe_current_page_detects_pending_order_dialog(self, bot):
+        present = {
+            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("未支付订单")'),
+        }
+
+        with patch.object(bot, "_has_element", side_effect=lambda by, value: (by, value) in present), \
+             patch.object(bot, "_get_current_activity", return_value=""):
+            result = bot.probe_current_page()
+
+        assert result["state"] == "pending_order_dialog"
+        assert result["pending_order_dialog"] is True
 
     def test_probe_current_page_detects_detail_page_controls(self, bot):
         present = {
@@ -1467,31 +1613,30 @@ class TestWaitForSaleStart:
         first_sleep_arg = mock_sleep.call_args_list[0][0][0]
         assert 6.5 < first_sleep_arg < 7.5
 
-    def test_wait_for_sale_start_waits_for_cta_without_sell_start_time(self, bot):
+    def test_wait_for_sale_start_skips_cta_wait_without_sell_start_time(self, bot):
         bot.config.sell_start_time = None
         bot.config.wait_cta_ready_timeout_ms = 5000
-        time_values = chain([0.0, 0.2, 0.4], repeat(0.4))
 
-        with patch("mobile.damai_app.time.time", side_effect=time_values), \
-             patch("mobile.damai_app.logger"), \
+        with patch("mobile.damai_app.logger") as mock_logger, \
              patch("mobile.damai_app.time.sleep") as mock_sleep, \
-             patch.object(bot, "_is_sale_ready", side_effect=[False, True]) as is_ready:
+             patch.object(bot, "_is_sale_ready") as is_ready:
             bot.wait_for_sale_start()
 
-        assert is_ready.call_count == 2
-        mock_sleep.assert_called_once_with(0.05)
+        is_ready.assert_not_called()
+        mock_sleep.assert_not_called()
+        mock_logger.info.assert_any_call("未配置 sell_start_time，已跳过 CTA 等待，直接开始执行")
 
-    def test_wait_for_sale_start_cta_wait_times_out(self, bot):
+    def test_wait_for_sale_start_skips_cta_wait_timeout_branch_without_sell_start_time(self, bot):
         bot.config.sell_start_time = None
         bot.config.wait_cta_ready_timeout_ms = 100
 
-        with patch("mobile.damai_app.time.time", side_effect=chain([0.0, 0.05, 0.11], repeat(0.11))), \
-             patch("mobile.damai_app.logger"), \
+        with patch("mobile.damai_app.logger"), \
              patch("mobile.damai_app.time.sleep") as mock_sleep, \
-             patch.object(bot, "_is_sale_ready", return_value=False):
+             patch.object(bot, "_is_sale_ready") as is_ready:
             bot.wait_for_sale_start()
 
-        mock_sleep.assert_called()
+        is_ready.assert_not_called()
+        mock_sleep.assert_not_called()
 
     def test_prepare_detail_page_hot_path_preselects_date_and_city(self, bot):
         with patch.object(bot, "probe_current_page", return_value={
@@ -1707,6 +1852,19 @@ class TestFastRetry:
         assert result is True
         wait_element.assert_called_once()
 
+    def test_fast_retry_returns_success_when_pending_order_dialog_detected(self, bot):
+        with patch.object(bot, "probe_current_page", return_value={
+                "state": "pending_order_dialog",
+                "purchase_button": False,
+                "price_container": False,
+                "quantity_picker": False,
+                "submit_button": False,
+             }):
+            result = bot._fast_retry_from_current_state()
+
+        assert result is True
+        assert bot._last_run_outcome == "order_pending_payment"
+
     def test_fast_retry_switches_to_auto_navigation_when_wrong_detail_page(self, bot):
         bot.item_detail = _make_item_detail()
         bot.config.auto_navigate = True
@@ -1832,9 +1990,9 @@ class TestVerifyOrderResult:
         assert result == "success"
 
     def test_verify_order_success_payment_text(self, bot):
-        """Element contains '支付', returns 'success'."""
+        """Payment-specific UI text returns 'success'."""
         def has_element_side_effect(by, value):
-            return '支付' in value
+            return '立即支付' in value
 
         with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
              patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
@@ -1843,6 +2001,49 @@ class TestVerifyOrderResult:
             result = bot.verify_order_result(timeout=5)
 
         assert result == "success"
+
+    def test_verify_order_generic_payment_text_does_not_count_as_success(self, bot):
+        """Generic '支付' text should not be treated as a successful submit signal."""
+        time_values = chain([0.0, 0.2, 0.5, 0.8, 1.1], repeat(1.1))
+
+        def has_element_side_effect(by, value):
+            # Simulate a page containing generic "支付" wording but no payment CTA.
+            return 'textContains("支付")' in value and '未支付' not in value
+
+        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
+             patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
+             patch("mobile.damai_app.time.time", side_effect=time_values), \
+             patch("mobile.damai_app.time.sleep"):
+            result = bot.verify_order_result(timeout=1)
+
+        assert result == "timeout"
+
+    def test_verify_order_payment_cta_on_confirm_page_does_not_count_as_success(self, bot):
+        """Even if payment CTA text appears, still being on confirm page should not be success."""
+        time_values = chain([0.0, 0.2, 0.5, 0.8, 1.1], repeat(1.1))
+
+        def has_element_side_effect(by, value):
+            if 'textContains("未支付")' in value:
+                return False
+            if 'textContains("已售罄")' in value or 'textContains("库存不足")' in value or 'textContains("暂时无票")' in value:
+                return False
+            if 'textContains("滑块")' in value or 'textContains("验证")' in value:
+                return False
+            if 'textContains("立即支付")' in value:
+                return True
+            if 'text("立即提交")' in value:
+                return True
+            if 'textContains("确认购买")' in value:
+                return True
+            return False
+
+        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
+             patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
+             patch("mobile.damai_app.time.time", side_effect=time_values), \
+             patch("mobile.damai_app.time.sleep"):
+            result = bot.verify_order_result(timeout=1)
+
+        assert result == "timeout"
 
     def test_verify_order_sold_out(self, bot):
         """Element contains '已售罄', returns 'sold_out'."""
@@ -2226,6 +2427,21 @@ class TestPriceSelection:
 
         assert result == "success"
         assert verify_result.call_args_list == [call(timeout=1.2), call(timeout=1.2)]
+
+    def test_submit_order_fast_runs_followup_verify_when_submit_disappears(self, bot):
+        submit_selectors = [
+            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
+            (By.XPATH, '//*[contains(@text,"提交")]')
+        ]
+
+        with patch.object(bot, "ultra_fast_click", side_effect=[True, False, False]), \
+             patch.object(bot, "smart_wait_and_click", return_value=False), \
+             patch.object(bot, "verify_order_result", side_effect=["timeout", "existing_order"]) as verify_result:
+            result = bot._submit_order_fast(submit_selectors)
+
+        assert result == "existing_order"
+        assert verify_result.call_args_list == [call(timeout=1.2), call(timeout=2)]
 
     def test_price_selection_text_match_success(self, bot):
         """Text-based price match works, index fallback not used."""

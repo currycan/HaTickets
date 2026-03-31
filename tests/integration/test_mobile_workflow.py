@@ -88,6 +88,7 @@ class TestFullTicketGrabbingFlow:
                  patch.object(bot, "check_session_valid", return_value=True), \
                  patch.object(bot, "wait_for_sale_start"), \
                  patch.object(bot, "select_performance_date"), \
+                 patch.object(bot, "_ensure_attendees_selected_on_confirm_page", return_value=True), \
                  patch.object(bot, "wait_for_page_state", return_value={
                      "state": "order_confirm_page",
                      "purchase_button": False,
@@ -142,6 +143,7 @@ class TestFullTicketGrabbingFlow:
                  patch.object(bot, "check_session_valid", return_value=True), \
                  patch.object(bot, "wait_for_sale_start"), \
                  patch.object(bot, "select_performance_date"), \
+                 patch.object(bot, "_ensure_attendees_selected_on_confirm_page", return_value=True), \
                  patch.object(bot, "probe_current_page", return_value={
                      "state": "detail_page",
                      "purchase_button": True,
