@@ -22,6 +22,8 @@
 | [Mobile 端抢票逻辑](./mobile-ticket-logic.md) | Appium Android 自动化方案详解 |
 | [移动端 App 说明](./mobile-app-notes.md) | Appium 与 Android 设备说明 |
 | [项目概览](./project-overview.md) | 当前主推方案和历史方案的整体对比 |
+| [v0.3.0 用户版发布说明](./releases/v0.3.0-user.md) | 面向普通用户的升级说明与推荐操作路径 |
+| [v0.3.0 发布说明](./releases/v0.3.0.md) | `v0.2.0 -> v0.3.0` 主要改动、升级影响与迁移步骤 |
 | [Web 端抢票逻辑](./web-ticket-logic.md) | Selenium 浏览器自动化方案详解 |
 | [桌面端抢票逻辑](./desktop-ticket-logic.md) | 历史实现说明，当前已不推荐使用 |
 | [桌面端使用指南](./desktop-usage-guide.md) | 历史使用文档，当前仅保留作参考 |
