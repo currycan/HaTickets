@@ -564,6 +564,9 @@ def build_updated_config(base_config: dict, intent, discovery: dict, date_text: 
         "probe_only": flags["probe_only"],
         "if_commit_order": flags["if_commit_order"],
         "auto_navigate": True,
+        "rush_mode": True,
+        "fast_retry_interval_ms": 80,
+        "wait_cta_ready_timeout_ms": 0,
     })
     return config_data
 

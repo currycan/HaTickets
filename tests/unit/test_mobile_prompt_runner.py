@@ -115,6 +115,9 @@ def test_build_updated_config_for_probe_mode():
     assert updated["probe_only"] is True
     assert updated["if_commit_order"] is False
     assert updated["auto_navigate"] is True
+    assert updated["rush_mode"] is True
+    assert updated["fast_retry_interval_ms"] == 80
+    assert updated["wait_cta_ready_timeout_ms"] == 0
 
 
 def test_build_updated_config_drops_stale_target_when_summary_is_unknown():
