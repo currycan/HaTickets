@@ -30,153 +30,146 @@
 
 先定位目标演出，再进入票档页和确认页；如果配置了 `item_url + auto_navigate`，脚本可以从大麦首页自动搜到目标演出。如果配置了 `if_commit_order: false`，脚本会停在“立即提交”之前，不会帮你支付。
 
+注意：`./mobile/scripts/start_ticket_grabbing.sh --yes` 只是“按当前配置执行”。它不会默认直接开始抢票，真正行为由 `probe_only` 和 `if_commit_order` 决定。
+
 如果你希望把“自然语言提示词”也接进来，例如：
 
 ```bash
 ./mobile/scripts/run_from_prompt.sh "帮我抢一张 4 月 6 号张杰的演唱会门票，内场"
 ```
 
-现在脚本会先自动解析提示词，去大麦 App 搜索目标演出，抓取当前可见的场次和票档摘要，再把摘要展示出来供你确认。确认后会优先写入本地配置 [mobile/config.local.jsonc](./mobile/config.local.jsonc)，如果该文件不存在才回退到 [mobile/config.jsonc](./mobile/config.jsonc)，也可以继续执行 `probe` / `confirm` 模式。
+现在脚本会先自动解析提示词，去大麦 App 搜索目标演出，并输出搜索候选和当前页面可见摘要供你确认。确认后会优先写入本地配置 [mobile/config.local.jsonc](./mobile/config.local.jsonc)，如果该文件不存在才回退到 [mobile/config.jsonc](./mobile/config.jsonc)，也可以继续执行 `probe` / `confirm` 模式。
 
 ## 推荐阅读顺序
 
-1. 先看下面的 `Mobile 真机教程`
+1. 先看下面的 `五分钟跑通 Mobile`
 2. 再看 [docs/quick-start.md](docs/quick-start.md)
-3. 如果你要理解脚本细节，再看 [docs/mobile-ticket-logic.md](docs/mobile-ticket-logic.md)
+3. 需要深入理解脚本时，再看 [docs/mobile-ticket-logic.md](docs/mobile-ticket-logic.md)
 
-## 小白推荐路线
+## 五分钟跑通 Mobile
 
-推荐你按这 3 个阶段走，不要一步到位：
+按当前代码，最稳定的路线就是这一条：
 
-1. `探测模式`：确认手机、Appium、页面状态都正常
-2. `不支付验证`：自动走到“确认购买”页，但不点“立即提交”
-3. `正式提交`：确认前两步没问题后，再把自动提交打开
+1. 连接安卓真机，并保持大麦 App 已登录
+2. 启动 Appium
+3. 复制一份本地配置 `mobile/config.local.jsonc`
+4. 先跑一次 `probe_only=true` 的安全探测
+5. 探测通过后，再跑“到确认页但不提交”
 
-对应配置：
+这 3 个阶段一定要区分清楚：
 
-| 目标 | `probe_only` | `if_commit_order` |
-|------|--------------|-------------------|
-| 只看环境通不通 | `true` | `false` |
-| 到确认页但不提交 | `false` | `false` |
-| 自动提交订单 | `false` | `true` |
+1. `probe_only=true`
+   只是探测。会自动打开目标演出页，但会停在“立即购票/立即预订”之前，不会真正点击。
+2. `probe_only=false` 且 `if_commit_order=false`
+   会继续进入票档页和确认页，但停在“立即提交”之前，不会支付。
+3. `probe_only=false` 且 `if_commit_order=true`
+   才是正式提交模式，会尝试提交订单。
 
-## Mobile 真机教程
-
-这一节是最适合新手的用法。
-
-### 第 1 步：准备环境
-
-你至少需要这些东西：
-
-- 一台 Android 真机
-- 手机上已经安装大麦 App，并且已经登录
-- Mac 上有 `Python`、`Poetry`、`Node.js`、`Appium`
-- 手机已经打开 `开发者选项` 和 `USB 调试`
-
-安装 Python 依赖：
+### 1. 安装依赖
 
 ```bash
 poetry install
-```
-
-安装 Appium：
-
-```bash
 npm install -g appium
 appium driver install uiautomator2
 ```
 
 如果你还没有 Android SDK，建议直接安装 Android Studio。
 
-### 第 2 步：连接手机
+### 2. 连接手机
 
-1. 用数据线把安卓手机连到电脑
-2. 手机打开 `开发者选项`
-3. 打开 `USB 调试`
-4. 手机上如果弹“是否允许这台电脑调试”，点 `允许`
+手机前置条件：
 
-然后执行：
+- 已打开 `开发者选项`
+- 已打开 `USB 调试`
+- 已安装并登录大麦 App
+
+连接后执行：
 
 ```bash
 adb devices
 ```
 
-你应该能看到类似输出：
+输出里类似 `ABC1234567	device` 的这一串，就是你的 `udid`。
 
-```bash
-List of devices attached
-ABC1234567	device
-```
-
-这里的 `ABC1234567` 就是你的 `udid`。
-
-### 第 3 步：启动 Appium
-
-最省事的方式：
+### 3. 启动 Appium
 
 ```bash
 ./mobile/scripts/start_appium.sh
 ```
 
-如果你想自己启动，也可以：
+这一步会启动一个本地 Appium 服务，需要持续保持运行。
+
+建议做法：
+
+1. 用第一个终端窗口执行 `./mobile/scripts/start_appium.sh`
+2. 不要关闭这个终端，也不要按 `Ctrl+C`
+3. 再打开第二个终端窗口，继续执行后面的抢票命令
+
+这一步会顺带检查：
+
+- Android SDK
+- 已连接设备
+- 大麦 App 是否安装
+- Appium 服务是否成功启动
+
+### 4. 准备本地配置
+
+优先使用 [mobile/config.local.jsonc](./mobile/config.local.jsonc)。如果没有，就先复制模板：
 
 ```bash
-appium --port 4723
+cp mobile/config.example.jsonc mobile/config.local.jsonc
 ```
 
-### 第 4 步：修改配置
-
-优先编辑本地配置 [mobile/config.local.jsonc](./mobile/config.local.jsonc)；如果你还没有这个文件，可以从模板复制一份。
-
-推荐你第一次先填成这种“安全模式”：
+然后把下面这几个字段改成你自己的真实值：
 
 ```jsonc
 {
   "server_url": "http://127.0.0.1:4723",
   "device_name": "Android",
   "udid": "你的 adb devices 序列号",
-  "platform_version": "14",
+  "platform_version": "你的安卓版本",
   "app_package": "cn.damai",
   "app_activity": ".launcher.splash.SplashMainActivity",
-  "item_url": "https://m.damai.cn/shows/item.html?itemId=1016133935724",
+  "item_url": "https://m.damai.cn/shows/item.html?itemId=你的 itemId",
   "keyword": null,
-  "users": ["你的真实观演人姓名"],
-  "city": "深圳",
-  "date": "12.06",
-  "price": "内场1199元",
-  "price_index": 5,
+  "users": ["你已经在大麦 App 中添加成功的观演人姓名"],
+  "city": "你的演出城市",
+  "date": "你的场次日期",
+  "price": "你的票档原文",
+  "price_index": 0,
   "if_commit_order": false,
   "probe_only": true,
   "auto_navigate": true
 }
 ```
 
-每个字段是什么意思：
+字段说明只记最关键的：
 
-- `udid`：你的手机序列号，来自 `adb devices`
-- `item_url`：大麦演出详情页链接，脚本会提取 `itemId`
-- `keyword`：搜索关键词；如果 `item_url` 可解析，可直接写 `null`
-- `users`：必须写你大麦账号里真实存在的观演人姓名
-- `city`：演出城市，仍建议由你按目标演出手动确认
-- `date`：场次日期文本，按页面上看到的写
-- `price`：票档文本，尽量按页面原文填
-- `price_index`：如果文本匹配失败，就按索引兜底
-- `if_commit_order`：是否自动点“立即提交”
-- `probe_only`：是否只做页面探测
-- `auto_navigate`：是否从大麦首页/搜索页自动进入目标演出
+- `item_url`：推荐填大麦详情页链接，脚本会自动提取 `itemId`
+- `keyword`：如果 `item_url` 已可用，可以填 `null`
+- `users`：必须是你已经在大麦 App 里添加成功的真实观演人；人数就是购票张数
+- `city / date / price`：尽量按 App 页面上的原文填写
+- `price_index`：文本匹配失败时的兜底索引，从 `0` 开始
+- `probe_only=true`：只探测，不下单，也不会点击“立即购票”
+- `if_commit_order=false`：到确认页也不提交
+- `auto_navigate=true`：允许脚本从首页/搜索页自动进入目标演出
 
-下面这张图能帮你理解 `city / date / price` 这些值通常从哪里看：
+下面这张图可以帮助你确认 `city / date / price` 的来源：
 
 ![参数示意图](docs/images/example_detail.png)
 
-### 第 5 步：先做探测，不提交
+### 5. 先跑安全探测
 
-先在手机上手动做两件事：
+如果你配置了 `item_url + auto_navigate=true`，手机停在大麦首页就可以。
 
-1. 打开大麦 App
-2. 确保大麦账号保持登录
+注意：下面这个命令请在**第二个终端窗口**里执行，第一个终端里的 Appium 要保持运行。
 
-如果你配置了 `item_url + auto_navigate: true`，可以直接停留在大麦首页，不需要手动进入目标演出详情页。
+这里非常容易误解：
+
+- 这一步不是正式抢票
+- 这一步不会自动点击“立即购票”
+- 这一步的目标只是确认脚本能不能自动找到目标演出页
+- 如果你执行后看到脚本停在详情页，这是 `probe_only=true` 的正常行为，不是卡死
 
 然后执行：
 
@@ -184,59 +177,72 @@ appium --port 4723
 ./mobile/scripts/start_ticket_grabbing.sh --yes
 ```
 
-如果你想先让脚本根据自然语言自动检索并写配置，再直接做一次安全探测，可以执行：
+我本地实际跑过这条链路，当前脚本会：
 
-```bash
-./mobile/scripts/run_from_prompt.sh --mode probe --yes "帮我抢一张 4 月 6 号张杰的演唱会门票，1280元"
-```
+- 自动解析 `item_url`
+- 自动生成搜索关键词
+- 自动拉起大麦 App
+- 在 `probe_only=true` 时停在购票点击前
 
-说明：
-
-- `summary`：只查询并输出摘要，不改配置
-- `apply`：写入配置，但不执行抢票脚本
-- `probe`：写入配置后，按 `probe_only=true` 直接做页面探测
-- `confirm`：写入配置后，按 `probe_only=false`、`if_commit_order=false` 验证到确认页前
-
-如果提示词里的票档偏好像“内场”一样不够精确，而当前页面只展示纯价格，脚本会先把可见票档列出来，等你确认后再写入配置，不会盲目替你选档。
-
-如果这一步成功，说明：
-
-- 手机已连接
-- Appium 已启动
-- 大麦 App 能被正常控制
-- 当前页面可以被脚本识别
-
-### 第 6 步：做“不支付验证”
-
-把本地配置 [mobile/config.local.jsonc](./mobile/config.local.jsonc) 改成：
+只有当你把配置改成下面这样，脚本才会真的点击“立即购票/立即预订”并继续往后走：
 
 ```jsonc
 "probe_only": false,
 "if_commit_order": false
 ```
 
-然后再次运行：
+### 6. 再跑“不支付验证”
+
+把本地配置改成：
+
+```jsonc
+"probe_only": false,
+"if_commit_order": false
+```
+
+然后再次执行：
 
 ```bash
 ./mobile/scripts/start_ticket_grabbing.sh --yes
 ```
 
-这一步的预期结果是：
+预期结果：
 
-- 脚本自动选票
+- 会点击“立即购票/立即预订”
+- 自动选票
 - 自动进入“确认购买”页
 - 停在“立即提交”之前
 - 不会支付
 
-### 第 7 步：确认没问题后再正式提交
+### 7. 正式提交前再确认一次
 
-只有当你已经完成上一步，并确认流程没问题时，才把：
+只有前两轮都通过后，才考虑把：
 
 ```jsonc
 "if_commit_order": true
 ```
 
-打开自动提交。
+打开。
+
+## 自然语言入口
+
+如果你不想手改配置，也可以用自然语言入口：
+
+```bash
+./mobile/scripts/run_from_prompt.sh --mode summary --yes "帮我抢一张 4 月 6 号张杰的演唱会门票，内场"
+```
+
+模式说明：
+
+- `summary`：只搜索并输出候选和当前页面可见摘要，不写配置
+- `apply`：写配置，不执行抢票
+- `probe`：写配置后直接做安全探测
+- `confirm`：写配置后验证到确认页前，不提交订单
+
+注意：
+
+- `summary` 能稳定给出搜索候选
+- 日期和票档摘要取决于页面当前是否已经展开到可识别状态，显示 `未识别` 也算正常，不代表脚本失效
 
 ## 常见问题
 
@@ -278,6 +284,31 @@ export PATH="$ANDROID_HOME/platform-tools:$PATH"
 1. `price` 文本是不是填错了
 2. `price_index` 是不是和实际票档不一致
 3. 当前票档是不是“缺货登记”而不是可买状态
+
+### 6. 为什么脚本停在详情页，没有继续点“立即购票”
+
+最常见的原因不是脚本坏了，而是当前还在安全探测模式。
+
+先检查配置：
+
+```jsonc
+"probe_only": true
+```
+
+如果是这个值，脚本会故意停在详情页购票按钮前，不会真正点击。
+
+如果你想继续跑到确认页，但又不想支付，请改成：
+
+```jsonc
+"probe_only": false,
+"if_commit_order": false
+```
+
+另外再检查：
+
+1. `wait_cta_ready_timeout_ms` 是否设置得过大，导致脚本还在等待 CTA 就绪
+2. `city` 是否和详情页上的实际文本不一致，导致预选失败
+3. 当前项目是否其实还是“预约/预售”流程，而不是真正可下单流程
 4. 当前项目是不是只支持 App，不支持 H5 / Web
 
 ## 其他方案
@@ -303,7 +334,7 @@ python damai.py
 - 当前官方渠道限制和风控已经让这条方案失去稳定可用性
 - 继续折腾 `desktop` 的投入产出很差
 
-如果你只是想真正跑通抢票流程，请回到上面的 `Mobile 真机教程`。
+如果你只是想真正跑通抢票流程，请回到上面的 `五分钟跑通 Mobile`。
 
 ```bash
 cd desktop

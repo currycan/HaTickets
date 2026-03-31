@@ -1,6 +1,15 @@
 #!/bin/bash
 # 大麦抢票 - 抢票启动脚本
-# 使用方法: ./start_ticket_grabbing.sh
+# 使用方法: ./start_ticket_grabbing.sh [--yes]
+
+ASSUME_YES=false
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes)
+            ASSUME_YES=true
+            ;;
+    esac
+done
 
 echo "🎫 启动大麦抢票脚本..."
 
@@ -53,22 +62,39 @@ echo "✅ 配置文件存在: $CONFIG_FILE"
 echo "📋 当前配置:"
 echo "   $(cat "$CONFIG_FILE" | grep -E '"keyword"|"city"|"users"' | head -3)"
 
+if grep -Eq '"probe_only"[[:space:]]*:[[:space:]]*true' "$CONFIG_FILE"; then
+    echo "🛡️ 当前模式: 安全探测模式"
+    echo "   本次运行只会定位目标演出页，不会点击“立即购票/立即预订”"
+elif grep -Eq '"if_commit_order"[[:space:]]*:[[:space:]]*false' "$CONFIG_FILE"; then
+    echo "🧪 当前模式: 不支付验证模式"
+    echo "   本次运行会继续到确认页，但会停在“立即提交”之前"
+else
+    echo "🔥 当前模式: 正式提交模式"
+    echo "   本次运行会尝试提交订单，请再次确认配置"
+fi
+
 # 确认是否继续
-read -p "🤔 确认开始抢票？(y/N): " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "❌ 已取消"
-    exit 1
+if [ "$ASSUME_YES" = true ]; then
+    echo "🤖 已启用 --yes，跳过交互确认"
+else
+    read -p "🤔 确认开始抢票？(y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "❌ 已取消"
+        exit 1
+    fi
 fi
 
 # 进入脚本目录
 cd "$MOBILE_DIR"
 
-echo "🚀 开始抢票..."
+echo "🚀 开始执行脚本..."
 echo "   请确保："
 echo "   1. 大麦APP已打开"
-echo "   2. 已搜索到目标演出"
-echo "   3. 已进入演出详情页面"
+echo "   2. 大麦账号已保持登录"
+echo "   3. 如果配置了 item_url + auto_navigate=true，可停留在首页"
+echo "   4. 如果没有开启自动导航，请先手动进入演出详情页面"
+echo "   5. 当前命令不会强制正式抢票，实际行为以 probe_only / if_commit_order 配置为准"
 echo ""
 
 # 运行抢票脚本（优先使用项目 .venv，其次使用 Poetry）

@@ -476,6 +476,27 @@ class TestRunTicketGrabbing:
         assert result is True
         smart_click.assert_not_called()
 
+    def test_run_ticket_grabbing_logs_probe_mode_clearly(self, bot, caplog):
+        """The first runtime log should clearly state this is only a probe."""
+        bot.config.probe_only = True
+
+        with caplog.at_level("INFO", logger="mobile.damai_app"), \
+             patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": True,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 0.1]
+            result = bot.run_ticket_grabbing()
+
+        assert result is True
+        assert "开始执行安全探测" in caplog.text
+        assert "不会点击“立即购票”" in caplog.text
+
     def test_run_ticket_grabbing_probe_only_returns_false_when_detail_incomplete(self, bot):
         """probe_only reports failure when detail-page essentials are missing."""
         bot.config.probe_only = True
@@ -622,6 +643,42 @@ class TestRunTicketGrabbing:
 
         assert result is True
         wait_submit_ready.assert_called_once()
+
+    def test_run_ticket_grabbing_logs_confirm_mode_clearly(self, bot, caplog):
+        """Confirm-page validation runs should be labeled clearly in logs."""
+        bot.config.if_commit_order = False
+
+        with caplog.at_level("INFO", logger="mobile.damai_app"), \
+             patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": True,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "wait_for_sale_start"), \
+             patch.object(bot, "_enter_purchase_flow_from_detail_page", return_value={
+                 "state": "sku_page",
+                 "price_container": True,
+                 "reservation_mode": False,
+             }), \
+             patch.object(bot, "_wait_for_submit_ready", return_value=True), \
+             patch.object(bot, "ultra_fast_click", return_value=True), \
+             patch.object(bot, "ultra_batch_click"), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 0.8]
+            mock_price_container = Mock()
+            mock_target = _make_mock_element()
+            mock_price_container.find_element.return_value = mock_target
+            bot.driver.find_element.return_value = mock_price_container
+            bot.driver.find_elements.return_value = []
+
+            result = bot.run_ticket_grabbing()
+
+        assert result is True
+        assert "开始执行不支付验证" in caplog.text
+        assert "不会提交订单" in caplog.text
 
     def test_run_ticket_grabbing_continues_from_sku_page_when_commit_disabled(self, bot):
         """sku_page can continue directly to confirm page without returning to detail."""
@@ -1225,6 +1282,45 @@ class TestRunWithRetry:
         assert result is False
         bot.driver.quit.assert_not_called()
         mock_setup.assert_not_called()
+
+    def test_run_with_retry_logs_probe_success_clearly(self, bot, caplog):
+        """probe_only success should not be logged as ticket-purchase success."""
+        bot.config.probe_only = True
+        bot._last_run_outcome = "probe_ready"
+
+        with caplog.at_level("INFO", logger="mobile.damai_app"), \
+             patch.object(bot, "run_ticket_grabbing", return_value=True), \
+             patch("mobile.damai_app.time"):
+            result = bot.run_with_retry(max_retries=1)
+
+        assert result is True
+        assert "探测成功" in caplog.text
+        assert "抢票成功！" not in caplog.text
+
+    def test_run_with_retry_logs_confirm_success_clearly(self, bot, caplog):
+        """confirm-page validation success should mention no-submit explicitly."""
+        bot.config.if_commit_order = False
+        bot._last_run_outcome = "confirm_ready"
+
+        with caplog.at_level("INFO", logger="mobile.damai_app"), \
+             patch.object(bot, "run_ticket_grabbing", return_value=True), \
+             patch("mobile.damai_app.time"):
+            result = bot.run_with_retry(max_retries=1)
+
+        assert result is True
+        assert "已到订单确认页，未提交订单" in caplog.text
+
+    def test_run_with_retry_logs_submit_success_when_order_submitted(self, bot, caplog):
+        """Actual order submission keeps the purchase-success wording."""
+        bot._last_run_outcome = "order_submitted"
+
+        with caplog.at_level("INFO", logger="mobile.damai_app"), \
+             patch.object(bot, "run_ticket_grabbing", return_value=True), \
+             patch("mobile.damai_app.time"):
+            result = bot.run_with_retry(max_retries=1)
+
+        assert result is True
+        assert "抢票成功：已提交订单" in caplog.text
 
 
 # ---------------------------------------------------------------------------

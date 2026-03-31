@@ -5,23 +5,29 @@
   "platform_version": "15",
   "app_package": "cn.damai",
   "app_activity": ".launcher.splash.SplashMainActivity",
-  // 推荐填写大麦详情页链接，脚本会自动提取 itemId 并尽量自动生成搜索关键词
-  "item_url": "https://m.damai.cn/shows/item.html?itemId=1016133935724",
+  // 用你自己的大麦详情页链接替换，脚本会自动提取 itemId
+  "item_url": "https://m.damai.cn/shows/item.html?itemId=1234567890123",
   // 如果 item_url 解析失败，可保留 keyword 作为兜底；否则可写 null
   "keyword": null,
   // 如果是通过自然语言查询后写入的配置，这里会落精确标题/场馆，帮助自动搜索更稳定
   "target_title": null,
   "target_venue": null,
+  // 先在大麦 App 里手动添加并确认保存成功；人数就是购票数量
   "users": [
-    "张三",
-    "李四"
+    "你的真实观演人姓名"
   ],
-  "city": "深圳",
-  "date": "12.06",
-  "price": "内场1199元",
+  // 尽量使用 App 当前页面上的原文
+  "city": "你的演出城市",
+  // 尽量使用 App 当前页面上的原文
+  "date": "你的场次日期",
+  // 尽量使用 App 当前页面上的原文
+  "price": "你的票档原文",
+  // 文本匹配失败时的兜底索引，从 0 开始
   "price_index": 5,
-  "if_commit_order": true,
-  "probe_only": false,
+  // false = 到确认页前停止；true = 会尝试提交订单
+  "if_commit_order": false,
+  // true = 只做安全探测，停在“立即购票”前；false = 才会继续往后执行
+  "probe_only": true,
   // 自动从大麦首页/搜索页导航到目标演出
   "auto_navigate": true,
   // 开售时间 (ISO格式，用于倒计时等待，null=立即购买)

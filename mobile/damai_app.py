@@ -67,6 +67,7 @@ class DamaiBot:
         self.driver = None
         self.wait = None
         self._terminal_failure_reason = None
+        self._last_run_outcome = None
         self._prepare_runtime_config()
         if setup_driver:
             self._setup_driver()
@@ -74,6 +75,53 @@ class DamaiBot:
     def _set_terminal_failure(self, reason):
         """Mark the current failure as non-retriable."""
         self._terminal_failure_reason = reason
+
+    def _set_run_outcome(self, outcome):
+        """Record the terminal outcome for the latest run attempt."""
+        self._last_run_outcome = outcome
+
+    def _execution_mode_key(self):
+        """Return the current execution mode key."""
+        if self.config.probe_only:
+            return "probe"
+        if not self.config.if_commit_order:
+            return "confirm"
+        return "submit"
+
+    def _execution_mode_label(self):
+        """Return a short user-facing label for the current execution mode."""
+        labels = {
+            "probe": "安全探测",
+            "confirm": "不支付验证",
+            "submit": "正式抢票",
+        }
+        return labels[self._execution_mode_key()]
+
+    def _execution_mode_description(self):
+        """Return a user-facing description for the current execution mode."""
+        descriptions = {
+            "probe": "只检查目标演出页，不会点击“立即购票”",
+            "confirm": "会继续到确认页，但不会提交订单",
+            "submit": "会尝试提交订单",
+        }
+        return descriptions[self._execution_mode_key()]
+
+    def _log_execution_mode(self):
+        """Emit a clear log that tells the user what this run will actually do."""
+        logger.info(
+            f"开始执行{self._execution_mode_label()}：{self._execution_mode_description()}"
+        )
+
+    def _log_success_outcome(self, retry_prefix=""):
+        """Emit a success log message that matches the actual run outcome."""
+        prefix = f"{retry_prefix}" if retry_prefix else ""
+        outcome_messages = {
+            "probe_ready": "探测成功：已到目标演出页，购票控件已就绪",
+            "confirm_ready": "验证成功：已到订单确认页，未提交订单",
+            "order_submitted": "抢票成功：已提交订单",
+            "order_flow_completed": "抢票流程完成：已执行提交，等待后续结果确认",
+        }
+        logger.info(f"{prefix}{outcome_messages.get(self._last_run_outcome, '本轮执行成功')}")
 
     def _prepare_runtime_config(self):
         """Resolve item metadata before creating the Appium session."""
@@ -1680,7 +1728,8 @@ class DamaiBot:
         """执行抢票主流程"""
         try:
             self._terminal_failure_reason = None
-            logger.info("开始抢票流程...")
+            self._last_run_outcome = None
+            self._log_execution_mode()
             start_time = time.time()
 
             self.dismiss_startup_popups()
@@ -1707,6 +1756,7 @@ class DamaiBot:
                 sku_ready = page_probe["state"] == "sku_page" and page_probe["price_container"]
 
                 if detail_ready or sku_ready:
+                    self._set_run_outcome("probe_ready")
                     logger.info("probe_only 模式: 详情页关键控件已就绪，停止在购票点击前")
                     end_time = time.time()
                     logger.info(f"探测完成，耗时: {end_time - start_time:.2f}秒")
@@ -1825,6 +1875,7 @@ class DamaiBot:
                 (By.XPATH, '//*[contains(@text,"提交")]')
             ]
             if not self.config.if_commit_order:
+                self._set_run_outcome("confirm_ready")
                 logger.info("if_commit_order=False，等待确认页就绪后停止在提交订单前")
                 end_time = time.time()
                 logger.info(f"已到订单确认页，未提交订单，耗时: {end_time - start_time:.2f}秒")
@@ -1834,12 +1885,14 @@ class DamaiBot:
             logger.info("提交订单...")
             result = self._submit_order_fast(submit_selectors)
             if result == "success":
+                self._set_run_outcome("order_submitted")
                 end_time = time.time()
                 logger.info(f"抢票成功！耗时: {end_time - start_time:.2f}秒")
                 return True
             elif result in ("sold_out", "captcha", "existing_order"):
                 return False
             # timeout/unknown — optimistically return True (submit may have worked)
+            self._set_run_outcome("order_flow_completed")
             end_time = time.time()
             logger.info(f"抢票流程完成，耗时: {end_time - start_time:.2f}秒")
             return True
@@ -1853,9 +1906,9 @@ class DamaiBot:
     def run_with_retry(self, max_retries=3):
         """带重试机制的抢票"""
         for attempt in range(max_retries):
-            logger.info(f"第 {attempt + 1} 次尝试...")
+            logger.info(f"第 {attempt + 1} 次尝试（{self._execution_mode_label()}）...")
             if self.run_ticket_grabbing():
-                logger.info("抢票成功！")
+                self._log_success_outcome()
                 return True
 
             if self._terminal_failure_reason:
@@ -1864,11 +1917,14 @@ class DamaiBot:
 
             # Fast retry within same session
             for fast_attempt in range(self.config.fast_retry_count):
-                logger.info(f"快速重试 {fast_attempt + 1}/{self.config.fast_retry_count}...")
+                logger.info(
+                    f"快速重试 {fast_attempt + 1}/{self.config.fast_retry_count}"
+                    f"（{self._execution_mode_label()}）..."
+                )
                 if fast_attempt > 0 and self.config.fast_retry_interval_ms > 0:
                     time.sleep(self.config.fast_retry_interval_ms / 1000)
                 if self._fast_retry_from_current_state():
-                    logger.info("快速重试成功！")
+                    self._log_success_outcome("快速重试成功：")
                     return True
                 if self._terminal_failure_reason:
                     logger.error(f"快速重试遇到不可重试失败，停止后续重试: {self._terminal_failure_reason}")
