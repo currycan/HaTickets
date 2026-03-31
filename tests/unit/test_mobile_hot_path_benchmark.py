@@ -9,8 +9,8 @@ from mobile.config import Config
 from mobile import hot_path_benchmark
 from mobile.hot_path_benchmark import (
     _default_config_path,
+    _require_detail_start,
     _repo_root,
-    _require_retryable_start,
     build_benchmark_config,
     format_report,
     parse_args,
@@ -195,47 +195,62 @@ class TestBuildBenchmarkConfigNoneArgs:
 
 
 # ---------------------------------------------------------------------------
-# _require_retryable_start
+# _require_detail_start
 # ---------------------------------------------------------------------------
 
-def test_require_retryable_start_accepts_detail_page():
+def test_require_detail_start_accepts_detail_page():
     bot = Mock()
     bot.probe_current_page.return_value = {"state": "detail_page"}
 
-    assert _require_retryable_start(bot, "开始") == {"state": "detail_page"}
+    assert _require_detail_start(bot, "开始") == {"state": "detail_page"}
     bot._recover_to_detail_page_for_local_retry.assert_not_called()
 
 
-def test_require_retryable_start_uses_recovery_when_needed():
+def test_require_detail_start_uses_recovery_when_needed():
     bot = Mock()
     bot.probe_current_page.return_value = {"state": "unknown"}
-    bot._recover_to_detail_page_for_local_retry.return_value = {"state": "sku_page"}
+    bot._recover_to_detail_page_for_local_retry.return_value = {"state": "detail_page"}
 
-    assert _require_retryable_start(bot, "开始") == {"state": "sku_page"}
+    assert _require_detail_start(bot, "开始") == {"state": "detail_page"}
 
 
-def test_require_retryable_start_raises_for_unrecoverable_page():
+def test_require_detail_start_sku_fallback_back_to_detail():
+    bot = Mock()
+    bot.probe_current_page.side_effect = [
+        {"state": "unknown"},
+        {"state": "detail_page"},
+    ]
+    bot._recover_to_detail_page_for_local_retry.side_effect = [{"state": "sku_page"}]
+    bot._press_keycode_safe.return_value = True
+
+    result = _require_detail_start(bot, "开始")
+
+    assert result["state"] == "detail_page"
+    bot.dismiss_startup_popups.assert_called_once()
+
+
+def test_require_detail_start_raises_for_unrecoverable_page():
     bot = Mock()
     bot.probe_current_page.return_value = {"state": "unknown"}
-    bot._recover_to_detail_page_for_local_retry.return_value = {"state": "loading"}
+    bot._recover_to_detail_page_for_local_retry.side_effect = [
+        {"state": "loading"},
+        {"state": "loading"},
+    ]
 
     with pytest.raises(RuntimeError, match="当前状态: loading"):
-        _require_retryable_start(bot, "开始")
+        _require_detail_start(bot, "开始")
 
 
-class TestRequireRetryableStart:
-    def test_sku_page_also_retryable(self):
-        bot = Mock()
-        bot.probe_current_page.return_value = {"state": "sku_page"}
-        result = _require_retryable_start(bot, "第1轮")
-        assert result["state"] == "sku_page"
-
+class TestRequireDetailStart:
     def test_recovery_fails_raises_runtime_error(self):
         bot = Mock()
-        bot.probe_current_page.return_value = {"state": "unknown_page"}
-        bot._recover_to_detail_page_for_local_retry.return_value = {"state": "unknown_page"}
-        with pytest.raises(RuntimeError, match="未处于可抢票页面"):
-            _require_retryable_start(bot, "第1轮")
+        bot.probe_current_page.return_value = {"state": "unknown"}
+        bot._recover_to_detail_page_for_local_retry.side_effect = [
+            {"state": "unknown"},
+            {"state": "unknown"},
+        ]
+        with pytest.raises(RuntimeError, match="未回到 detail_page"):
+            _require_detail_start(bot, "第1轮")
 
 
 # ---------------------------------------------------------------------------
@@ -308,18 +323,15 @@ def test_run_benchmark_collects_results_and_recovery():
     bot.config.price = "580元"
     bot.config.price_index = 2
     bot.probe_current_page.side_effect = [
-        {"state": "detail_page", "submit_button": False},
-        {"state": "detail_page", "submit_button": False},
         {"state": "order_confirm_page", "submit_button": True},
-        {"state": "sku_page", "submit_button": False},
         {"state": "order_confirm_page", "submit_button": True},
     ]
-    bot._recover_to_detail_page_for_local_retry.return_value = {"state": "sku_page", "submit_button": False}
     bot.run_ticket_grabbing.side_effect = [True, True]
     bot._get_detail_title_text.return_value = "【成都】顽童MJ116 OGS巡回演唱会-成都站"
     bot._get_current_activity.return_value = ".trade.newtradeorder.ui.projectdetail.ui.activity.ProjectDetailActivity"
 
-    with patch("mobile.hot_path_benchmark.time.time", side_effect=[0.0, 8.1, 9.0, 12.6, 13.0, 18.9]):
+    with patch("mobile.hot_path_benchmark._require_detail_start", return_value={"state": "detail_page"}), \
+         patch("mobile.hot_path_benchmark.time.time", side_effect=[0.0, 8.1, 9.0, 12.6, 13.0, 18.9]):
         payload = run_benchmark(bot, runs=2)
 
     assert payload["title"] == "【成都】顽童MJ116 OGS巡回演唱会-成都站"
@@ -353,6 +365,7 @@ def test_format_report_includes_summary_lines():
                 "submit_button_ready": True,
                 "recovery_seconds": 3.83,
                 "recovery_state": "sku_page",
+                "step_timeline": [],
             }
         ],
         "summary": {
@@ -388,6 +401,7 @@ def test_format_report_no_recovery():
                 "submit_button_ready": False,
                 "recovery_seconds": None,
                 "recovery_state": "detail_page",
+                "step_timeline": [],
             }
         ],
         "summary": {
@@ -421,6 +435,7 @@ def test_format_report_no_title():
                 "submit_button_ready": True,
                 "recovery_seconds": None,
                 "recovery_state": "order_confirm_page",
+                "step_timeline": [],
             }
         ],
         "summary": {
@@ -519,6 +534,7 @@ def test_main_success_returns_0():
                 "submit_button_ready": True,
                 "recovery_seconds": None,
                 "recovery_state": "order_confirm_page",
+                "step_timeline": [],
             }
         ],
         "summary": {
@@ -552,7 +568,8 @@ def test_main_bot_driver_quit_called():
         "price_index": 0,
         "results": [
             {"run": 1, "success": True, "elapsed_seconds": 3.0, "final_state": "order_confirm_page",
-             "submit_button_ready": True, "recovery_seconds": None, "recovery_state": "order_confirm_page"},
+             "submit_button_ready": True, "recovery_seconds": None, "recovery_state": "order_confirm_page",
+             "step_timeline": []},
         ],
         "summary": {"runs": 1, "success_count": 1, "avg_elapsed_seconds": 3.0,
                     "min_elapsed_seconds": 3.0, "max_elapsed_seconds": 3.0, "avg_recovery_seconds": None},
@@ -569,3 +586,42 @@ def test_main_bot_driver_quit_called():
         mock_bot_cls.return_value = mock_bot
         hot_path_benchmark.main(["--runs", "1"])
     mock_driver.quit.assert_called_once()
+
+
+def test_format_report_includes_step_timeline_lines():
+    payload = {
+        "title": "测试演出",
+        "initial_state": "detail_page",
+        "initial_activity": "SomeActivity",
+        "price": "680元",
+        "price_index": 1,
+        "results": [
+            {
+                "run": 1,
+                "success": True,
+                "elapsed_seconds": 6.2,
+                "final_state": "order_confirm_page",
+                "submit_button_ready": True,
+                "recovery_seconds": None,
+                "recovery_state": "order_confirm_page",
+                "step_timeline": [
+                    {"level": "INFO", "message": "开始执行正式抢票：会尝试提交订单", "delta_seconds": 0.0},
+                    {"level": "INFO", "message": "选择票价...", "delta_seconds": 1.2},
+                ],
+            }
+        ],
+        "summary": {
+            "runs": 1,
+            "success_count": 1,
+            "avg_elapsed_seconds": 6.2,
+            "min_elapsed_seconds": 6.2,
+            "max_elapsed_seconds": 6.2,
+            "avg_recovery_seconds": None,
+        },
+    }
+
+    report = format_report(payload)
+
+    assert "步骤耗时:" in report
+    assert "01. +0.00s [INFO] 开始执行正式抢票：会尝试提交订单" in report
+    assert "02. +1.20s [INFO] 选择票价..." in report

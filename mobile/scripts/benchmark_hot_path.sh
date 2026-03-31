@@ -1,6 +1,6 @@
 #!/bin/bash
-# 从当前抢票界面出发，安全压测最后热路径
-# 使用方法: ./mobile/scripts/benchmark_hot_path.sh [--config mobile/config.local.jsonc] [--runs 5] [--price 580元] [--price-index 2] [--city 成都] [--date 04.18] [--json]
+# 从详情页出发，模拟真实抢票流程（不提交订单）
+# 使用方法: ./mobile/scripts/benchmark_hot_path.sh [--config mobile/config.local.jsonc] [--runs 1] [--price 580元] [--price-index 2] [--city 成都] [--date 04.18] [--json]
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -17,8 +17,12 @@ resolve_path() {
 }
 
 ARGS=("$@")
+HAS_RUNS=false
 for ((i=0; i<${#ARGS[@]}; i++)); do
     case "${ARGS[$i]}" in
+        --runs|--runs=*)
+            HAS_RUNS=true
+            ;;
         --config)
             next_index=$((i + 1))
             if [ $next_index -ge ${#ARGS[@]} ]; then
@@ -55,10 +59,15 @@ fi
 
 cd "$REPO_ROOT"
 
-echo "⏱️  开始热路径压测..."
-echo "   请确保手机已经停在目标演出的详情页或票档页"
+if [ "$HAS_RUNS" = false ]; then
+    ARGS+=("--runs" "1")
+fi
+
+echo "⏱️  开始模拟抢票流程压测（不提交订单）..."
+echo "   请确保手机已停在目标演出详情页（detail_page）"
 echo "   当前配置文件: $CONFIG_FILE"
 echo "   本脚本会强制使用安全模式: if_commit_order=false, auto_navigate=false, rush_mode=true"
+echo "   会输出每一步日志和相邻步骤耗时（+Xs）"
 echo ""
 
-HATICKETS_CONFIG_PATH="$CONFIG_FILE" poetry run python mobile/hot_path_benchmark.py "$@"
+HATICKETS_CONFIG_PATH="$CONFIG_FILE" poetry run python mobile/hot_path_benchmark.py "${ARGS[@]}"
