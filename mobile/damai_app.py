@@ -261,7 +261,7 @@ class DamaiBot:
             "waitForIdleTimeout": 0,  # 空闲时间，0 表示不等待，让 UIAutomator2 不等页面“空闲”再返回
             "actionAcknowledgmentTimeout": 0,  # 禁止等待动作确认
             "keyInjectionDelay": 0,  # 禁止输入延迟
-            "waitForSelectorTimeout": 300,  # 从500减少到300ms
+            "waitForSelectorTimeout": 100,  # 从300ms减少到100ms，加快WebDriverWait轮询速度
             "ignoreUnimportantViews": False,  # 保持false避免元素丢失
             "allowInvisibleElements": True,
             "enableNotificationListener": False,  # 禁用通知监听
@@ -388,6 +388,32 @@ class DamaiBot:
 
     def _wait_for_purchase_entry_result(self, timeout=1.2, poll_interval=0.04):
         """Wait for the detail-page CTA to open either sku or confirm page."""
+        if self.config.rush_mode:
+            # 极速模式：只用最高可信度的 ID 选择器，减少每次轮询的视图树扫描开销。
+            # 优先检查 sku（更常见的转换目标），再检查 submit（直接进入确认页时）。
+            rush_sku_selectors = [
+                (By.ID, "cn.damai:id/layout_sku"),
+                (By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"),
+            ]
+            rush_submit_selectors = [
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
+            ]
+            # 验证模式下跳过 is_reservation_sku_mode()（5 次额外查找 ~250ms）。
+            skip_reservation_check = not self.config.if_commit_order
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if self._has_any_element(rush_sku_selectors):
+                    return {
+                        "state": "sku_page",
+                        "price_container": True,
+                        "reservation_mode": False if skip_reservation_check else self.is_reservation_sku_mode(),
+                    }
+                if self._has_any_element(rush_submit_selectors):
+                    return {"state": "order_confirm_page", "submit_button": True}
+                time.sleep(poll_interval)
+            return self.probe_current_page()
+
         submit_selectors = [
             (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
             (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
@@ -418,12 +444,11 @@ class DamaiBot:
     def _wait_for_submit_ready(self, timeout=1.6, poll_interval=0.04):
         """Wait until the confirm-page submit button appears."""
         if self.config.rush_mode:
-            # 极速模式下避免高成本 XPath 轮询，优先轻量选择器。
+            # 极速模式：ID 选择器最快，排在最前面；去掉高成本 regex 和 XPath。
             submit_selectors = [
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("确认购买")'),
                 (By.ID, "cn.damai:id/checkbox"),
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("确认购买")'),
             ]
         else:
             submit_selectors = [
@@ -1563,12 +1588,39 @@ class DamaiBot:
         """Open the purchase panel from the detail page with a low-latency hot path."""
         if not prepared:
             if self.config.rush_mode:
-                # 极速模式下先做轻量预选，失败不阻塞抢占购票入口。
-                self.select_performance_date(timeout=0.35)
-                if self.config.city and self._select_city_from_detail_page(timeout=0.35):
-                    logger.info(f"极速模式预选城市: {self.config.city}")
-                elif self.config.city:
-                    logger.debug("极速模式未命中城市选择，继续抢占购票入口")
+                # 极速模式：用 deadline 循环替代 WebDriverWait/smart_wait_and_click。
+                # 每次 find_elements 快速检查（受 waitForSelectorTimeout 约束约 100ms），
+                # 最多等待 300ms 让页面渲染完成，避免旧代码单次 WebDriverWait 超时 800ms+ 的开销。
+                _preselect_deadline = time.time() + 0.3
+                if self.config.date:
+                    while time.time() < _preselect_deadline:
+                        _date_els = self.driver.find_elements(
+                            by=AppiumBy.ANDROID_UIAUTOMATOR,
+                            value=f'new UiSelector().textContains("{self.config.date}")',
+                        )
+                        if _date_els:
+                            self._click_element_center(_date_els[0], duration=30)
+                            logger.info(f"极速模式预选日期: {self.config.date}")
+                            break
+                        time.sleep(0.02)
+                if self.config.city:
+                    _city_found = False
+                    _preselect_deadline = time.time() + 0.3
+                    while time.time() < _preselect_deadline and not _city_found:
+                        for _city_by, _city_val in (
+                            (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{self.config.city}")'),
+                            (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().textContains("{self.config.city}")'),
+                        ):
+                            _city_els = self.driver.find_elements(by=_city_by, value=_city_val)
+                            if _city_els:
+                                self._click_element_center(_city_els[0], duration=30)
+                                logger.info(f"极速模式预选城市: {self.config.city}")
+                                _city_found = True
+                                break
+                        if not _city_found:
+                            time.sleep(0.02)
+                    if not _city_found:
+                        logger.debug("极速模式未命中城市选择，继续抢占购票入口")
             else:
                 self.select_performance_date()
                 logger.info("选择城市...")

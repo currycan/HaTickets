@@ -198,28 +198,33 @@ class TestBuildBenchmarkConfigNoneArgs:
 # _require_detail_start
 # ---------------------------------------------------------------------------
 
-def test_require_detail_start_accepts_detail_page():
+def _bot_with_no_fast_check(probe_state_or_side_effect):
+    """Create a Mock bot where the fast-check element lookup returns empty (falls through to probe_current_page)."""
     bot = Mock()
-    bot.probe_current_page.return_value = {"state": "detail_page"}
+    bot.driver.find_elements.return_value = []  # fast check disabled
+    if isinstance(probe_state_or_side_effect, list):
+        bot.probe_current_page.side_effect = probe_state_or_side_effect
+    else:
+        bot.probe_current_page.return_value = probe_state_or_side_effect
+    return bot
+
+
+def test_require_detail_start_accepts_detail_page():
+    bot = _bot_with_no_fast_check({"state": "detail_page"})
 
     assert _require_detail_start(bot, "开始") == {"state": "detail_page"}
     bot._recover_to_detail_page_for_local_retry.assert_not_called()
 
 
 def test_require_detail_start_uses_recovery_when_needed():
-    bot = Mock()
-    bot.probe_current_page.return_value = {"state": "unknown"}
+    bot = _bot_with_no_fast_check({"state": "unknown"})
     bot._recover_to_detail_page_for_local_retry.return_value = {"state": "detail_page"}
 
     assert _require_detail_start(bot, "开始") == {"state": "detail_page"}
 
 
 def test_require_detail_start_sku_fallback_back_to_detail():
-    bot = Mock()
-    bot.probe_current_page.side_effect = [
-        {"state": "unknown"},
-        {"state": "detail_page"},
-    ]
+    bot = _bot_with_no_fast_check([{"state": "unknown"}, {"state": "detail_page"}])
     bot._recover_to_detail_page_for_local_retry.side_effect = [{"state": "sku_page"}]
     bot._press_keycode_safe.return_value = True
 
@@ -230,8 +235,7 @@ def test_require_detail_start_sku_fallback_back_to_detail():
 
 
 def test_require_detail_start_raises_for_unrecoverable_page():
-    bot = Mock()
-    bot.probe_current_page.return_value = {"state": "unknown"}
+    bot = _bot_with_no_fast_check({"state": "unknown"})
     bot._recover_to_detail_page_for_local_retry.side_effect = [
         {"state": "loading"},
         {"state": "loading"},
@@ -243,8 +247,7 @@ def test_require_detail_start_raises_for_unrecoverable_page():
 
 class TestRequireDetailStart:
     def test_recovery_fails_raises_runtime_error(self):
-        bot = Mock()
-        bot.probe_current_page.return_value = {"state": "unknown"}
+        bot = _bot_with_no_fast_check({"state": "unknown"})
         bot._recover_to_detail_page_for_local_retry.side_effect = [
             {"state": "unknown"},
             {"state": "unknown"},

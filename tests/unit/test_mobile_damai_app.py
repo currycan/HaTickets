@@ -1740,15 +1740,14 @@ class TestDetailPagePurchaseEntry:
         bot.config.rush_mode = True
         next_probe = {"state": "sku_page", "reservation_mode": False}
 
-        with patch.object(bot, "select_performance_date") as select_date, \
-             patch.object(bot, "_select_city_from_detail_page", return_value=False) as select_city, \
-             patch.object(bot, "ultra_fast_click", return_value=True), \
+        # New implementation uses find_elements in a deadline loop (no smart_wait_and_click).
+        # Return empty list so city/date are not found → continues to buy button path.
+        bot.driver.find_elements.return_value = []
+        with patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "_wait_for_purchase_entry_result", return_value=next_probe):
             result = bot._enter_purchase_flow_from_detail_page(prepared=False)
 
         assert result == next_probe
-        select_date.assert_called_once_with(timeout=0.35)
-        select_city.assert_called_once_with(timeout=0.35)
 
     def test_enter_purchase_flow_uses_rush_mode_fast_path(self, bot):
         bot.config.rush_mode = True

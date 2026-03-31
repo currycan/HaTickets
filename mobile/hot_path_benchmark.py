@@ -123,8 +123,33 @@ def build_benchmark_config(base_config: Config, args) -> Config:
     return Config(**config_data)
 
 
+def _fast_check_detail_page(bot: DamaiBot) -> dict | None:
+    """Light-weight detail_page check using a single element lookup.
+
+    Returns a minimal probe dict when on detail_page, None otherwise.
+    Falls back to the full probe when the fast check is ambiguous.
+    """
+    from selenium.webdriver.common.by import By
+    try:
+        els = bot.driver.find_elements(
+            by=By.ID,
+            value="cn.damai:id/trade_project_detail_purchase_status_bar_container_fl",
+        )
+        if els:
+            return {"state": "detail_page", "purchase_button": True, "price_container": False,
+                    "quantity_picker": False, "submit_button": False, "reservation_mode": False,
+                    "pending_order_dialog": False}
+    except Exception:
+        pass
+    return None
+
+
 def _require_detail_start(bot: DamaiBot, run_label: str) -> dict:
     """Ensure each benchmark run always starts from detail_page."""
+    # Fast path: single element lookup ~50ms vs full probe ~1.5s.
+    fast = _fast_check_detail_page(bot)
+    if fast is not None:
+        return fast
     page_probe = bot.probe_current_page()
     if page_probe["state"] == START_STATE:
         return page_probe
@@ -172,12 +197,15 @@ def run_benchmark(bot: DamaiBot, runs: int) -> dict:
         raise ValueError("runs 必须大于等于 1")
 
     initial_probe = _require_detail_start(bot, "开始")
+    # 在首次 probe 之后立即抓取元数据，避免在两次全量 probe 之间插入额外的耗时调用。
     initial_title = bot._get_detail_title_text()
     initial_activity = bot._get_current_activity()
 
     results = []
     for index in range(runs):
-        run_start_probe = _require_detail_start(bot, f"第 {index + 1} 轮开始")
+        # 第一轮直接复用 initial_probe，节省一次全量 probe（~1-2s）。
+        # 后续轮次需要确认页面已恢复到 detail_page。
+        run_start_probe = initial_probe if index == 0 else _require_detail_start(bot, f"第 {index + 1} 轮开始")
 
         recorder, attached_loggers = _attach_timeline_recorder()
         try:
@@ -186,6 +214,8 @@ def run_benchmark(bot: DamaiBot, runs: int) -> dict:
             elapsed_seconds = round(time.time() - start_time, 2)
         finally:
             _detach_timeline_recorder(recorder, attached_loggers)
+        # 使用 bot 自身的 probe 获取最终状态（包含 submit_button 等字段）。
+        # 注意：这不在计时范围内，所以不影响 elapsed_seconds。
         final_probe = bot.probe_current_page()
 
         recovery_seconds = None
