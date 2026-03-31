@@ -285,6 +285,26 @@ class TestResolveConfirmedPrice:
         with pytest.raises(ValueError):
             _resolve_confirmed_price(intent, self._summary(options), None, assume_yes=True)
 
+    def test_assume_yes_price_mismatch_shows_requested_and_available_options(self):
+        intent = PromptIntent(
+            raw_prompt="test",
+            price_hint="内场1080元",
+            seat_hint="内场",
+            numeric_price_hint=1080,
+        )
+        options = [
+            {"index": 8, "text": "1280元", "tag": "", "source": "ocr"},
+            {"index": 9, "text": "1680元", "tag": "", "source": "ocr"},
+        ]
+
+        with pytest.raises(ValueError) as exc_info:
+            _resolve_confirmed_price(intent, self._summary(options), None, assume_yes=True)
+
+        message = str(exc_info.value)
+        assert "提示词里的目标票档是：内场1080元" in message
+        assert "当前页面可选票档是：[8] 1280元 (OCR)、[9] 1680元 (OCR)" in message
+        assert "请修改提示词里的票价/票档描述后重试。" in message
+
     def test_interactive_choice(self):
         intent = PromptIntent(raw_prompt="test")
         options = [

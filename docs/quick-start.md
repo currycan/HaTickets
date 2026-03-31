@@ -11,9 +11,9 @@
 
 这 2 个用户阶段不要混淆：
 
-1. `probe_only=true`
+1. `./mobile/scripts/start_ticket_grabbing.sh --probe --yes`
    只探测。会停在“立即购票/立即预订”之前，不会真正点击。
-2. `probe_only=false` 且 `if_commit_order=true`
+2. `./mobile/scripts/start_ticket_grabbing.sh --yes`
    才是正式提交模式。
 
 也就是说：
@@ -125,8 +125,8 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 - `users`：必须是已经在大麦 App 里添加成功的真实观演人；人数就是购票数量
 - `city / date / price`：尽量按 App 页面原文填写
 - `price_index`：文本匹配失败时的兜底索引，从 `0` 开始
-- `probe_only=true`：只探测，不下单，也不会点击“立即购票”
-- `if_commit_order=false`：保持安全状态，方便先做探测；真正抢票前再改成 `true`
+- `probe_only=true`：脚本内部使用的探测标记；普通用户优先用 `--probe`
+- `if_commit_order=false`：脚本会继续到确认页并执行观演人勾选校验，但会停在“立即提交”前；正式抢票时 `start_ticket_grabbing.sh --yes` 会自动改成 `true`
 - `auto_navigate=true`：允许脚本从首页自动进入目标演出
 
 如果你是开发者，也可以额外创建 `mobile/config.local.jsonc` 作为本地覆盖配置。它不会提交到 GitHub，但默认不会自动生效；只有显式通过 `--config mobile/config.local.jsonc` 或 `HATICKETS_CONFIG_PATH=mobile/config.local.jsonc` 才会启用。
@@ -184,7 +184,7 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 如果你是手动配置用户，完成第 4 步后，也可以直接用下面这条命令做安全探测：
 
 ```bash
-./mobile/scripts/start_ticket_grabbing.sh --yes
+./mobile/scripts/start_ticket_grabbing.sh --probe --yes
 ```
 
 通过的标志是：
@@ -193,24 +193,17 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 - 能自动定位到目标演出页
 - 在购票点击前停止
 
-如果脚本停在详情页，不代表脚本坏了；这正是 `probe_only=true` 的预期行为。
+如果脚本停在详情页，不代表脚本坏了；这正是 `--probe` 的预期行为。
 
 ## 5. 真正开始抢票
 
-第 4 步探测通过后，才建议把配置改成：
-
-```jsonc
-"probe_only": false,
-"if_commit_order": true
-```
-
-然后再次执行：
+第 4 步探测通过后，直接执行：
 
 ```bash
 ./mobile/scripts/start_ticket_grabbing.sh --yes
 ```
 
-这一步才会真正点击“立即提交”。如果下单成功，通常会进入支付页；后续支付需要你自己完成。
+这一步才会真正点击“立即提交”。如果当前配置里还是探测模式，脚本会先提醒你，再自动把配置切到正式抢票模式，然后继续执行。如果下单成功，通常会进入支付页；后续支付需要你自己完成。
 
 再提醒一次：
 
@@ -282,17 +275,18 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 
 ### 脚本停在详情页，没有继续点击“立即购票”
 
-最常见原因是配置里仍然是：
+最常见原因是你执行的是探测命令：
 
-```jsonc
-"probe_only": true
+```bash
+./mobile/scripts/start_ticket_grabbing.sh --probe --yes
 ```
 
-这是安全探测模式，脚本会故意停在购票按钮前。
+这是预期行为。`--probe` 会故意停在购票按钮前。
 
-如果你要继续跑到确认页但不支付，请改成：
+如果你想正式开始抢票，直接执行：
 
-```jsonc
-"probe_only": false,
-"if_commit_order": false
+```bash
+./mobile/scripts/start_ticket_grabbing.sh --yes
 ```
+
+如果当前配置里还是探测模式，这条命令会先提醒你，再自动把配置切到正式抢票模式。

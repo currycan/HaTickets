@@ -91,6 +91,27 @@ def save_config_dict(config_dict, config_path=None):
         config_file.write(_dump_config_dict(config_dict))
 
 
+def update_runtime_mode(probe_only, if_commit_order, config_path=None):
+    """Update runtime mode flags in the target config file and persist them."""
+    if not isinstance(probe_only, bool):
+        raise ValueError(f"probe_only 必须是布尔值，实际值: {probe_only!r}")
+    if not isinstance(if_commit_order, bool):
+        raise ValueError(f"if_commit_order 必须是布尔值，实际值: {if_commit_order!r}")
+
+    config_dict = load_config_dict(config_path)
+    previous_flags = {
+        "probe_only": config_dict.get("probe_only", False),
+        "if_commit_order": config_dict.get("if_commit_order"),
+    }
+    config_dict["probe_only"] = probe_only
+    config_dict["if_commit_order"] = if_commit_order
+    save_config_dict(config_dict, config_path)
+    return previous_flags, {
+        "probe_only": probe_only,
+        "if_commit_order": if_commit_order,
+    }
+
+
 class Config:
     def __init__(self, server_url, keyword, users, city, date, price, price_index, if_commit_order,
                  probe_only=False, device_name="Android", udid=None, platform_version=None,

@@ -691,6 +691,7 @@ class TestRunTicketGrabbing:
              }) as enter_purchase_flow, \
              patch.object(bot, "_select_price_option", return_value=True) as select_price, \
              patch.object(bot, "_wait_for_submit_ready", return_value=True), \
+             patch.object(bot, "_ensure_attendees_selected_on_confirm_page", return_value=True), \
              patch.object(bot, "_burst_click_coordinates") as burst_click_coords, \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
@@ -707,7 +708,7 @@ class TestRunTicketGrabbing:
         assert result is True
         enter_purchase_flow.assert_called_once_with(prepared=False)
         select_price.assert_called_once_with(cached_coords=(240, 1560))
-        burst_click_coords.assert_called_once_with(320, 1880, count=2, interval_ms=25, duration=25)
+        burst_click_coords.assert_called_once_with(320, 1880, count=1, interval_ms=25, duration=25)
 
     def test_run_ticket_grabbing_stops_before_submit_when_commit_disabled(self, bot):
         """if_commit_order=False waits for confirm page but never clicks submit."""
@@ -728,6 +729,7 @@ class TestRunTicketGrabbing:
                  "reservation_mode": False,
              }), \
              patch.object(bot, "_wait_for_submit_ready", return_value=True) as wait_submit_ready, \
+             patch.object(bot, "_ensure_attendees_selected_on_confirm_page", return_value=True), \
              patch.object(bot, "smart_wait_and_click", return_value=True) as smart_click, \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
@@ -764,6 +766,7 @@ class TestRunTicketGrabbing:
                  "reservation_mode": False,
              }), \
              patch.object(bot, "_wait_for_submit_ready", return_value=True), \
+             patch.object(bot, "_ensure_attendees_selected_on_confirm_page", return_value=True), \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
              patch("mobile.damai_app.time") as mock_time:
@@ -794,6 +797,7 @@ class TestRunTicketGrabbing:
              }), \
              patch.object(bot, "wait_for_sale_start"), \
              patch.object(bot, "_wait_for_submit_ready", return_value=True) as wait_submit_ready, \
+             patch.object(bot, "_ensure_attendees_selected_on_confirm_page", return_value=True), \
              patch.object(bot, "smart_wait_and_click") as smart_click, \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
@@ -1084,6 +1088,47 @@ class TestRunTicketGrabbing:
         assert result is True
         assert bot._last_run_outcome == "order_pending_payment"
 
+    def test_run_ticket_grabbing_rush_mode_skips_detail_prepare_and_reprobe_when_no_sell_time(self, bot):
+        bot.config.rush_mode = True
+        bot.config.sell_start_time = None
+        bot.config.wait_cta_ready_timeout_ms = 60000
+
+        detail_probe = {
+            "state": "detail_page",
+            "purchase_button": True,
+            "price_container": True,
+            "quantity_picker": False,
+            "submit_button": False,
+            "reservation_mode": False,
+        }
+
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "check_session_valid", return_value=True), \
+             patch.object(bot, "probe_current_page", return_value=detail_probe) as probe_page, \
+             patch.object(bot, "_prepare_detail_page_hot_path") as prepare_detail, \
+             patch.object(bot, "wait_for_sale_start"), \
+             patch.object(bot, "_enter_purchase_flow_from_detail_page", return_value={
+                 "state": "sku_page",
+                 "price_container": True,
+                 "reservation_mode": False,
+             }), \
+             patch.object(bot, "_select_price_option", return_value=True), \
+             patch.object(bot, "_wait_for_submit_ready", return_value=True), \
+             patch.object(bot, "_ensure_attendees_selected_on_confirm_page", return_value=True), \
+             patch.object(bot, "_submit_order_fast", return_value="success"), \
+             patch.object(bot, "ultra_fast_click", return_value=True), \
+             patch.object(bot, "ultra_batch_click"), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 1.0]
+            bot.driver.find_elements.return_value = []
+
+            result = bot.run_ticket_grabbing()
+
+        assert result is True
+        assert bot._last_run_outcome == "order_submitted"
+        prepare_detail.assert_not_called()
+        assert probe_page.call_count == 1
+
     def test_run_ticket_grabbing_no_driver_quit_in_finally(self, bot):
         """Verify driver.quit is NOT called inside run_ticket_grabbing's finally block."""
         with patch.object(bot, "dismiss_startup_popups"), \
@@ -1116,6 +1161,7 @@ class TestRunTicketGrabbing:
              }), \
              patch.object(bot, "wait_for_sale_start"), \
              patch.object(bot, "_wait_for_submit_ready", return_value=True), \
+             patch.object(bot, "_ensure_attendees_selected_on_confirm_page", return_value=True), \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click") as batch_click, \
              patch("mobile.damai_app.time") as mock_time:
@@ -1690,6 +1736,20 @@ class TestDetailPagePurchaseEntry:
         select_date.assert_called_once()
         select_city.assert_called_once_with(timeout=1.0)
 
+    def test_enter_purchase_flow_rush_mode_continues_when_city_selection_misses(self, bot):
+        bot.config.rush_mode = True
+        next_probe = {"state": "sku_page", "reservation_mode": False}
+
+        with patch.object(bot, "select_performance_date") as select_date, \
+             patch.object(bot, "_select_city_from_detail_page", return_value=False) as select_city, \
+             patch.object(bot, "ultra_fast_click", return_value=True), \
+             patch.object(bot, "_wait_for_purchase_entry_result", return_value=next_probe):
+            result = bot._enter_purchase_flow_from_detail_page(prepared=False)
+
+        assert result == next_probe
+        select_date.assert_called_once_with(timeout=0.35)
+        select_city.assert_called_once_with(timeout=0.35)
+
     def test_enter_purchase_flow_uses_rush_mode_fast_path(self, bot):
         bot.config.rush_mode = True
         next_probe = {"state": "sku_page", "reservation_mode": False}
@@ -1846,10 +1906,12 @@ class TestFastRetry:
                 "quantity_picker": False,
                 "submit_button": True,
              }), \
+             patch.object(bot, "_ensure_attendees_selected_on_confirm_page", return_value=True) as ensure_attendees, \
              patch.object(bot, "smart_wait_for_element", return_value=True) as wait_element:
             result = bot._fast_retry_from_current_state()
 
         assert result is True
+        ensure_attendees.assert_called_once()
         wait_element.assert_called_once()
 
     def test_fast_retry_returns_success_when_pending_order_dialog_detected(self, bot):

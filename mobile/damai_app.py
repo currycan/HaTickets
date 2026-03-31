@@ -101,7 +101,7 @@ class DamaiBot:
         """Return a user-facing description for the current execution mode."""
         descriptions = {
             "probe": "只检查目标演出页，不会点击“立即购票”",
-            "validation": "会继续尝试进入确认页，但不会提交订单；这是开发调试路径",
+            "validation": "会继续进入确认页并勾选观演人，但不会点击“立即提交”；这是开发调试路径",
             "submit": "会尝试提交订单",
         }
         return descriptions[self._execution_mode_key()]
@@ -417,11 +417,20 @@ class DamaiBot:
 
     def _wait_for_submit_ready(self, timeout=1.6, poll_interval=0.04):
         """Wait until the confirm-page submit button appears."""
-        submit_selectors = [
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
-            (By.XPATH, '//*[contains(@text,"提交")]'),
-        ]
+        if self.config.rush_mode:
+            # 极速模式下避免高成本 XPath 轮询，优先轻量选择器。
+            submit_selectors = [
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("确认购买")'),
+                (By.ID, "cn.damai:id/checkbox"),
+            ]
+        else:
+            submit_selectors = [
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
+                (By.XPATH, '//*[contains(@text,"提交")]'),
+            ]
 
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -456,11 +465,14 @@ class DamaiBot:
         except Exception:
             return False
 
-    def _attendee_selected_count(self, checkbox_elements=None):
+    def _attendee_selected_count(self, checkbox_elements=None, use_source_fallback=True):
         """Count selected attendee checkboxes, with XML fallback for flaky checked attrs."""
         elements = checkbox_elements if checkbox_elements is not None else self._attendee_checkbox_elements()
         selected_count = sum(1 for checkbox in elements if self._is_checkbox_selected(checkbox))
         if selected_count > 0:
+            return selected_count
+        if (self.config.rush_mode and not self.config.if_commit_order) and not use_source_fallback:
+            # 开发验证极速模式下避免 page_source 级别扫描带来的高延迟。
             return selected_count
 
         try:
@@ -480,7 +492,8 @@ class DamaiBot:
 
     def _click_attendee_checkbox(self, checkbox):
         """Try multiple click paths and verify checkbox becomes selected."""
-        before_selected = self._attendee_selected_count()
+        use_fallback = not (self.config.rush_mode and not self.config.if_commit_order)
+        before_selected = self._attendee_selected_count(use_source_fallback=use_fallback)
         click_actions = [
             lambda: self._click_element_center(checkbox, duration=35),
             lambda: checkbox.click(),
@@ -495,8 +508,23 @@ class DamaiBot:
             time.sleep(0.05)
             if self._is_checkbox_selected(checkbox):
                 return True
-            if self._attendee_selected_count() > before_selected:
+            if self._attendee_selected_count(use_source_fallback=use_fallback) > before_selected:
                 return True
+        return False
+
+    def _click_attendee_checkbox_fast(self, checkbox):
+        """Low-latency checkbox click path for rush-mode validation."""
+        click_actions = [
+            lambda: checkbox.click(),
+            lambda: self._click_element_center(checkbox, duration=28),
+        ]
+        for action in click_actions:
+            try:
+                action()
+                time.sleep(0.01)
+                return True
+            except Exception:
+                continue
         return False
 
     def _select_attendee_checkbox_by_name(self, user_name):
@@ -526,7 +554,7 @@ class DamaiBot:
                     return True
         return False
 
-    def _ensure_attendees_selected_on_confirm_page(self):
+    def _ensure_attendees_selected_on_confirm_page(self, require_attendee_section=False):
         """Make sure required attendee checkboxes are selected before submit."""
         attendee_section_visible = self._has_element(
             AppiumBy.ANDROID_UIAUTOMATOR,
@@ -535,7 +563,7 @@ class DamaiBot:
         checkbox_elements = self._attendee_checkbox_elements()
 
         if not attendee_section_visible:
-            return True
+            return not require_attendee_section
         if not checkbox_elements:
             logger.warning("确认页存在观演人区域，但未找到可勾选观演人，请手动检查")
             return False
@@ -546,6 +574,29 @@ class DamaiBot:
             return True
 
         logger.info(f"检测到观演人未选择完成，尝试自动补选（已选 {selected_count}/{required_count}）")
+
+        if self.config.rush_mode and not self.config.if_commit_order:
+            logger.info("开发验证极速路径：按勾选框顺序快速补选观演人")
+            provisional_selected = selected_count
+            for round_index in range(3):
+                current_checkboxes = checkbox_elements if round_index == 0 else self._attendee_checkbox_elements()
+                for checkbox in current_checkboxes:
+                    if selected_count >= required_count:
+                        break
+                    if self._is_checkbox_selected(checkbox):
+                        continue
+                    clicked = self._click_attendee_checkbox_fast(checkbox)
+                    if not clicked:
+                        continue
+                    provisional_selected += 1
+                    selected_count = max(selected_count, provisional_selected)
+                if selected_count >= required_count:
+                    break
+                time.sleep(0.08)
+            if selected_count < required_count:
+                logger.warning(f"观演人选择不足（需要 {required_count} 位，当前 {selected_count} 位）")
+                return False
+            return True
 
         unmatched_users = []
         for user_name in self.config.users or []:
@@ -1471,13 +1522,13 @@ class DamaiBot:
         logger.warning("根据提示词尝试多个搜索关键词后，仍未打开目标演出")
         return None
 
-    def select_performance_date(self):
+    def select_performance_date(self, timeout=1.0):
         """选择演出场次日期"""
         if not self.config.date:
             return
 
         date_selector = f'new UiSelector().textContains("{self.config.date}")'
-        if self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, date_selector, timeout=1.0):
+        if self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, date_selector, timeout=timeout):
             logger.info(f"选择场次日期: {self.config.date}")
         else:
             logger.debug(f"未找到日期 '{self.config.date}'，使用默认场次")
@@ -1511,11 +1562,19 @@ class DamaiBot:
     def _enter_purchase_flow_from_detail_page(self, prepared=False):
         """Open the purchase panel from the detail page with a low-latency hot path."""
         if not prepared:
-            self.select_performance_date()
-            logger.info("选择城市...")
-            if not self._select_city_from_detail_page(timeout=1.0):
-                logger.warning("城市选择失败")
-                return None
+            if self.config.rush_mode:
+                # 极速模式下先做轻量预选，失败不阻塞抢占购票入口。
+                self.select_performance_date(timeout=0.35)
+                if self.config.city and self._select_city_from_detail_page(timeout=0.35):
+                    logger.info(f"极速模式预选城市: {self.config.city}")
+                elif self.config.city:
+                    logger.debug("极速模式未命中城市选择，继续抢占购票入口")
+            else:
+                self.select_performance_date()
+                logger.info("选择城市...")
+                if not self._select_city_from_detail_page(timeout=1.0):
+                    logger.warning("城市选择失败")
+                    return None
 
         logger.info("点击购票按钮...")
         if self.config.rush_mode:
@@ -1740,6 +1799,10 @@ class DamaiBot:
             return self.run_ticket_grabbing()
         elif state == "order_confirm_page":
             if not self.config.if_commit_order:
+                if not self._ensure_attendees_selected_on_confirm_page():
+                    self._set_terminal_failure("attendee_unselected")
+                    logger.error("开发验证模式下观演人未选择完整，已停止")
+                    return False
                 submit_selectors = [
                     (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
                     (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
@@ -2005,21 +2068,28 @@ class DamaiBot:
 
         return result
 
-    def run_ticket_grabbing(self):
+    def run_ticket_grabbing(self, initial_page_probe=None):
         """执行抢票主流程"""
         try:
             self._terminal_failure_reason = None
             self._last_run_outcome = None
             self._log_execution_mode()
             start_time = time.time()
+            page_probe = initial_page_probe or self.probe_current_page()
+            fast_validation_hot_path = (
+                self.config.rush_mode
+                and not self.config.if_commit_order
+                and initial_page_probe is not None
+                and page_probe["state"] in {"detail_page", "sku_page"}
+            )
+            if fast_validation_hot_path:
+                logger.info("开发验证极速路径：跳过启动弹窗与登录探测，直接执行抢票热路径")
+            else:
+                self.dismiss_startup_popups()
+                if not self.check_session_valid():
+                    self._set_terminal_failure("session_invalid")
+                    return False
 
-            self.dismiss_startup_popups()
-
-            if not self.check_session_valid():
-                self._set_terminal_failure("session_invalid")
-                return False
-
-            page_probe = self.probe_current_page()
             if page_probe["state"] == "pending_order_dialog":
                 self._set_run_outcome("order_pending_payment")
                 logger.info("检测到未支付订单弹窗（已占单待支付），请立即前往订单页完成支付")
@@ -2055,14 +2125,22 @@ class DamaiBot:
                 return False
 
             prepared_detail_page = False
-            if page_probe["state"] == "detail_page" and (
-                    self.config.sell_start_time or self.config.wait_cta_ready_timeout_ms > 0):
+            should_prepare_detail_page = (
+                page_probe["state"] == "detail_page"
+                and (
+                    self.config.sell_start_time is not None
+                    or (self.config.wait_cta_ready_timeout_ms > 0 and not self.config.rush_mode)
+                )
+            )
+            if should_prepare_detail_page:
                 prepared_detail_page = self._prepare_detail_page_hot_path()
                 page_probe = self.probe_current_page()
 
             # Wait for sale start if configured
             self.wait_for_sale_start()
-            page_probe = self.probe_current_page()
+            # 极速模式 + 未配置开售时间时，wait_for_sale_start 为即时返回，无需再次探测页面状态。
+            if self.config.sell_start_time is not None or not self.config.rush_mode:
+                page_probe = self.probe_current_page()
 
             if page_probe["state"] == "detail_page":
                 page_probe = self._enter_purchase_flow_from_detail_page(prepared=prepared_detail_page)
@@ -2071,8 +2149,18 @@ class DamaiBot:
             else:
                 logger.info("当前已在票档选择页，跳过城市和预约按钮步骤")
                 # 新版 SKU 页会先展示日期卡片，需在此再次选择场次后才会展开票档列表。
-                self.select_performance_date()
-                page_probe = self.probe_current_page()
+                if self.config.rush_mode and not self.config.if_commit_order:
+                    logger.info("开发验证极速路径：已在票档页，跳过场次切换")
+                else:
+                    self.select_performance_date(timeout=0.35 if self.config.rush_mode else 1.0)
+                if self.config.rush_mode:
+                    # 极速模式下避免一次完整重探测，减少热路径阻塞。
+                    page_probe = dict(page_probe)
+                    page_probe.setdefault("state", "sku_page")
+                    if "reservation_mode" not in page_probe:
+                        page_probe["reservation_mode"] = self.is_reservation_sku_mode()
+                else:
+                    page_probe = self.probe_current_page()
 
             if page_probe["state"] == "sku_page" and page_probe.get("reservation_mode"):
                 logger.warning(
@@ -2090,9 +2178,17 @@ class DamaiBot:
                     buy_button_coords = self._get_buy_button_coordinates()
 
             # 3. 票价选择 - 优化查找逻辑
-            logger.info("选择票价...")
-            if not self._select_price_option(cached_coords=price_coords):
-                return False
+            skip_price_selection = (
+                self.config.rush_mode
+                and not self.config.if_commit_order
+                and self._has_element(By.ID, "layout_num")
+            )
+            if skip_price_selection:
+                logger.info("开发验证极速路径：检测到已处于可调数量状态，跳过票档点击")
+            else:
+                logger.info("选择票价...")
+                if not self._select_price_option(cached_coords=price_coords):
+                    return False
 
             # 4. 数量选择
             logger.info("选择数量...")
@@ -2121,12 +2217,14 @@ class DamaiBot:
             # 5. 确定购买
             logger.info("确定购买...")
             if self.config.rush_mode and buy_button_coords:
-                self._burst_click_coordinates(*buy_button_coords, count=2, interval_ms=25, duration=25)
+                burst_count = 1 if not self.config.if_commit_order else 2
+                self._burst_click_coordinates(*buy_button_coords, count=burst_count, interval_ms=25, duration=25)
                 buy_clicked = True
             elif self.config.rush_mode:
                 try:
                     buy_button = self.driver.find_element(By.ID, "btn_buy_view")
-                    self._burst_click_element_center(buy_button, count=2, interval_ms=25, duration=25)
+                    burst_count = 1 if not self.config.if_commit_order else 2
+                    self._burst_click_element_center(buy_button, count=burst_count, interval_ms=25, duration=25)
                     buy_clicked = True
                 except Exception:
                     buy_clicked = False
@@ -2142,25 +2240,23 @@ class DamaiBot:
                 poll_interval=0.03 if self.config.rush_mode else 0.05,
             )
             if not submit_ready:
-                # 6. 批量选择用户
-                logger.info("选择用户...")
-                user_clicks = [(AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{user}")') for user in
-                               self.config.users]
-                user_timeout = 0.35 if self.config.rush_mode else 1.0
-                clicked_users = self.ultra_batch_click(user_clicks, timeout=user_timeout)
-                if clicked_users:
-                    submit_ready = self._wait_for_submit_ready(
-                        timeout=0.9 if self.config.rush_mode else 1.5,
-                        poll_interval=0.03 if self.config.rush_mode else 0.05,
-                    )
+                if self.config.rush_mode and not self.config.if_commit_order:
+                    logger.info("开发验证极速路径：确认页未完全就绪，跳过预选用户兜底，直接校验观演人区域")
+                else:
+                    # 6. 批量选择用户
+                    logger.info("选择用户...")
+                    user_clicks = [(AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{user}")') for user in
+                                   self.config.users]
+                    user_timeout = 0.35 if self.config.rush_mode else 1.0
+                    clicked_users = self.ultra_batch_click(user_clicks, timeout=user_timeout)
+                    if clicked_users:
+                        submit_ready = self._wait_for_submit_ready(
+                            timeout=0.9 if self.config.rush_mode else 1.5,
+                            poll_interval=0.03 if self.config.rush_mode else 0.05,
+                        )
 
-            if not submit_ready:
+            if not submit_ready and not (self.config.rush_mode and not self.config.if_commit_order):
                 logger.warning("未进入订单确认页，请检查票档可用性或观演人配置")
-                return False
-
-            if not self._ensure_attendees_selected_on_confirm_page():
-                self._set_terminal_failure("attendee_unselected")
-                logger.error("订单提交前观演人未选择完整，已停止自动提交")
                 return False
 
             submit_selectors = [
@@ -2168,11 +2264,18 @@ class DamaiBot:
                 (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
                 (By.XPATH, '//*[contains(@text,"提交")]')
             ]
+            if not self._ensure_attendees_selected_on_confirm_page(
+                require_attendee_section=self.config.rush_mode and not self.config.if_commit_order
+            ):
+                self._set_terminal_failure("attendee_unselected")
+                logger.error("订单提交前观演人未选择完整，已停止自动提交")
+                return False
+
             if not self.config.if_commit_order:
                 self._set_run_outcome("validation_ready")
-                logger.info("if_commit_order=False，当前按开发验证路径运行，到确认页后停止在提交订单前")
                 end_time = time.time()
-                logger.info(f"已到订单确认页，未提交订单（开发验证），耗时: {end_time - start_time:.2f}秒")
+                logger.info("if_commit_order=False，已完成观演人勾选，停止在“立即提交”前")
+                logger.info(f"已到订单确认页且观演人已勾选，未提交订单（开发验证），耗时: {end_time - start_time:.2f}秒")
                 return True
 
             # 7. 提交订单

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -19,7 +20,50 @@ except ImportError:
     from damai_app import DamaiBot
 
 
-RETRYABLE_STATES = {"detail_page", "sku_page"}
+START_STATE = "detail_page"
+
+
+class StepTimelineRecorder(logging.Handler):
+    """Collect run-time step logs and per-step deltas from damai_app logger."""
+
+    def __init__(self):
+        super().__init__(level=logging.INFO)
+        self.events = []
+        self._last_created = None
+
+    def emit(self, record: logging.LogRecord):
+        if record.levelno < logging.INFO:
+            return
+        message = record.getMessage()
+        if not message:
+            return
+
+        delta = 0.0 if self._last_created is None else round(record.created - self._last_created, 2)
+        self._last_created = record.created
+        self.events.append({
+            "level": record.levelname,
+            "message": message,
+            "delta_seconds": delta,
+        })
+
+
+def _attach_timeline_recorder():
+    """Attach timeline recorder to known damai_app logger names."""
+    recorder = StepTimelineRecorder()
+    attached_loggers = []
+    for logger_name in ("mobile.damai_app", "damai_app"):
+        target_logger = logging.getLogger(logger_name)
+        target_logger.addHandler(recorder)
+        attached_loggers.append(target_logger)
+    return recorder, attached_loggers
+
+
+def _detach_timeline_recorder(recorder: StepTimelineRecorder, attached_loggers):
+    for target_logger in attached_loggers:
+        try:
+            target_logger.removeHandler(recorder)
+        except Exception:
+            pass
 
 
 def _repo_root() -> Path:
@@ -36,7 +80,7 @@ def _default_config_path() -> Path:
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="从当前抢票界面出发，安全压测最后热路径")
+    parser = argparse.ArgumentParser(description="从详情页出发，安全压测最后热路径")
     parser.add_argument(
         "--config",
         default=str(_default_config_path()),
@@ -79,17 +123,33 @@ def build_benchmark_config(base_config: Config, args) -> Config:
     return Config(**config_data)
 
 
-def _require_retryable_start(bot: DamaiBot, run_label: str) -> dict:
-    """Ensure the current page can start or recover into the hot path."""
+def _require_detail_start(bot: DamaiBot, run_label: str) -> dict:
+    """Ensure each benchmark run always starts from detail_page."""
     page_probe = bot.probe_current_page()
-    if page_probe["state"] in RETRYABLE_STATES:
+    if page_probe["state"] == START_STATE:
         return page_probe
 
     recovered_probe = bot._recover_to_detail_page_for_local_retry(page_probe)
-    if recovered_probe["state"] in RETRYABLE_STATES:
+    if recovered_probe["state"] == START_STATE:
         return recovered_probe
 
-    raise RuntimeError(f"{run_label}前未处于可抢票页面，当前状态: {recovered_probe['state']}")
+    if recovered_probe["state"] == "sku_page":
+        if bot._press_keycode_safe(4, context=f"{run_label}前回退到详情页"):
+            time.sleep(0.2)
+            bot.dismiss_startup_popups()
+            back_probe = bot.probe_current_page()
+            if back_probe["state"] == START_STATE:
+                return back_probe
+            recovered_probe = back_probe
+
+    # One more local recovery attempt after fallback back navigation.
+    recovered_probe = bot._recover_to_detail_page_for_local_retry(recovered_probe)
+    if recovered_probe["state"] == START_STATE:
+        return recovered_probe
+
+    raise RuntimeError(
+        f"{run_label}前未回到 {START_STATE}，当前状态: {recovered_probe['state']}"
+    )
 
 
 def summarize_results(results: list[dict]) -> dict:
@@ -111,24 +171,28 @@ def run_benchmark(bot: DamaiBot, runs: int) -> dict:
     if runs < 1:
         raise ValueError("runs 必须大于等于 1")
 
-    initial_probe = _require_retryable_start(bot, "开始")
+    initial_probe = _require_detail_start(bot, "开始")
     initial_title = bot._get_detail_title_text()
     initial_activity = bot._get_current_activity()
 
     results = []
     for index in range(runs):
-        _require_retryable_start(bot, f"第 {index + 1} 轮开始")
+        run_start_probe = _require_detail_start(bot, f"第 {index + 1} 轮开始")
 
-        start_time = time.time()
-        success = bot.run_ticket_grabbing()
-        elapsed_seconds = round(time.time() - start_time, 2)
+        recorder, attached_loggers = _attach_timeline_recorder()
+        try:
+            start_time = time.time()
+            success = bot.run_ticket_grabbing(initial_page_probe=run_start_probe)
+            elapsed_seconds = round(time.time() - start_time, 2)
+        finally:
+            _detach_timeline_recorder(recorder, attached_loggers)
         final_probe = bot.probe_current_page()
 
         recovery_seconds = None
         recovery_state = final_probe["state"]
         if index < runs - 1:
             recovery_start = time.time()
-            recovery_probe = bot._recover_to_detail_page_for_local_retry(final_probe)
+            recovery_probe = _require_detail_start(bot, f"第 {index + 2} 轮准备")
             recovery_seconds = round(time.time() - recovery_start, 2)
             recovery_state = recovery_probe["state"]
 
@@ -140,6 +204,7 @@ def run_benchmark(bot: DamaiBot, runs: int) -> dict:
             "submit_button_ready": bool(final_probe.get("submit_button")),
             "recovery_seconds": recovery_seconds,
             "recovery_state": recovery_state,
+            "step_timeline": recorder.events,
         })
 
     return {
@@ -172,6 +237,13 @@ def format_report(payload: dict) -> str:
         if item["recovery_seconds"] is not None:
             line += f" | recover={item['recovery_seconds']:.2f}s -> {item['recovery_state']}"
         lines.append(line)
+        if item.get("step_timeline"):
+            lines.append("   步骤耗时:")
+            for step_index, step in enumerate(item["step_timeline"], start=1):
+                lines.append(
+                    f"   {step_index:02d}. +{step['delta_seconds']:.2f}s "
+                    f"[{step['level']}] {step['message']}"
+                )
 
     summary = payload["summary"]
     lines.extend([

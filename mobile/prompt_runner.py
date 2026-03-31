@@ -205,6 +205,12 @@ def _format_price_option(option: dict) -> str:
     return f"[{option['index']}] {option.get('text') or '(未识别)'}{tag}{source}"
 
 
+def _format_available_price_options(options: list[dict]) -> str:
+    if not options:
+        return "无"
+    return "、".join(_format_price_option(option) for option in options)
+
+
 def _format_human_date(date_text: str | None) -> str:
     if not date_text:
         return "<日期>"
@@ -488,7 +494,14 @@ def _resolve_confirmed_price(intent, summary, chosen_price, assume_yes: bool):
         return None
 
     if assume_yes:
-        raise ValueError("提示词票档偏好未能自动映射到明确票档，无法在 --yes 模式下安全继续")
+        requested_hint = intent.price_hint or "未提供明确票档偏好"
+        visible_options = _format_available_price_options(available)
+        raise ValueError(
+            "提示词票档偏好未能自动映射到明确票档，无法在 --yes 模式下安全继续。\n"
+            f"提示词里的目标票档是：{requested_hint}\n"
+            f"当前页面可选票档是：{visible_options}\n"
+            "请修改提示词里的票价/票档描述后重试。"
+        )
 
     choice = _prompt_choice(
         "未能自动确定票档，请从以下列表中选择：",

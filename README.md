@@ -23,14 +23,19 @@
 | ~~`Desktop`~~ | ~~`desktop/`~~ | ~~不可用~~ | ~~官方渠道和风控已限制，当前不要再作为可执行方案使用~~ |
 
 > 如果你是第一次用，直接走 `Mobile + 安卓真机`。
-> 如果你只想先验证流程，不想误提交订单，先把 `if_commit_order` 设成 `false`。
+> 如果你是手动配置用户，想先验证流程，直接用 `./mobile/scripts/start_ticket_grabbing.sh --probe --yes`。
 > 如果你看到旧文档里提到 `Desktop`，把它理解成“历史实现”，不要再按它准备环境。
 
 **当前主流程按 `Mobile + 安卓真机` 设计。**
 
-先定位目标演出，再进入票档页和确认页；如果配置了 `item_url + auto_navigate`，脚本可以从大麦首页自动搜到目标演出。如果配置了 `if_commit_order: false`，脚本会停在“立即提交”之前，不会帮你支付。
+先定位目标演出，再进入票档页和确认页；如果配置了 `item_url + auto_navigate`，脚本可以从大麦首页自动搜到目标演出。
 
-注意：`./mobile/scripts/start_ticket_grabbing.sh --yes` 只是“按当前配置执行”。它不会默认直接开始抢票，真正行为由 `probe_only` 和 `if_commit_order` 决定。
+现在命令语义固定为：
+
+- `./mobile/scripts/start_ticket_grabbing.sh --probe --yes`：安全探测
+- `./mobile/scripts/start_ticket_grabbing.sh --yes`：正式抢票
+
+如果当前配置里的 `probe_only / if_commit_order` 和你执行的命令不一致，脚本会先用醒目的日志提醒你，再自动改写配置并继续执行。
 
 ## 推荐阅读顺序
 
@@ -49,9 +54,9 @@
 
 这 2 个用户阶段一定要区分清楚：
 
-1. `probe_only=true`
+1. `./mobile/scripts/start_ticket_grabbing.sh --probe --yes`
    只是探测。会自动打开目标演出页，但会停在“立即购票/立即预订”之前，不会真正点击。
-2. `probe_only=false` 且 `if_commit_order=true`
+2. `./mobile/scripts/start_ticket_grabbing.sh --yes`
    才是正式提交模式，会尝试提交订单。
 
 ### 1. 安装依赖
@@ -161,7 +166,7 @@ adb devices
 ```
 
 这就是普通用户最推荐的探测方式。
-也就是说，如果你已经在用自然语言入口，通常**不需要**再单独执行一次 `probe_only=true` 的 `start_ticket_grabbing.sh --yes`。
+也就是说，如果你已经在用自然语言入口，通常**不需要**再单独执行一次 `./mobile/scripts/start_ticket_grabbing.sh --probe --yes`。
 
 #### 4.2 手动配置
 
@@ -203,14 +208,14 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 - `users`：必须是你已经在大麦 App 里添加成功的真实观演人；人数就是购票张数
 - `city / date / price`：尽量按 App 页面上的原文填写
 - `price_index`：文本匹配失败时的兜底索引，从 `0` 开始
-- `probe_only=true`：只探测，不下单，也不会点击“立即购票”
-- `if_commit_order=false`：保持安全状态，方便先做探测；真正抢票前再改成 `true`
+- `probe_only=true`：脚本内部使用的探测标记；普通用户优先使用 `--probe`
+- `if_commit_order=false`：脚本会继续到确认页并执行观演人勾选校验，但会停在“立即提交”前；正式抢票时 `start_ticket_grabbing.sh --yes` 会自动改成 `true`
 - `auto_navigate=true`：允许脚本从首页/搜索页自动进入目标演出
 
 如果你是手动配置用户，完成这一步后，可以直接用下面这条命令做一次安全探测：
 
 ```bash
-./mobile/scripts/start_ticket_grabbing.sh --yes
+./mobile/scripts/start_ticket_grabbing.sh --probe --yes
 ```
 
 探测通过的标志是：
@@ -219,7 +224,7 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 - 能自动定位到目标演出页
 - 在购票点击前停止
 
-如果你执行后看到脚本停在详情页，不代表脚本坏了；这正是 `probe_only=true` 的预期行为。
+如果你执行后看到脚本停在详情页，不代表脚本坏了；这正是 `--probe` 的预期行为。
 
 开发者补充说明：
 
@@ -279,18 +284,29 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 - 第 4 步验证“脚本能不能找到正确的演出页”
 - 第 5 步才是“允许脚本真正提交订单”
 
-如果你是从 4.1 自动配置开始的，到了这里通常不需要重新生成配置，只需要沿用第 4 步已经探测通过的配置，把：
+如果你是从 4.1 自动配置开始的，到了这里通常不需要重新生成配置，直接执行：
+
+```bash
+./mobile/scripts/start_ticket_grabbing.sh --yes
+```
+
+这条命令会固定按“正式抢票”运行。
+
+如果你当前配置里还是：
+
+```jsonc
+"probe_only": true,
+"if_commit_order": false
+```
+
+脚本会先给出醒目的提示，再自动把它们改成：
 
 ```jsonc
 "probe_only": false,
 "if_commit_order": true
 ```
 
-打开，然后再次执行：
-
-```bash
-./mobile/scripts/start_ticket_grabbing.sh --yes
-```
+然后继续执行。
 
 预期逻辑是：
 
@@ -306,7 +322,7 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 ```mermaid
 flowchart TD
     A["第 4 步：自动配置并探测<br/>run_from_prompt --mode probe"] --> D["第 5 步：正式抢票<br/>probe_only=false<br/>if_commit_order=true"]
-    A --> B["手动配置用户可选：start_ticket_grabbing.sh<br/>probe_only=true"]
+    A --> B["手动配置用户可选：start_ticket_grabbing.sh --probe<br/>安全探测"]
     B --> D
 
     A --> A1["目标：确认脚本能找到正确演出页"]
@@ -379,20 +395,21 @@ export PATH="$ANDROID_HOME/platform-tools:$PATH"
 
 最常见的原因不是脚本坏了，而是当前还在安全探测模式。
 
-先检查配置：
+先看你执行的是不是这条命令：
 
-```jsonc
-"probe_only": true
+```bash
+./mobile/scripts/start_ticket_grabbing.sh --probe --yes
 ```
 
-如果是这个值，脚本会故意停在详情页购票按钮前，不会真正点击。
+如果是，这就是预期行为。`--probe` 会故意停在详情页购票按钮前，不会真正点击。
 
-如果你想继续跑到确认页，但又不想支付，请改成：
+如果你想正式开始抢票，直接执行：
 
-```jsonc
-"probe_only": false,
-"if_commit_order": false
+```bash
+./mobile/scripts/start_ticket_grabbing.sh --yes
 ```
+
+如果当前配置里还是探测模式，这条命令会先用醒目的日志提示你，然后自动把配置切到正式抢票模式再继续执行。
 
 另外再检查：
 

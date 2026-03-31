@@ -12,6 +12,7 @@ from mobile.config import (
     _strip_jsonc_comments,
     load_config_dict,
     save_config_dict,
+    update_runtime_mode,
 )
 
 
@@ -438,6 +439,32 @@ class TestMobileConfigLoadConfig:
         loaded = load_config_dict(str(path))
 
         assert loaded == source
+
+    def test_update_runtime_mode_writes_probe_flags(self, tmp_path):
+        path = tmp_path / "config.jsonc"
+        source = _make(if_commit_order=True, probe_only=False)
+        save_config_dict(source, str(path))
+
+        previous, updated = update_runtime_mode(True, False, str(path))
+        loaded = load_config_dict(str(path))
+
+        assert previous == {"probe_only": False, "if_commit_order": True}
+        assert updated == {"probe_only": True, "if_commit_order": False}
+        assert loaded["probe_only"] is True
+        assert loaded["if_commit_order"] is False
+
+    def test_update_runtime_mode_writes_submit_flags(self, tmp_path):
+        path = tmp_path / "config.jsonc"
+        source = _make(if_commit_order=False, probe_only=True)
+        save_config_dict(source, str(path))
+
+        previous, updated = update_runtime_mode(False, True, str(path))
+        loaded = load_config_dict(str(path))
+
+        assert previous == {"probe_only": True, "if_commit_order": False}
+        assert updated == {"probe_only": False, "if_commit_order": True}
+        assert loaded["probe_only"] is False
+        assert loaded["if_commit_order"] is True
 
     def test_load_config_reads_rush_mode(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
