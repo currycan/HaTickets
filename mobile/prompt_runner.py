@@ -395,6 +395,7 @@ def _validate_prompt_requirements(intent, base_config: dict, mode: str):
 def _format_summary(intent, discovery, chosen_price):
     summary = discovery["summary"]
     candidates = discovery.get("search_results") or []
+    step_timings = discovery.get("step_timings") or []
     stdout = sys.stdout
     page_state = summary.get("state") or "unknown"
     reservation_text = "是" if summary.get("reservation_mode") else "否"
@@ -435,6 +436,21 @@ def _format_summary(intent, discovery, chosen_price):
             lines.append(
                 _paint(f"  {candidate_text}", "green" if candidate is candidates[0] else "dim", stream=stdout)
             )
+
+    if step_timings:
+        lines.append(f"- {_label('步骤耗时:', stream=stdout)}")
+        for step in step_timings:
+            baseline = step.get("manual_baseline_seconds")
+            relation = "快于手动" if step.get("faster_than_manual") else "慢于手动"
+            if baseline is None:
+                text = f"  {step.get('step')} | {step.get('seconds', 0):.2f}s"
+            else:
+                text = (
+                    f"  {step.get('step')} | {step.get('seconds', 0):.2f}s "
+                    f"(手动基线 {baseline:.2f}s, {relation})"
+                )
+            color = "green" if step.get("faster_than_manual", True) else "yellow"
+            lines.append(_paint(text, color, stream=stdout))
 
     lines.append(
         f"- {_label('推荐票档:', stream=stdout)} "

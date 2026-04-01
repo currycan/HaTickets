@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 
 from appium import webdriver
@@ -59,6 +60,10 @@ _CTA_READY_KEYWORDS = (
     "立即购买", "立即抢票", "立即预定", "选座购买", "购买", "抢票", "预定", "提交订单", "去结算", "确定"
 )
 _CTA_BLOCKED_KEYWORDS = ("预约", "预售", "即将开抢", "待开售", "未开售", "倒计时", "无票", "售罄", "缺货")
+_MANUAL_STEP_BASELINES = {
+    "搜索页输入并提交关键词": 6.0,
+    "搜索结果扫描并打开目标": 12.0,
+}
 
 
 class DamaiBot:
@@ -70,6 +75,7 @@ class DamaiBot:
         self.wait = None
         self._terminal_failure_reason = None
         self._last_run_outcome = None
+        self._last_discovery_step_timings = []
         self._prepare_runtime_config()
         if setup_driver:
             self._setup_driver()
@@ -125,6 +131,32 @@ class DamaiBot:
             "order_flow_completed": "抢票流程完成：已执行提交，等待后续结果确认",
         }
         logger.info(f"{prefix}{outcome_messages.get(self._last_run_outcome, '本轮执行成功')}")
+
+    @contextmanager
+    def _timed_step(self, step_name, manual_baseline_seconds=None):
+        """Record and log per-step latency for discovery hot path."""
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = time.perf_counter() - start
+            faster_than_manual = (
+                True if manual_baseline_seconds is None else elapsed <= manual_baseline_seconds
+            )
+            self._last_discovery_step_timings.append({
+                "step": step_name,
+                "seconds": round(elapsed, 3),
+                "manual_baseline_seconds": manual_baseline_seconds,
+                "faster_than_manual": faster_than_manual,
+            })
+            if manual_baseline_seconds is None:
+                logger.info(f"步骤耗时[{step_name}] {elapsed:.2f}s")
+                return
+            relation = "快于手动基线" if faster_than_manual else "慢于手动基线"
+            log_fn = logger.info if faster_than_manual else logger.warning
+            log_fn(
+                f"步骤耗时[{step_name}] {elapsed:.2f}s（手动基线 {manual_baseline_seconds:.2f}s，{relation}）"
+            )
 
     def _prepare_runtime_config(self):
         """Resolve item metadata before creating the Appium session."""
@@ -291,11 +323,20 @@ class DamaiBot:
         except Exception:
             # 测试桩或精简驱动对象可能不支持 dict-style settings
             pass
-        self.d.app_start(
-            self.config.app_package,
-            activity=self.config.app_activity,
-            stop=False,
-        )
+        should_start_app = True
+        try:
+            current_app = self.d.app_current()
+            if isinstance(current_app, dict) and current_app.get("package") == self.config.app_package:
+                should_start_app = False
+        except Exception:
+            should_start_app = True
+
+        if should_start_app:
+            self.d.app_start(
+                self.config.app_package,
+                activity=self.config.app_activity,
+                stop=False,
+            )
         self.driver = self.d
         self.wait = None
 
@@ -317,6 +358,11 @@ class DamaiBot:
             return self.driver.find_element(by, value)
         return self._appium_selector_to_u2(by, value)
 
+    @staticmethod
+    def _xpath_literal(value):
+        escaped = str(value).replace('"', '\\"')
+        return f'"{escaped}"'
+
     def _find_all(self, by, value):
         """统一查找列表，返回 u2 element list 或 Appium element list。"""
         if not self._using_u2():
@@ -330,13 +376,31 @@ class DamaiBot:
 
         if by in (By.ID, By.CLASS_NAME):
             key = "resourceId" if by == By.ID else "className"
-            results = []
-            for index in range(128):
-                selector = self.d(**{key: value, "instance": index})
-                if not self._selector_exists(selector):
-                    break
-                results.append(selector)
-            return results
+            attr = "resource-id" if by == By.ID else "class"
+            try:
+                xpath_query = f"//*[@{attr}={self._xpath_literal(value)}]"
+                matches = self.d.xpath(xpath_query).all()
+                if matches:
+                    return list(matches)
+                return []
+            except Exception:
+                # 回退到 instance 扫描，兼容测试桩
+                results = []
+                for index in range(24):
+                    selector = self.d(**{key: value, "instance": index})
+                    if not self._selector_exists(selector):
+                        break
+                    try:
+                        info = getattr(selector, "info", {}) or {}
+                    except Exception:
+                        info = {}
+                    actual = info.get("resourceId" if by == By.ID else "className")
+                    if actual and actual != value:
+                        if index == 0:
+                            return []
+                        break
+                    results.append(selector)
+                return results
 
         selector = self._appium_selector_to_u2(by, value)
         if hasattr(selector, "all"):
@@ -422,7 +486,17 @@ class DamaiBot:
     def _element_rect(self, element):
         """返回统一 rect 结构：{'x','y','width','height'}。"""
         if hasattr(element, "rect"):
-            return element.rect
+            rect = element.rect
+            if isinstance(rect, dict):
+                return rect
+            if isinstance(rect, (list, tuple)) and len(rect) == 4:
+                x, y, width, height = [int(v) for v in rect]
+                return {
+                    "x": x,
+                    "y": y,
+                    "width": max(0, width),
+                    "height": max(0, height),
+                }
 
         try:
             bounds_tuple = getattr(element, "bounds", None)
@@ -488,18 +562,48 @@ class DamaiBot:
                 return []
 
         if by == By.ID:
+            container_elem = getattr(container, "elem", None)
+            if container_elem is not None and hasattr(container_elem, "iter"):
+                try:
+                    return [node for node in container_elem.iter() if node.get("resource-id") == value]
+                except Exception:
+                    pass
             results = []
-            for index in range(128):
+            for index in range(24):
                 child = container.child(resourceId=value, instance=index)
                 if not self._selector_exists(child):
+                    break
+                try:
+                    info = getattr(child, "info", {}) or {}
+                except Exception:
+                    info = {}
+                actual = info.get("resourceId")
+                if actual and actual != value:
+                    if index == 0:
+                        return []
                     break
                 results.append(child)
             return results
         if by == By.CLASS_NAME:
+            container_elem = getattr(container, "elem", None)
+            if container_elem is not None and hasattr(container_elem, "iter"):
+                try:
+                    return [node for node in container_elem.iter() if node.get("class") == value]
+                except Exception:
+                    pass
             results = []
-            for index in range(128):
+            for index in range(24):
                 child = container.child(className=value, instance=index)
                 if not self._selector_exists(child):
+                    break
+                try:
+                    info = getattr(child, "info", {}) or {}
+                except Exception:
+                    info = {}
+                actual = info.get("className")
+                if actual and actual != value:
+                    if index == 0:
+                        return []
                     break
                 results.append(child)
             return results
@@ -928,7 +1032,8 @@ class DamaiBot:
             if not self._using_u2():
                 self.driver.press_keycode(keycode)
             else:
-                self.d.press(keycode)
+                u2_key = {4: "back", 66: "enter"}.get(keycode, keycode)
+                self.d.press(u2_key)
             return True
         except Exception as exc:
             suffix = f"（{context}）" if context else ""
@@ -1107,7 +1212,7 @@ class DamaiBot:
         """Read element text across Appium and u2 element types."""
         try:
             value = getattr(element, "text", "")
-            if isinstance(value, str):
+            if isinstance(value, str) and value.strip():
                 return value
         except Exception:
             pass
@@ -1115,7 +1220,7 @@ class DamaiBot:
         try:
             if hasattr(element, "get_text"):
                 value = element.get_text()
-                if isinstance(value, str):
+                if isinstance(value, str) and value.strip():
                     return value
         except Exception:
             pass
@@ -1124,7 +1229,16 @@ class DamaiBot:
             info = getattr(element, "info", {})
             if isinstance(info, dict):
                 value = info.get("text", "")
-                if isinstance(value, str):
+                if isinstance(value, str) and value.strip():
+                    return value
+        except Exception:
+            pass
+
+        try:
+            attrib = getattr(element, "attrib", {})
+            if attrib is not None and hasattr(attrib, "get"):
+                value = attrib.get("text", "")
+                if isinstance(value, str) and value.strip():
                     return value
         except Exception:
             pass
@@ -1601,59 +1715,63 @@ class DamaiBot:
             logger.warning("缺少 keyword，无法执行自动搜索")
             return False
 
-        try:
-            search_input = self._wait_for_element(By.ID, "cn.damai:id/header_search_v2_input", timeout=3)
-        except TimeoutException:
-            logger.warning("未找到搜索输入框")
-            return False
-
-        self._click_element_center(search_input)
-        time.sleep(0.2)
-
-        current_text = self._read_element_text(search_input).strip()
-        if current_text and current_text != self.config.keyword:
-            if self._has_element(By.ID, "cn.damai:id/header_search_v2_input_delete"):
-                self.ultra_fast_click(By.ID, "cn.damai:id/header_search_v2_input_delete", timeout=0.8)
-                time.sleep(0.1)
-            else:
-                try:
-                    if hasattr(search_input, "clear"):
-                        search_input.clear()
-                    elif hasattr(search_input, "set_text"):
-                        search_input.set_text("")
-                except Exception:
-                    pass
-
-        if self._read_element_text(search_input).strip() != self.config.keyword:
+        with self._timed_step(
+                "搜索页输入并提交关键词",
+                manual_baseline_seconds=_MANUAL_STEP_BASELINES.get("搜索页输入并提交关键词")):
             try:
-                if hasattr(search_input, "send_keys"):
-                    search_input.send_keys(self.config.keyword)
-                elif hasattr(search_input, "set_text"):
-                    search_input.set_text(self.config.keyword)
-            except Exception:
+                search_input = self._wait_for_element(By.ID, "cn.damai:id/header_search_v2_input", timeout=2)
+            except TimeoutException:
+                logger.warning("未找到搜索输入框")
                 return False
 
-        if not self._press_keycode_safe(66, context="提交搜索关键词"):
-            return False
-        try:
-            deadline = time.time() + 5
-            while time.time() < deadline:
-                if self._find_all(By.ID, "cn.damai:id/ll_search_item"):
-                    break
-                time.sleep(0.05)
-            else:
-                raise TimeoutException("搜索结果加载超时")
-        except TimeoutException:
-            logger.warning("搜索结果加载超时")
-            return False
+            self._click_element_center(search_input)
+            time.sleep(0.12)
 
-        if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("演出")'):
-            self.smart_wait_and_click(
-                AppiumBy.ANDROID_UIAUTOMATOR,
-                'new UiSelector().text("演出")',
-                timeout=0.8,
-            )
-            time.sleep(0.2)
+            current_text = self._read_element_text(search_input).strip()
+            if current_text and current_text != self.config.keyword:
+                if self._has_element(By.ID, "cn.damai:id/header_search_v2_input_delete"):
+                    self.ultra_fast_click(By.ID, "cn.damai:id/header_search_v2_input_delete", timeout=0.4)
+                    time.sleep(0.05)
+                else:
+                    try:
+                        if hasattr(search_input, "clear"):
+                            search_input.clear()
+                        elif hasattr(search_input, "set_text"):
+                            search_input.set_text("")
+                    except Exception:
+                        pass
+
+            if self._read_element_text(search_input).strip() != self.config.keyword:
+                try:
+                    if self._using_u2() and hasattr(search_input, "set_text"):
+                        search_input.set_text(self.config.keyword)
+                    elif hasattr(search_input, "send_keys"):
+                        search_input.send_keys(self.config.keyword)
+                    elif hasattr(search_input, "set_text"):
+                        search_input.set_text(self.config.keyword)
+                except Exception:
+                    return False
+
+            if not self._press_keycode_safe(66, context="提交搜索关键词"):
+                return False
+            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("演出")'):
+                self.smart_wait_and_click(
+                    AppiumBy.ANDROID_UIAUTOMATOR,
+                    'new UiSelector().text("演出")',
+                    timeout=0.8,
+                )
+                time.sleep(0.1)
+            try:
+                deadline = time.time() + 3.5
+                while time.time() < deadline:
+                    if self._find_all(By.ID, "cn.damai:id/ll_search_item"):
+                        break
+                    time.sleep(0.04)
+                else:
+                    raise TimeoutException("搜索结果加载超时")
+            except TimeoutException:
+                logger.warning("搜索结果加载超时")
+                return False
 
         return True
 
@@ -1720,44 +1838,67 @@ class DamaiBot:
             return
         self.d.swipe(540, 1770, 540, 520, duration=0.3)
 
-    def _open_target_from_search_results(self, max_scrolls=2):
-        """Open the best-matching event from search results."""
+    def _open_target_from_search_results(self, max_scrolls=2, max_results=5, return_details=False):
+        """Open the best-matching event from search results and optionally return scanned summaries."""
         seen_titles = set()
+        collected = []
 
-        for _ in range(max_scrolls + 1):
-            result_cards = self._find_all(By.ID, "cn.damai:id/ll_search_item")
-            best_match = None
-            best_score = -1
+        with self._timed_step(
+                "搜索结果扫描并打开目标",
+                manual_baseline_seconds=_MANUAL_STEP_BASELINES.get("搜索结果扫描并打开目标")):
+            for scroll_index in range(max_scrolls + 1):
+                result_cards = self._find_all(By.ID, "cn.damai:id/ll_search_item")
+                best_match = None
+                best_score = -1
 
-            for card in result_cards:
-                title_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_name")
-                venue_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_venueName")
-                score = self._score_search_result(title_text, venue_text)
-                if title_text:
-                    seen_titles.add(title_text)
-                if score > best_score:
-                    best_score = score
-                    best_match = card
+                for card in result_cards:
+                    title_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_name")
+                    if not title_text:
+                        continue
 
-            if best_match is not None and best_score >= 60:
-                self._click_element_center(best_match)
-                detail_probe = self.wait_for_page_state({"detail_page", "sku_page"}, timeout=8)
-                if detail_probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(detail_probe):
-                    return True
+                    venue_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_venueName")
+                    city_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_city").replace("|", "").strip()
+                    time_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_time")
+                    score = self._score_search_result(title_text, venue_text)
 
-                logger.warning("已进入详情页，但标题与目标演出不一致，返回搜索结果继续尝试")
-                if not self._press_keycode_safe(4, context="返回搜索列表"):
-                    break
-                time.sleep(0.5)
-            else:
-                logger.info(f"本屏搜索结果未找到明确匹配项，已扫描: {len(seen_titles)} 条")
+                    normalized_title = normalize_text(title_text)
+                    if normalized_title and normalized_title not in seen_titles:
+                        collected.append({
+                            "title": title_text,
+                            "venue": venue_text,
+                            "city": city_text,
+                            "time": time_text,
+                            "score": score,
+                        })
+                        seen_titles.add(normalized_title)
 
-            if _ < max_scrolls:
-                self._scroll_search_results()
-                time.sleep(0.4)
+                    if score > best_score:
+                        best_score = score
+                        best_match = card
+
+                if best_match is not None and best_score >= 60:
+                    self._click_element_center(best_match)
+                    detail_probe = self.wait_for_page_state({"detail_page", "sku_page"}, timeout=5.5)
+                    if detail_probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(detail_probe):
+                        collected.sort(key=lambda item: item["score"], reverse=True)
+                        details = {"opened": True, "search_results": collected[:max_results]}
+                        return details if return_details else True
+
+                    logger.warning("已进入详情页，但标题与目标演出不一致，返回搜索结果继续尝试")
+                    if not self._press_keycode_safe(4, context="返回搜索列表"):
+                        break
+                    time.sleep(0.25)
+                else:
+                    logger.info(f"本屏搜索结果未找到明确匹配项，已扫描: {len(seen_titles)} 条")
+
+                if scroll_index < max_scrolls:
+                    self._scroll_search_results()
+                    time.sleep(0.2)
 
         logger.warning("自动搜索后未找到目标演出")
-        return False
+        collected.sort(key=lambda item: item["score"], reverse=True)
+        details = {"opened": False, "search_results": collected[:max_results]}
+        return details if return_details else False
 
     def collect_search_results(self, max_scrolls=0, max_results=5):
         """Collect search result summaries without opening them."""
@@ -1835,6 +1976,7 @@ class DamaiBot:
 
     def discover_target_event(self, keyword_candidates, initial_probe=None, search_scrolls=1, result_limit=5):
         """Try multiple keywords, collect candidate summaries, and open the best match."""
+        self._last_discovery_step_timings = []
         page_probe = initial_probe or self.probe_current_page()
         page_probe = self._recover_to_navigation_start(page_probe)
 
@@ -1843,6 +1985,7 @@ class DamaiBot:
                 "used_keyword": self.config.keyword,
                 "search_results": [],
                 "page_probe": page_probe,
+                "step_timings": list(self._last_discovery_step_timings),
             }
 
         if page_probe["state"] in {"detail_page", "sku_page"} and not self._current_page_matches_target(page_probe):
@@ -1853,6 +1996,7 @@ class DamaiBot:
                 "used_keyword": self.config.keyword,
                 "search_results": [],
                 "page_probe": page_probe,
+                "step_timings": list(self._last_discovery_step_timings),
             }
 
         if page_probe["state"] == "homepage":
@@ -1876,15 +2020,21 @@ class DamaiBot:
                 tried.add(normalized_keyword)
                 continue
 
-            search_results = self.collect_search_results(max_scrolls=search_scrolls, max_results=result_limit)
+            open_result = self._open_target_from_search_results(
+                max_scrolls=search_scrolls,
+                max_results=result_limit,
+                return_details=True,
+            )
+            search_results = open_result["search_results"]
             if search_results:
                 logger.info(f"搜索到 {len(search_results)} 条候选结果，最高分 {search_results[0]['score']}")
-            if search_results and search_results[0]["score"] >= 40 and self._open_target_from_search_results(max_scrolls=search_scrolls):
+            if open_result["opened"]:
                 page_probe = self.probe_current_page()
                 return {
                     "used_keyword": keyword,
                     "search_results": search_results,
                     "page_probe": page_probe,
+                    "step_timings": list(self._last_discovery_step_timings),
                 }
 
             tried.add(normalized_keyword)

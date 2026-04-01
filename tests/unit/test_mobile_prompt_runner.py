@@ -426,6 +426,28 @@ class TestFormatSummary:
         result = _format_summary(intent, discovery, None)
         assert "张杰演唱会北京站" in result
 
+    def test_step_timings_shown_with_manual_baseline(self):
+        intent = parse_prompt("帮张志涛抢张杰演唱会")
+        discovery = self._base_discovery()
+        discovery["step_timings"] = [
+            {
+                "step": "搜索页输入并提交关键词",
+                "seconds": 1.23,
+                "manual_baseline_seconds": 6.0,
+                "faster_than_manual": True,
+            },
+            {
+                "step": "搜索结果扫描并打开目标",
+                "seconds": 12.50,
+                "manual_baseline_seconds": 12.0,
+                "faster_than_manual": False,
+            },
+        ]
+        result = _format_summary(intent, discovery, None)
+        assert "步骤耗时:" in result
+        assert "快于手动" in result
+        assert "慢于手动" in result
+
 
 class TestSuccessDetailForMode:
     def test_summary_message_no_longer_mentions_confirm(self):

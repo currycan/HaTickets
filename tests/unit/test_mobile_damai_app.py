@@ -537,8 +537,11 @@ class TestAutoNavigation:
              patch.object(bot, "_current_page_matches_target", side_effect=[False, False]), \
              patch.object(bot, "_exit_non_target_event_context", return_value={"state": "search_page"}) as exit_context, \
              patch.object(bot, "_submit_search_keyword", return_value=True) as submit_keyword, \
-             patch.object(bot, "collect_search_results", return_value=[{"score": 80, "title": "余佳运演唱会"}]), \
-             patch.object(bot, "_open_target_from_search_results", return_value=True), \
+             patch.object(
+                 bot,
+                 "_open_target_from_search_results",
+                 return_value={"opened": True, "search_results": [{"score": 80, "title": "余佳运演唱会"}]},
+             ), \
              patch.object(bot, "probe_current_page", return_value={"state": "detail_page"}):
             result = bot.discover_target_event(["余佳运 演唱会"], initial_probe={"state": "sku_page"})
 

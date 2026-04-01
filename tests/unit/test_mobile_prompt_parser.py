@@ -4,7 +4,9 @@ import pytest
 
 from mobile.prompt_parser import (
     PromptIntent,
+    _compact_keyword_phrase,
     _extract_digits,
+    _is_low_signal_candidate,
     _parse_chinese_int,
     _parse_city,
     _parse_date,
@@ -123,6 +125,12 @@ class TestParsePrompt:
         assert intent.artist == "张杰"
         assert intent.search_keyword == "张杰 演唱会"
 
+    def test_parse_prompt_filters_low_signal_noisy_candidate_keywords(self):
+        intent = parse_prompt("给张志涛抢4 月 6 号张杰的北京站演唱会内场门票，票价 1680 元")
+
+        assert intent.candidate_keywords[:2] == ["张杰 演唱会", "张杰"]
+        assert all("价 元" not in keyword for keyword in intent.candidate_keywords)
+
     def test_parse_prompt_adds_note_when_attendee_count_mismatches_quantity(self):
         intent = parse_prompt("帮张文和张志涛抢一张 4 月 4 号余佳运的演唱会门票，内场，票价 1080 元")
 
@@ -143,6 +151,13 @@ class TestPromptParserInternals:
     def test_extract_digits_returns_first_numeric_price(self):
         assert _extract_digits("看台 899元") == 899
         assert _extract_digits("无价格") is None
+
+    def test_compact_keyword_phrase_removes_single_char_noise(self):
+        assert _compact_keyword_phrase("给 张杰 演唱会 价 元") == "张杰 演唱会"
+
+    def test_is_low_signal_candidate_detects_generic_terms(self):
+        assert _is_low_signal_candidate("演唱会") is True
+        assert _is_low_signal_candidate("张杰 演唱会") is False
 
 
 class TestChoosePriceOption:

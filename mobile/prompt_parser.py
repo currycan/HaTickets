@@ -37,8 +37,11 @@ _KNOWN_CITY_TOKENS = (
 
 _REQUEST_STOPWORDS = (
     "帮我", "帮忙", "抢票", "抢一张", "抢两张", "抢", "买", "订", "门票", "票", "演出票",
-    "给我", "一下", "尽快", "尽量", "麻烦", "我要", "想要", "请", "能不能", "可以", "帮",
+    "给我", "给", "一下", "尽快", "尽量", "麻烦", "我要", "想要", "请", "能不能", "可以", "帮",
+    "票价", "价位",
 )
+
+_LOW_SIGNAL_KEYWORD_TOKENS = {"演唱会", "音乐会", "演出", "巡演", "live", "门票"}
 
 _SEAT_HINTS = ("内场", "看台", "VIP", "vip", "至尊", "前排", "后排", "看台区", "包厢")
 
@@ -186,8 +189,36 @@ def _clean_prompt_for_keyword(prompt: str, removable_tokens: Optional[Iterable[s
         if token:
             cleaned = cleaned.replace(token, " ")
     cleaned = re.sub(r"\b\d+\s*元?\b", " ", cleaned)
+    cleaned = re.sub(r"[，,。！？!?:：；;~～（）()【】\[\]“”\"'`]+", " ", cleaned)
     cleaned = cleaned.replace("的", " ")
     return _normalize_whitespace(cleaned)
+
+
+def _is_low_signal_candidate(value: str) -> bool:
+    tokens = [part for part in re.split(r"\s+", value or "") if part]
+    meaningful = []
+    for token in tokens:
+        normalized = normalize_text(token)
+        if not normalized:
+            continue
+        if len(normalized) == 1 and normalized not in {"x", "X"}:
+            continue
+        meaningful.append(normalized)
+    if not meaningful:
+        return True
+    return all(token in _LOW_SIGNAL_KEYWORD_TOKENS for token in meaningful)
+
+
+def _compact_keyword_phrase(value: str) -> str:
+    compact_tokens = []
+    for part in re.split(r"\s+", value or ""):
+        normalized = normalize_text(part)
+        if not normalized:
+            continue
+        if len(normalized) <= 1 and normalized not in {"x", "X"}:
+            continue
+        compact_tokens.append(part)
+    return _normalize_whitespace(" ".join(compact_tokens))
 
 
 def _parse_artist_and_keyword(prompt: str, removable_tokens: Optional[Iterable[str]] = None) -> tuple[Optional[str], Optional[str], list[str]]:
@@ -212,9 +243,9 @@ def _parse_artist_and_keyword(prompt: str, removable_tokens: Optional[Iterable[s
     deduped = []
     seen = set()
     for candidate in candidates:
-        value = _normalize_whitespace(candidate)
+        value = _compact_keyword_phrase(candidate)
         normalized = normalize_text(value)
-        if not value or not normalized or normalized in seen:
+        if not value or not normalized or normalized in seen or _is_low_signal_candidate(value):
             continue
         deduped.append(value)
         seen.add(normalized)

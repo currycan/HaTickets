@@ -81,3 +81,61 @@
 - `poetry run pytest`
   - `897 passed`
   - coverage `80.21%` (threshold `>=80%` satisfied)
+
+## Prompt Probe Runtime Errors (4th Round)
+
+- Command:
+  - `./mobile/scripts/run_from_prompt.sh --mode probe --yes "给张志涛抢4 月 6 号张杰的北京站演唱会内场门票，票价 1680 元"`
+
+### Failures Captured
+
+1. Environment import failure
+   - `ModuleNotFoundError: No module named 'uiautomator2'`
+
+2. Search discovery false negative
+   - Logs repeatedly showed:
+   - `本屏搜索结果未找到明确匹配项，已扫描: 0 条`
+   - even when real search list existed on-device.
+
+3. Click crash after switching to XPath-based u2 results
+   - `TypeError: tuple indices must be integers or slices, not str`
+   - Source: DeviceXMLElement `rect` is tuple, while click path expected dict.
+
+4. Temporary coverage regression
+   - `poetry run pytest` reported coverage `78.95%` (below required `80%`) after adding new runtime logic.
+
+### Root Cause
+
+1. Local virtual env had stale deps before reinstall.
+2. u2 adapter used selector existence checks that could be false-positive and child-text extraction that missed XML attribute text.
+3. DeviceXMLElement geometry shape differs from Appium element shape.
+4. New branches lacked enough targeted unit tests.
+
+### Fixes Applied
+
+1. Reinstalled lockfile deps:
+   - `poetry install`
+2. Reworked u2 search-result adapter path:
+   - `_find_all(By.ID/By.CLASS_NAME)` now prefers XPath result objects.
+   - `_container_find_elements(...)` now supports XPath XML node containers.
+   - `_read_element_text(...)` now supports XML attribute-based text (`attrib["text"]`) and skips empty early-returns.
+3. Stabilized search submission:
+   - wait condition switched to real list materialization (`_find_all`) instead of existence-only probe.
+   - tab-switch and result wait ordering improved.
+4. Normalized tuple-rect handling:
+   - `_element_rect(...)` now converts tuple rects to dict form.
+5. Added/updated focused tests:
+   - `tests/unit/test_mobile_damai_app_u2_adapter.py`
+   - `tests/unit/test_mobile_prompt_parser.py`
+   - `tests/unit/test_mobile_prompt_runner.py`
+
+### Re-Verification
+
+- `poetry run pytest`
+  - `911 passed`
+  - coverage `81.12%` (threshold `>=80%` satisfied)
+- `./mobile/scripts/run_from_prompt.sh --mode probe --yes "给张志涛抢4 月 6 号张杰的北京站演唱会内场门票，票价 1680 元"`
+  - success
+  - step timing logs:
+    - `搜索页输入并提交关键词` = `1.70s` (manual baseline `6.00s`)
+    - `搜索结果扫描并打开目标` = `2.23s` (manual baseline `12.00s`)
