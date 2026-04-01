@@ -689,7 +689,10 @@ def main(argv=None):
 
         bot.config = Config(**updated_config_dict)
         bot.item_detail = None
-        success = bot.run_with_retry(max_retries=1)
+        # Reuse the already-confirmed page probe to skip a redundant re-probe and
+        # activate fast_validation_hot_path (skips dismiss_startup_popups + session check).
+        cached_probe = discovery.get("page_probe")
+        success = bot.run_with_retry(max_retries=1, initial_page_probe=cached_probe)
         if success:
             _print_result(True, _success_detail_for_mode(args.mode, target_config))
         else:

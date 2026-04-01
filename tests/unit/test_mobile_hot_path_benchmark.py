@@ -9,8 +9,10 @@ from mobile.config import Config
 from mobile import hot_path_benchmark
 from mobile.hot_path_benchmark import (
     _default_config_path,
+    _fast_recover_to_detail,
     _require_detail_start,
     _repo_root,
+    _shell_back,
     build_benchmark_config,
     format_report,
     parse_args,
@@ -42,6 +44,17 @@ def _make_config():
         target_title="旧标题",
         target_venue="旧场馆",
     )
+
+
+def _make_summary(avg, min_val, max_val, recovery_avg, runs, success_count):
+    return {
+        "runs": runs,
+        "success_count": success_count,
+        "avg_elapsed_seconds": avg,
+        "min_elapsed_seconds": min_val,
+        "max_elapsed_seconds": max_val,
+        "avg_recovery_seconds": recovery_avg,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -198,111 +211,142 @@ class TestBuildBenchmarkConfigNoneArgs:
 # _require_detail_start
 # ---------------------------------------------------------------------------
 
-def _bot_with_no_fast_check(probe_state_or_side_effect):
-    """Create a Mock bot where the fast-check element lookup returns empty (falls through to probe_current_page)."""
+def _make_bot_for_recovery(find_all_side_effect=None, using_u2=True):
+    """Create a Mock bot for recovery tests.
+
+    Args:
+        find_all_side_effect: side_effect for _find_all — each call returns a list.
+            Empty list = element not found, non-empty = element found (detail_page).
+        using_u2: whether _using_u2() returns True.
+    """
     bot = Mock()
-    bot.driver.find_elements.return_value = []  # fast check disabled
-    if isinstance(probe_state_or_side_effect, list):
-        bot.probe_current_page.side_effect = probe_state_or_side_effect
+    bot._using_u2.return_value = using_u2
+    if find_all_side_effect is not None:
+        bot._find_all.side_effect = find_all_side_effect
     else:
-        bot.probe_current_page.return_value = probe_state_or_side_effect
+        bot._find_all.return_value = []
     return bot
 
 
-def test_require_detail_start_accepts_detail_page():
-    bot = _bot_with_no_fast_check({"state": "detail_page"})
+def test_shell_back_single_uses_u2_shell():
+    bot = _make_bot_for_recovery(using_u2=True)
+    _shell_back(bot)
+    bot.d.shell.assert_called_once_with("input keyevent 4")
 
-    assert _require_detail_start(bot, "开始") == {"state": "detail_page"}
+
+def test_shell_back_batch_fires_single_shell_call():
+    bot = _make_bot_for_recovery(using_u2=True)
+    _shell_back(bot, count=2)
+    bot.d.shell.assert_called_once_with("input keyevent 4; sleep 0.2; input keyevent 4")
+
+
+def test_shell_back_falls_back_to_press_keycode():
+    bot = _make_bot_for_recovery(using_u2=False)
+    _shell_back(bot)
+    bot._press_keycode_safe.assert_called_once_with(4, context="benchmark回退")
+
+
+def test_fast_recover_finds_detail_on_first_check():
+    bot = _make_bot_for_recovery(find_all_side_effect=[["element"]])
+    result = _fast_recover_to_detail(bot)
+    assert result["state"] == "detail_page"
+    bot.d.shell.assert_not_called()
+
+
+def test_fast_recover_batch_back_finds_detail():
+    # First check: not detail. Batch 2 backs. Second check: detail.
+    bot = _make_bot_for_recovery(find_all_side_effect=[[], ["element"]])
+    result = _fast_recover_to_detail(bot)
+    assert result["state"] == "detail_page"
+    bot.d.shell.assert_called_once_with("input keyevent 4; sleep 0.2; input keyevent 4")
+
+
+def test_fast_recover_incremental_fallback():
+    # Batch 2 backs not enough, one more individual back finds detail.
+    bot = _make_bot_for_recovery(find_all_side_effect=[[], [], ["element"]])
+    result = _fast_recover_to_detail(bot)
+    assert result["state"] == "detail_page"
+    assert bot.d.shell.call_count == 2  # batch + 1 individual
+
+
+def test_fast_recover_falls_back_to_full_probe():
+    bot = _make_bot_for_recovery(find_all_side_effect=[[] for _ in range(10)])
+    bot.probe_current_page.return_value = {"state": "unknown"}
+    result = _fast_recover_to_detail(bot)
+    assert result["state"] == "unknown"
+    bot.probe_current_page.assert_called_once()
+
+
+def test_require_detail_start_accepts_detail_page():
+    bot = _make_bot_for_recovery(find_all_side_effect=[["element"]])
+    result = _require_detail_start(bot, "开始")
+    assert result["state"] == "detail_page"
     bot._recover_to_detail_page_for_local_retry.assert_not_called()
 
 
-def test_require_detail_start_uses_recovery_when_needed():
-    bot = _bot_with_no_fast_check({"state": "unknown"})
-    bot._recover_to_detail_page_for_local_retry.return_value = {"state": "detail_page"}
-
-    assert _require_detail_start(bot, "开始") == {"state": "detail_page"}
-
-
-def test_require_detail_start_sku_fallback_back_to_detail():
-    bot = _bot_with_no_fast_check([{"state": "unknown"}, {"state": "detail_page"}])
-    bot._recover_to_detail_page_for_local_retry.side_effect = [{"state": "sku_page"}]
-    bot._press_keycode_safe.return_value = True
-
+def test_require_detail_start_fast_recovery_succeeds():
+    # Fast check fails, fast_recover backs once and finds detail.
+    bot = _make_bot_for_recovery(find_all_side_effect=[[], [], ["element"]])
     result = _require_detail_start(bot, "开始")
-
     assert result["state"] == "detail_page"
-    bot.dismiss_startup_popups.assert_called_once()
+    bot._recover_to_detail_page_for_local_retry.assert_not_called()
+
+
+def test_require_detail_start_heavy_fallback():
+    # Fast check and fast_recover both fail, heavy fallback succeeds.
+    bot = _make_bot_for_recovery(find_all_side_effect=[[] for _ in range(12)])
+    bot.probe_current_page.return_value = {"state": "unknown"}
+    bot._recover_to_detail_page_for_local_retry.return_value = {"state": "detail_page"}
+    result = _require_detail_start(bot, "开始")
+    assert result["state"] == "detail_page"
 
 
 def test_require_detail_start_raises_for_unrecoverable_page():
-    bot = _bot_with_no_fast_check({"state": "unknown"})
-    bot._recover_to_detail_page_for_local_retry.side_effect = [
-        {"state": "loading"},
-        {"state": "loading"},
-    ]
-
+    bot = _make_bot_for_recovery(find_all_side_effect=[[] for _ in range(12)])
+    bot.probe_current_page.return_value = {"state": "loading"}
+    bot._recover_to_detail_page_for_local_retry.return_value = {"state": "loading"}
     with pytest.raises(RuntimeError, match="当前状态: loading"):
         _require_detail_start(bot, "开始")
-
-
-class TestRequireDetailStart:
-    def test_recovery_fails_raises_runtime_error(self):
-        bot = _bot_with_no_fast_check({"state": "unknown"})
-        bot._recover_to_detail_page_for_local_retry.side_effect = [
-            {"state": "unknown"},
-            {"state": "unknown"},
-        ]
-        with pytest.raises(RuntimeError, match="未回到 detail_page"):
-            _require_detail_start(bot, "第1轮")
 
 
 # ---------------------------------------------------------------------------
 # summarize_results
 # ---------------------------------------------------------------------------
 
-def test_summarize_results_separates_cold_and_warm():
-    # run1=cold(8.1s), run2=warm(5.9s) — avg/min/max should be from warm only
+def test_summarize_results_basic():
     summary = summarize_results([
-        {"success": True, "elapsed_seconds": 8.1, "recovery_seconds": 3.6},
-        {"success": False, "elapsed_seconds": 5.9, "recovery_seconds": None},
+        {"success": True, "elapsed_seconds": 2.1, "recovery_seconds": 3.6},
+        {"success": False, "elapsed_seconds": 1.9, "recovery_seconds": None},
     ])
 
     assert summary["runs"] == 2
     assert summary["success_count"] == 1
-    assert summary["cold_start_seconds"] == 8.1
-    assert summary["cold_start_success"] is True
-    # warm stats from run2 only
-    assert summary["avg_elapsed_seconds"] == 5.9
-    assert summary["min_elapsed_seconds"] == 5.9
-    assert summary["max_elapsed_seconds"] == 5.9
-    # recovery covers all runs: run1 had 3.6s, run2 had None → avg = 3.6
+    assert summary["avg_elapsed_seconds"] == 2.0
+    assert summary["min_elapsed_seconds"] == 1.9
+    assert summary["max_elapsed_seconds"] == 2.1
     assert summary["avg_recovery_seconds"] == 3.6
 
 
 class TestSummarizeResults:
-    def test_single_run_uses_it_as_both_cold_and_warm(self):
+    def test_single_run(self):
         results = [
             {"elapsed_seconds": 5.0, "success": True, "recovery_seconds": None},
         ]
         summary = summarize_results(results)
-        assert summary["cold_start_seconds"] == 5.0
-        assert summary["cold_start_success"] is True
         assert summary["avg_elapsed_seconds"] == 5.0
         assert summary["avg_recovery_seconds"] is None
 
     def test_no_recovery_returns_none_avg(self):
-        # All runs have no recovery → avg should be None
         results = [
             {"elapsed_seconds": 8.0, "success": True, "recovery_seconds": None},
             {"elapsed_seconds": 5.0, "success": True, "recovery_seconds": None},
             {"elapsed_seconds": 7.0, "success": True, "recovery_seconds": None},
         ]
         summary = summarize_results(results)
-        assert summary["cold_start_seconds"] == 8.0
         assert summary["avg_recovery_seconds"] is None
         assert summary["runs"] == 3
         assert summary["success_count"] == 3
-        assert summary["avg_elapsed_seconds"] == 6.0
+        assert summary["avg_elapsed_seconds"] == round((8.0 + 5.0 + 7.0) / 3, 2)
 
     def test_with_recovery_values(self):
         results = [
@@ -311,8 +355,7 @@ class TestSummarizeResults:
             {"elapsed_seconds": 7.0, "success": False, "recovery_seconds": 4.0},
         ]
         summary = summarize_results(results)
-        assert summary["cold_start_seconds"] == 9.0
-        assert summary["avg_recovery_seconds"] == 3.0  # all 3 runs: (2+3+4)/3
+        assert summary["avg_recovery_seconds"] == 3.0
         assert summary["success_count"] == 2
 
     def test_mixed_recovery_values(self):
@@ -322,7 +365,7 @@ class TestSummarizeResults:
             {"elapsed_seconds": 7.0, "success": True, "recovery_seconds": None},
         ]
         summary = summarize_results(results)
-        assert summary["avg_recovery_seconds"] == 2.5  # (2+3)/2, None excluded
+        assert summary["avg_recovery_seconds"] == 2.5
 
 
 # ---------------------------------------------------------------------------
@@ -373,16 +416,10 @@ def test_run_benchmark_collects_results_and_recovery():
     assert payload["title"] == "【成都】顽童MJ116 OGS巡回演唱会-成都站"
     assert payload["summary"]["runs"] == 2
     assert payload["summary"]["success_count"] == 2
-    # cold start = run1
-    assert payload["summary"]["cold_start_seconds"] == 8.1
-    assert payload["summary"]["cold_start_success"] is True
-    # warm avg/min/max from run2 only
-    assert payload["summary"]["avg_elapsed_seconds"] == 5.9
+    assert payload["summary"]["avg_elapsed_seconds"] == 7.0
     assert payload["summary"]["avg_recovery_seconds"] == 3.6
-    assert payload["results"][0]["cold_start"] is True
     assert payload["results"][0]["elapsed_seconds"] == 8.1
     assert payload["results"][0]["recovery_seconds"] == 3.6
-    assert payload["results"][1]["cold_start"] is False
     assert payload["results"][1]["elapsed_seconds"] == 5.9
     assert payload["results"][1]["recovery_seconds"] is None
 
@@ -390,19 +427,6 @@ def test_run_benchmark_collects_results_and_recovery():
 # ---------------------------------------------------------------------------
 # format_report
 # ---------------------------------------------------------------------------
-
-def _make_summary(cold_seconds, cold_success, warm_avg, warm_min, warm_max, recovery_avg, runs, success_count):
-    return {
-        "runs": runs,
-        "success_count": success_count,
-        "cold_start_seconds": cold_seconds,
-        "cold_start_success": cold_success,
-        "avg_elapsed_seconds": warm_avg,
-        "min_elapsed_seconds": warm_min,
-        "max_elapsed_seconds": warm_max,
-        "avg_recovery_seconds": recovery_avg,
-    }
-
 
 def test_format_report_includes_summary_lines():
     payload = {
@@ -414,7 +438,6 @@ def test_format_report_includes_summary_lines():
         "results": [
             {
                 "run": 1,
-                "cold_start": True,
                 "success": True,
                 "elapsed_seconds": 8.11,
                 "final_state": "order_confirm_page",
@@ -425,7 +448,6 @@ def test_format_report_includes_summary_lines():
             },
             {
                 "run": 2,
-                "cold_start": False,
                 "success": True,
                 "elapsed_seconds": 2.5,
                 "final_state": "order_confirm_page",
@@ -435,17 +457,17 @@ def test_format_report_includes_summary_lines():
                 "step_timeline": [],
             },
         ],
-        "summary": _make_summary(8.11, True, 2.5, 2.5, 2.5, 3.83, 2, 2),
+        "summary": _make_summary(2.5, 2.5, 2.5, 3.83, 2, 2),
     }
 
     report = format_report(payload)
 
     assert "演出: 【成都】顽童MJ116 OGS巡回演唱会-成都站" in report
-    assert "1. [冷启动] 8.11s | success" in report
+    assert "1. 8.11s | success" in report
     assert "2. 2.50s | success" in report
     assert "runs=2, success=2/2" in report
-    assert "冷启动 = 8.11s (success)" in report
-    assert "热重试" in report
+    assert "汇总:" in report
+    assert "avg/min/max" in report
     assert "recovery avg = 3.83s" in report
 
 
@@ -459,7 +481,6 @@ def test_format_report_no_recovery():
         "results": [
             {
                 "run": 1,
-                "cold_start": True,
                 "success": False,
                 "elapsed_seconds": 3.5,
                 "final_state": "detail_page",
@@ -469,7 +490,7 @@ def test_format_report_no_recovery():
                 "step_timeline": [],
             }
         ],
-        "summary": _make_summary(3.5, False, 3.5, 3.5, 3.5, None, 1, 0),
+        "summary": _make_summary(3.5, 3.5, 3.5, None, 1, 0),
     }
     report = format_report(payload)
     assert "recover=" not in report
@@ -487,7 +508,6 @@ def test_format_report_no_title():
         "results": [
             {
                 "run": 1,
-                "cold_start": True,
                 "success": True,
                 "elapsed_seconds": 2.0,
                 "final_state": "order_confirm_page",
@@ -497,7 +517,7 @@ def test_format_report_no_title():
                 "step_timeline": [],
             }
         ],
-        "summary": _make_summary(2.0, True, 2.0, 2.0, 2.0, None, 1, 1),
+        "summary": _make_summary(2.0, 2.0, 2.0, None, 1, 1),
     }
     report = format_report(payload)
     assert "未识别" in report
@@ -526,8 +546,6 @@ def test_main_prints_human_report_and_quits_driver(capsys):
         "summary": {
             "runs": 2,
             "success_count": 2,
-            "cold_start_seconds": 8.0,
-            "cold_start_success": True,
             "avg_elapsed_seconds": 2.0,
             "min_elapsed_seconds": 1.9,
             "max_elapsed_seconds": 2.1,
@@ -552,8 +570,6 @@ def test_main_prints_json_and_returns_one_when_any_run_fails(capsys):
         "summary": {
             "runs": 2,
             "success_count": 1,
-            "cold_start_seconds": 8.0,
-            "cold_start_success": True,
             "avg_elapsed_seconds": 2.0,
             "min_elapsed_seconds": 1.9,
             "max_elapsed_seconds": 2.1,
@@ -584,7 +600,6 @@ def test_main_success_returns_0():
         "results": [
             {
                 "run": 1,
-                "cold_start": True,
                 "success": True,
                 "elapsed_seconds": 3.5,
                 "final_state": "order_confirm_page",
@@ -594,7 +609,7 @@ def test_main_success_returns_0():
                 "step_timeline": [],
             }
         ],
-        "summary": _make_summary(3.5, True, 3.5, 3.5, 3.5, None, 1, 1),
+        "summary": _make_summary(3.5, 3.5, 3.5, None, 1, 1),
     }
     with patch("mobile.hot_path_benchmark.Config.load_config") as mock_load, \
          patch("mobile.hot_path_benchmark.build_benchmark_config") as mock_build, \
@@ -617,11 +632,11 @@ def test_main_bot_driver_quit_called():
         "price": "580元",
         "price_index": 0,
         "results": [
-            {"run": 1, "cold_start": True, "success": True, "elapsed_seconds": 3.0,
+            {"run": 1, "success": True, "elapsed_seconds": 3.0,
              "final_state": "order_confirm_page", "submit_button_ready": True,
              "recovery_seconds": None, "recovery_state": "order_confirm_page", "step_timeline": []},
         ],
-        "summary": _make_summary(3.0, True, 3.0, 3.0, 3.0, None, 1, 1),
+        "summary": _make_summary(3.0, 3.0, 3.0, None, 1, 1),
     }
     mock_driver = Mock()
     with patch("mobile.hot_path_benchmark.Config.load_config") as mock_load, \
@@ -647,7 +662,6 @@ def test_format_report_includes_step_timeline_lines():
         "results": [
             {
                 "run": 1,
-                "cold_start": True,
                 "success": True,
                 "elapsed_seconds": 6.2,
                 "final_state": "order_confirm_page",
@@ -660,7 +674,7 @@ def test_format_report_includes_step_timeline_lines():
                 ],
             }
         ],
-        "summary": _make_summary(6.2, True, 6.2, 6.2, 6.2, None, 1, 1),
+        "summary": _make_summary(6.2, 6.2, 6.2, None, 1, 1),
     }
 
     report = format_report(payload)

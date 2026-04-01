@@ -123,6 +123,13 @@ def build_benchmark_config(base_config: Config, args) -> Config:
     return Config(**config_data)
 
 
+_DETAIL_PAGE_PROBE = {
+    "state": "detail_page", "purchase_button": True, "price_container": False,
+    "quantity_picker": False, "submit_button": False, "reservation_mode": False,
+    "pending_order_dialog": False,
+}
+
+
 def _fast_check_detail_page(bot: DamaiBot) -> dict | None:
     """Light-weight detail_page check using a single element lookup.
 
@@ -144,12 +151,68 @@ def _fast_check_detail_page(bot: DamaiBot) -> dict | None:
             except TypeError:
                 return None
         if els:
-            return {"state": "detail_page", "purchase_button": True, "price_container": False,
-                    "quantity_picker": False, "submit_button": False, "reservation_mode": False,
-                    "pending_order_dialog": False}
+            return dict(_DETAIL_PAGE_PROBE)
     except Exception:
         pass
     return None
+
+
+def _shell_back(bot: DamaiBot, count: int = 1):
+    """Press Android back via shell (faster than Appium press_keycode).
+
+    When count > 1, fires all back presses in a single shell call with
+    short sleeps between them to allow page transitions.
+    """
+    if bot._using_u2() and hasattr(bot, "d") and bot.d is not None:
+        if count == 1:
+            bot.d.shell("input keyevent 4")
+        else:
+            # Batch: "input keyevent 4; sleep 0.2; input keyevent 4; ..."
+            parts = []
+            for i in range(count):
+                parts.append("input keyevent 4")
+                if i < count - 1:
+                    parts.append("sleep 0.2")
+            bot.d.shell("; ".join(parts))
+    else:
+        for _ in range(count):
+            bot._press_keycode_safe(4, context="benchmark回退")
+            if count > 1:
+                time.sleep(0.2)
+
+
+def _fast_recover_to_detail(bot: DamaiBot, max_backs: int = 4) -> dict:
+    """Fast benchmark recovery: batch shell back + single check.
+
+    From order_confirm_page the path is deterministic:
+    order_confirm → back → sku → back → detail (2 backs).
+    Fire 2 backs in one shell call, then check once.  Only loop
+    with individual backs if the batch didn't land on detail_page.
+    """
+    # Already on detail?
+    fast = _fast_check_detail_page(bot)
+    if fast is not None:
+        return fast
+
+    # Batch 2 backs (covers order_confirm → sku → detail).
+    _shell_back(bot, count=2)
+    time.sleep(0.15)
+
+    fast = _fast_check_detail_page(bot)
+    if fast is not None:
+        return fast
+
+    # Incremental fallback for unexpected states.
+    remaining = max_backs - 2
+    for _ in range(remaining):
+        _shell_back(bot, count=1)
+        time.sleep(0.15)
+        fast = _fast_check_detail_page(bot)
+        if fast is not None:
+            return fast
+
+    # Fallback: full probe (only reached in unusual page states).
+    return bot.probe_current_page()
 
 
 def _require_detail_start(bot: DamaiBot, run_label: str) -> dict:
@@ -158,24 +221,13 @@ def _require_detail_start(bot: DamaiBot, run_label: str) -> dict:
     fast = _fast_check_detail_page(bot)
     if fast is not None:
         return fast
-    page_probe = bot.probe_current_page()
-    if page_probe["state"] == START_STATE:
-        return page_probe
 
-    recovered_probe = bot._recover_to_detail_page_for_local_retry(page_probe)
+    # Fast recovery: shell back + lightweight check (~1-2s total).
+    recovered_probe = _fast_recover_to_detail(bot)
     if recovered_probe["state"] == START_STATE:
         return recovered_probe
 
-    if recovered_probe["state"] == "sku_page":
-        if bot._press_keycode_safe(4, context=f"{run_label}前回退到详情页"):
-            time.sleep(0.2)
-            bot.dismiss_startup_popups()
-            back_probe = bot.probe_current_page()
-            if back_probe["state"] == START_STATE:
-                return back_probe
-            recovered_probe = back_probe
-
-    # One more local recovery attempt after fallback back navigation.
+    # Heavy fallback: full recovery via bot method.
     recovered_probe = bot._recover_to_detail_page_for_local_retry(recovered_probe)
     if recovered_probe["state"] == START_STATE:
         return recovered_probe
@@ -186,25 +238,13 @@ def _require_detail_start(bot: DamaiBot, run_label: str) -> dict:
 
 
 def summarize_results(results: list[dict]) -> dict:
-    """Summarise benchmark results.
-
-    Run 1 (index 0) is always the cold-start measurement and is reported
-    separately.  avg/min/max are computed from warm runs (index 1+) so they
-    reflect steady-state retry performance.  When only one run was requested
-    the single result doubles as both cold-start and warm stats.
-    """
-    cold = results[0]
-    warm = results[1:] if len(results) > 1 else results
-
-    elapsed_values = [item["elapsed_seconds"] for item in warm]
-    # Recovery spans all runs: cold-run recovery prepares the first warm run.
+    """Summarise benchmark results across all runs."""
+    elapsed_values = [item["elapsed_seconds"] for item in results]
     recovery_values = [item["recovery_seconds"] for item in results if item["recovery_seconds"] is not None]
 
     return {
         "runs": len(results),
         "success_count": sum(1 for item in results if item["success"]),
-        "cold_start_seconds": cold["elapsed_seconds"],
-        "cold_start_success": cold["success"],
         "avg_elapsed_seconds": round(mean(elapsed_values), 2),
         "min_elapsed_seconds": round(min(elapsed_values), 2),
         "max_elapsed_seconds": round(max(elapsed_values), 2),
@@ -226,25 +266,21 @@ def _run_one(bot: DamaiBot, run_start_probe: dict, run_label: str) -> tuple[bool
 
 
 def run_benchmark(bot: DamaiBot, runs: int) -> dict:
-    """Run repeated safe hot-path measurements from the current manual-start page.
+    """Run repeated hot-path measurements from the current detail page.
 
-    Run 1 is the cold-start measurement (App SKU data not yet cached).
-    Runs 2+ measure the warm retry path (data cached from run 1).
-    Summary stats (avg/min/max) are computed from warm runs only, so they
-    reflect the steady-state retry performance that matters for optimisation.
-    The cold-start time is reported separately in the summary.
+    Each run measures the real end-to-end flow: detail page → click buy →
+    SKU selection → order confirm → attendee selection (no pre-warm pass).
+    This matches the real ticket-grabbing scenario where you get one shot.
     """
     if runs < 1:
         raise ValueError("runs 必须大于等于 1")
 
     initial_probe = _require_detail_start(bot, "开始")
-    # 在首次 probe 之后立即抓取元数据，避免在两次全量 probe 之间插入额外的耗时调用。
     initial_title = bot._get_detail_title_text()
     initial_activity = bot._get_current_activity()
 
     results = []
     for index in range(runs):
-        # 第一轮直接复用 initial_probe（冷启动），后续轮次重新确认页面。
         run_start_probe = initial_probe if index == 0 else _require_detail_start(bot, f"第 {index + 1} 轮开始")
 
         success, elapsed_seconds, final_probe, timeline = _run_one(
@@ -261,7 +297,6 @@ def run_benchmark(bot: DamaiBot, runs: int) -> dict:
 
         results.append({
             "run": index + 1,
-            "cold_start": index == 0,
             "success": success,
             "elapsed_seconds": elapsed_seconds,
             "final_state": final_probe["state"],
@@ -293,9 +328,8 @@ def format_report(payload: dict) -> str:
     ]
 
     for item in payload["results"]:
-        label = "[冷启动] " if item.get("cold_start") else ""
         line = (
-            f"{item['run']}. {label}{item['elapsed_seconds']:.2f}s | "
+            f"{item['run']}. {item['elapsed_seconds']:.2f}s | "
             f"{'success' if item['success'] else 'fail'} | "
             f"final={item['final_state']} | submit_ready={item['submit_button_ready']}"
         )
@@ -311,23 +345,14 @@ def format_report(payload: dict) -> str:
                 )
 
     summary = payload["summary"]
-    cold_label = (
-        f"{summary['cold_start_seconds']:.2f}s "
-        f"({'success' if summary['cold_start_success'] else 'fail'})"
-    )
-    warm_runs = summary["runs"] - 1
     lines.extend([
         "",
         "汇总:",
         f"runs={summary['runs']}, success={summary['success_count']}/{summary['runs']}",
-        f"冷启动 = {cold_label}",
         (
-            f"热重试 avg/min/max = {summary['avg_elapsed_seconds']:.2f}s / "
+            f"avg/min/max = {summary['avg_elapsed_seconds']:.2f}s / "
             f"{summary['min_elapsed_seconds']:.2f}s / {summary['max_elapsed_seconds']:.2f}s"
-            f"  (n={warm_runs})" if warm_runs > 0 else
-            f"热重试 avg/min/max = {summary['avg_elapsed_seconds']:.2f}s / "
-            f"{summary['min_elapsed_seconds']:.2f}s / {summary['max_elapsed_seconds']:.2f}s"
-            f"  (仅1轮，同冷启动)"
+            f"  (n={summary['runs']})"
         ),
         (
             "recovery avg = "
