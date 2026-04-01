@@ -302,7 +302,7 @@ class TestU2SearchHotPath:
              patch.object(bot, "_has_element", return_value=False), \
              patch.object(bot, "_find_all", return_value=[]), \
              patch("mobile.damai_app.time.sleep"), \
-             patch("mobile.damai_app.time.time", side_effect=[0.0, 4.0]):
+             patch("mobile.damai_app.time.time", side_effect=[0.0, 4.0] + [99.0] * 20):
             assert bot._submit_search_keyword() is False
 
     def test_open_target_from_search_results_returns_details_when_opened(self):
