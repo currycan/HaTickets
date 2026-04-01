@@ -2,6 +2,7 @@
 """Unit tests for mobile/damai_app.py — DamaiBot class."""
 
 from itertools import chain, repeat
+import subprocess
 import time as _time_module
 from datetime import datetime, timezone, timedelta
 
@@ -380,6 +381,95 @@ class TestUltraFastClick:
 
 
 # ---------------------------------------------------------------------------
+# _cached_tap
+# ---------------------------------------------------------------------------
+
+class TestCachedTap:
+    def test_cache_hit_clicks_coordinates_and_returns_true(self, bot):
+        """Warm path: cached (x, y) → single _click_coordinates call, True."""
+        bot._cached_hot_path_coords["city"] = (300, 500)
+        with patch.object(bot, "_click_coordinates") as click_coords, \
+             patch.object(bot, "ultra_fast_click") as ufc:
+            result = bot._cached_tap("city", By.ID, "some.id", timeout=0.3)
+        assert result is True
+        click_coords.assert_called_once_with(300, 500)
+        ufc.assert_not_called()
+
+    def test_cache_miss_non_u2_falls_back_to_ultra_fast_click(self, bot):
+        """Non-u2 backend (appium fixture): falls back to ultra_fast_click."""
+        assert not bot._using_u2()
+        with patch.object(bot, "ultra_fast_click", return_value=True) as ufc:
+            result = bot._cached_tap("detail_buy", By.ID, "cn.damai:id/btn", timeout=0.2)
+        assert result is True
+        ufc.assert_called_once_with(By.ID, "cn.damai:id/btn", timeout=0.2)
+        assert "detail_buy" not in bot._cached_hot_path_coords
+
+    def test_cache_miss_non_u2_propagates_false(self, bot):
+        """Non-u2: ultra_fast_click not found → returns False."""
+        with patch.object(bot, "ultra_fast_click", return_value=False):
+            result = bot._cached_tap("x", By.ID, "missing", timeout=0.1)
+        assert result is False
+
+    def test_cache_miss_u2_element_found_caches_and_clicks(self, bot):
+        """u2 cold path: find element, extract bounds, cache coords, click."""
+        bot.config.driver_backend = "u2"
+        mock_selector = Mock()
+        mock_selector.wait.return_value = True
+        mock_selector.info = {"bounds": {"left": 100, "top": 200, "right": 300, "bottom": 260}}
+        with patch.object(bot, "_appium_selector_to_u2", return_value=mock_selector), \
+             patch.object(bot, "_click_coordinates") as click_coords:
+            result = bot._cached_tap("city", AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("北京")', timeout=0.2)
+        assert result is True
+        assert bot._cached_hot_path_coords["city"] == (200, 230)
+        click_coords.assert_called_once_with(200, 230)
+
+    def test_cache_miss_u2_element_not_found_returns_false(self, bot):
+        """u2 cold path: element not found → returns False, no caching."""
+        bot.config.driver_backend = "u2"
+        mock_selector = Mock()
+        mock_selector.wait.return_value = False
+        with patch.object(bot, "_appium_selector_to_u2", return_value=mock_selector):
+            result = bot._cached_tap("city", AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("X")', timeout=0.1)
+        assert result is False
+        assert "city" not in bot._cached_hot_path_coords
+
+    def test_cache_miss_u2_no_bounds_falls_back_to_element_center(self, bot):
+        """u2: bounds missing → click via element center without caching."""
+        bot.config.driver_backend = "u2"
+        mock_el = Mock()
+        mock_selector = Mock()
+        mock_selector.wait.return_value = True
+        mock_selector.info = {"bounds": None}
+        mock_selector.get.return_value = mock_el
+        with patch.object(bot, "_appium_selector_to_u2", return_value=mock_selector), \
+             patch.object(bot, "_click_element_center") as click_center:
+            result = bot._cached_tap("k", By.ID, "id", timeout=0.1)
+        assert result is True
+        click_center.assert_called_once_with(mock_el, duration=50)
+        assert "k" not in bot._cached_hot_path_coords
+
+    def test_cache_miss_u2_exception_returns_false(self, bot):
+        """u2: unexpected exception → returns False."""
+        bot.config.driver_backend = "u2"
+        with patch.object(bot, "_appium_selector_to_u2", side_effect=RuntimeError("boom")):
+            result = bot._cached_tap("k", By.ID, "id", timeout=0.1)
+        assert result is False
+
+    def test_second_call_uses_cached_coords(self, bot):
+        """After first successful u2 call, second call uses cached coords."""
+        bot.config.driver_backend = "u2"
+        mock_selector = Mock()
+        mock_selector.wait.return_value = True
+        mock_selector.info = {"bounds": {"left": 50, "top": 100, "right": 150, "bottom": 140}}
+        with patch.object(bot, "_appium_selector_to_u2", return_value=mock_selector), \
+             patch.object(bot, "_click_coordinates") as click_coords:
+            bot._cached_tap("btn", By.ID, "id", timeout=0.2)  # cold
+            bot._cached_tap("btn", By.ID, "id", timeout=0.2)  # warm
+        assert click_coords.call_count == 2
+        mock_selector.wait.assert_called_once()  # only called on cold run
+
+
+# ---------------------------------------------------------------------------
 # batch_click
 # ---------------------------------------------------------------------------
 
@@ -594,7 +684,7 @@ class TestAutoNavigation:
 
     @staticmethod
     def _mark_terminal_failure(bot):
-        def runner():
+        def runner(**kwargs):
             bot._terminal_failure_reason = "reservation_only"
             return False
         return runner
@@ -1852,6 +1942,7 @@ class TestDetailPagePurchaseEntry:
         bot.config.rush_mode = True
         next_probe = {"state": "sku_page", "reservation_mode": False}
 
+        # _cached_tap falls back to ultra_fast_click in appium (non-u2) mode.
         with patch.object(bot, "ultra_fast_click", return_value=True) as fast_click, \
              patch.object(bot, "_wait_for_purchase_entry_result", return_value=next_probe) as wait_result:
             result = bot._enter_purchase_flow_from_detail_page(prepared=True)
@@ -1860,9 +1951,9 @@ class TestDetailPagePurchaseEntry:
         fast_click.assert_called_once_with(
             By.ID,
             "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl",
-            timeout=0.25,
+            timeout=0.2,
         )
-        wait_result.assert_called_once_with(timeout=0.7, poll_interval=0.03)
+        wait_result.assert_called_once_with(timeout=6.0, poll_interval=0.03)
 
     def test_enter_purchase_flow_falls_back_to_book_selectors(self, bot):
         next_probe = {"state": "order_confirm_page", "submit_button": True}
@@ -1933,32 +2024,26 @@ class TestSaleReadiness:
 class TestFastRetry:
     def test_recover_to_detail_page_for_local_retry_backtracks(self, bot):
         """Local retry backs out until it finds a retryable event page."""
-        with patch.object(bot, "probe_current_page", side_effect=[
-                {
-                    "state": "unknown",
-                    "purchase_button": False,
-                    "price_container": False,
-                    "quantity_picker": False,
-                    "submit_button": False,
-                },
-                {
-                    "state": "detail_page",
-                    "purchase_button": True,
-                    "price_container": True,
-                    "quantity_picker": False,
-                    "submit_button": False,
-                },
-             ]), \
+        unknown_probe = {
+            "state": "unknown",
+            "purchase_button": False,
+            "price_container": False,
+            "quantity_picker": False,
+            "submit_button": False,
+        }
+        detail_probe = {
+            "state": "detail_page",
+            "purchase_button": True,
+            "price_container": True,
+            "quantity_picker": False,
+            "submit_button": False,
+        }
+        with patch.object(bot, "probe_current_page", return_value=unknown_probe), \
+             patch.object(bot, "_probe_recovery_state", return_value=detail_probe), \
              patch.object(bot, "dismiss_startup_popups"), \
              patch("mobile.damai_app.time.sleep"):
             result = bot._recover_to_detail_page_for_local_retry(
-                initial_probe={
-                    "state": "unknown",
-                    "purchase_button": False,
-                    "price_container": False,
-                    "quantity_picker": False,
-                    "submit_button": False,
-                }
+                initial_probe=unknown_probe
             )
 
         bot.driver.press_keycode.assert_called_once_with(4)
@@ -2408,37 +2493,33 @@ class TestSkuInspectionHelpers:
         assert bot.ensure_sku_page_for_inspection(page_probe) == page_probe
 
     def test_ensure_sku_page_for_inspection_enters_sku_from_detail_page(self, bot):
-        bot.config.date = "04.04"
-        bot.config.city = "上海"
         next_probe = {"state": "sku_page", "reservation_mode": False}
 
-        with patch.object(bot, "select_performance_date") as select_date, \
-             patch.object(bot, "smart_wait_and_click", return_value=True) as smart_click, \
-             patch.object(bot, "wait_for_page_state", return_value=next_probe) as wait_state:
+        with patch.object(bot, "smart_wait_and_click", return_value=True) as smart_click, \
+             patch.object(bot, "_wait_for_purchase_entry_result", return_value=next_probe) as wait_entry:
             result = bot.ensure_sku_page_for_inspection({"state": "detail_page"})
 
         assert result == next_probe
-        select_date.assert_called_once()
-        assert smart_click.call_count == 2
-        wait_state.assert_called_once_with({"sku_page", "order_confirm_page"}, timeout=5)
+        assert smart_click.call_count == 1
+        wait_entry.assert_called_once_with(timeout=5, poll_interval=0.04)
 
     def test_ensure_sku_page_for_inspection_returns_probe_when_click_fails(self, bot):
-        with patch.object(bot, "select_performance_date") as select_date, \
-             patch.object(bot, "smart_wait_and_click", return_value=False), \
+        with patch.object(bot, "smart_wait_and_click", return_value=False), \
              patch.object(bot, "probe_current_page", return_value={"state": "detail_page"}) as probe:
             result = bot.ensure_sku_page_for_inspection({"state": "detail_page"})
 
         assert result == {"state": "detail_page"}
-        select_date.assert_called_once()
         probe.assert_called_once()
 
     def test_inspect_current_target_event_collects_dates_and_prices(self, bot):
         sku_probe = {"state": "sku_page", "reservation_mode": True}
         prices = [{"index": 5, "text": "看台 899元", "tag": "可选", "source": "ui"}]
 
-        with patch.object(bot, "_get_detail_title_text", side_effect=["", "马思唯上海站"]), \
+        with patch.object(bot, "smart_wait_and_click", return_value=True), \
+             patch.object(bot, "_dump_hierarchy_xml", return_value=None), \
+             patch.object(bot, "_wait_for_purchase_entry_result", return_value=sku_probe), \
+             patch.object(bot, "_get_detail_title_text", side_effect=["", "马思唯上海站"]), \
              patch.object(bot, "_get_detail_venue_text", side_effect=["", "上海市 · 浦发银行东方体育中心"]), \
-             patch.object(bot, "ensure_sku_page_for_inspection", return_value=sku_probe), \
              patch.object(bot, "get_visible_date_options", return_value=["04.04"]), \
              patch.object(bot, "get_visible_price_options", return_value=prices):
             summary = bot.inspect_current_target_event({"state": "detail_page"})
@@ -2453,9 +2534,11 @@ class TestSkuInspectionHelpers:
         }
 
     def test_inspect_current_target_event_skips_price_reads_outside_sku_page(self, bot):
-        with patch.object(bot, "_get_detail_title_text", return_value="马思唯上海站"), \
+        with patch.object(bot, "smart_wait_and_click", return_value=True), \
+             patch.object(bot, "_dump_hierarchy_xml", return_value=None), \
+             patch.object(bot, "_wait_for_purchase_entry_result", return_value={"state": "detail_page"}), \
+             patch.object(bot, "_get_detail_title_text", return_value="马思唯上海站"), \
              patch.object(bot, "_get_detail_venue_text", return_value="浦发银行东方体育中心"), \
-             patch.object(bot, "ensure_sku_page_for_inspection", return_value={"state": "detail_page"}), \
              patch.object(bot, "get_visible_date_options") as get_dates, \
              patch.object(bot, "get_visible_price_options") as get_prices:
             summary = bot.inspect_current_target_event({"state": "detail_page"})
@@ -2478,6 +2561,165 @@ class TestSkuInspectionHelpers:
 
         assert result is False
         assert "登录提示" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# XML-based hierarchy helpers (u2 fast path)
+# ---------------------------------------------------------------------------
+
+def _make_u2_bot():
+    """Create a DamaiBot with u2 backend and no real driver setup."""
+    cfg = Config(
+        server_url=None,
+        device_name="Android",
+        udid=None,
+        platform_version=None,
+        app_package="cn.damai",
+        app_activity=".launcher.splash.SplashMainActivity",
+        keyword="test",
+        users=["UserA"],
+        city="深圳",
+        date="04.06",
+        price="1680元",
+        price_index=9,
+        if_commit_order=False,
+        probe_only=True,
+        driver_backend="u2",
+    )
+    bot = DamaiBot(config=cfg, setup_driver=False)
+    bot.d = Mock()
+    bot.driver = bot.d
+    return bot
+
+
+_SIMPLE_HIERARCHY = """<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="" class="android.widget.FrameLayout" bounds="[0,0][1080,2340]">
+    <node index="0" text="张杰未·LIVE演唱会" resource-id="cn.damai:id/title_tv" class="android.widget.TextView" bounds="[0,100][1080,200]" />
+    <node index="1" text="北京工人体育场" resource-id="cn.damai:id/venue_name_0" class="android.widget.TextView" bounds="[0,200][1080,260]" />
+    <node index="2" text="04.06" resource-id="cn.damai:id/tv_date" class="android.widget.TextView" bounds="[0,300][200,360]" />
+    <node index="3" text="04.07" resource-id="cn.damai:id/tv_date" class="android.widget.TextView" bounds="[200,300][400,360]" />
+    <node index="4" text="" resource-id="cn.damai:id/project_detail_perform_price_flowlayout" class="android.widget.LinearLayout" bounds="[0,400][1080,900]">
+      <node index="0" text="" resource-id="" class="android.widget.FrameLayout" clickable="true" bounds="[0,400][350,600]">
+        <node index="0" text="缺货登记" resource-id="" class="android.widget.TextView" bounds="[10,450][340,550]" />
+      </node>
+      <node index="1" text="" resource-id="" class="android.widget.FrameLayout" clickable="true" bounds="[360,400][710,600]">
+        <node index="0" text="" resource-id="" class="android.widget.TextView" bounds="[370,450][700,550]" />
+      </node>
+    </node>
+  </node>
+</hierarchy>"""
+
+import xml.etree.ElementTree as ET
+
+
+class TestXmlHierarchyHelpers:
+    def test_xml_find_text_by_resource_id_returns_matching_text(self):
+        root = ET.fromstring(_SIMPLE_HIERARCHY)
+        assert DamaiBot._xml_find_text_by_resource_id(root, "cn.damai:id/title_tv") == "张杰未·LIVE演唱会"
+
+    def test_xml_find_text_by_resource_id_returns_empty_when_missing(self):
+        root = ET.fromstring(_SIMPLE_HIERARCHY)
+        assert DamaiBot._xml_find_text_by_resource_id(root, "cn.damai:id/nonexistent") == ""
+
+    def test_xml_find_text_by_resource_id_returns_empty_for_none_root(self):
+        assert DamaiBot._xml_find_text_by_resource_id(None, "cn.damai:id/title_tv") == ""
+
+    def test_get_detail_title_text_uses_xml_root_when_u2(self):
+        bot = _make_u2_bot()
+        root = ET.fromstring(_SIMPLE_HIERARCHY)
+        assert bot._get_detail_title_text(xml_root=root) == "张杰未·LIVE演唱会"
+
+    def test_get_detail_title_text_falls_back_without_xml_root(self, bot):
+        with patch.object(bot, "_safe_element_text", return_value="演唱会标题"):
+            assert bot._get_detail_title_text() == "演唱会标题"
+
+    def test_get_detail_venue_text_uses_xml_root_when_u2(self):
+        bot = _make_u2_bot()
+        root = ET.fromstring(_SIMPLE_HIERARCHY)
+        assert bot._get_detail_venue_text(xml_root=root) == "北京工人体育场"
+
+    def test_get_detail_venue_text_falls_back_without_xml_root(self, bot):
+        with patch.object(bot, "_safe_element_text", side_effect=["", "浦发银行东方体育中心"]):
+            assert bot._get_detail_venue_text() == "浦发银行东方体育中心"
+
+    def test_get_visible_date_options_uses_xml_root_when_u2(self):
+        bot = _make_u2_bot()
+        root = ET.fromstring(_SIMPLE_HIERARCHY)
+        assert bot.get_visible_date_options(xml_root=root) == ["04.06", "04.07"]
+
+    def test_get_visible_date_options_deduplicates_with_xml_root(self):
+        xml = """<hierarchy><node>
+          <node text="04.06" resource-id="cn.damai:id/tv_date" bounds="[0,0][100,50]"/>
+          <node text="04.06" resource-id="cn.damai:id/tv_date" bounds="[100,0][200,50]"/>
+        </node></hierarchy>"""
+        bot = _make_u2_bot()
+        root = ET.fromstring(xml)
+        assert bot.get_visible_date_options(xml_root=root) == ["04.06"]
+
+    def test_get_visible_price_options_from_xml_returns_ui_text(self):
+        # Card 0 has text "缺货登记"; Card 1 has no text → filtered out.
+        bot = _make_u2_bot()
+        root = ET.fromstring(_SIMPLE_HIERARCHY)
+        options = bot._get_visible_price_options_from_xml(root, allow_ocr=False)
+        assert len(options) == 1
+        assert options[0]["index"] == 0
+        assert options[0]["text"] == "缺货登记"
+        assert options[0]["source"] == "ui"
+
+    def test_get_visible_price_options_from_xml_skips_cards_with_no_text_or_tag(self):
+        xml = """<hierarchy><node>
+          <node resource-id="cn.damai:id/project_detail_perform_price_flowlayout"
+                class="android.widget.LinearLayout" bounds="[0,0][1080,600]">
+            <node class="android.widget.FrameLayout" clickable="true" bounds="[0,0][350,200]">
+            </node>
+          </node>
+        </node></hierarchy>"""
+        bot = _make_u2_bot()
+        root = ET.fromstring(xml)
+        options = bot._get_visible_price_options_from_xml(root, allow_ocr=False)
+        assert options == []
+
+    def test_get_visible_price_options_from_xml_returns_empty_when_container_missing(self):
+        xml = """<hierarchy><node><node text="other" bounds="[0,0][100,100]"/></node></hierarchy>"""
+        bot = _make_u2_bot()
+        root = ET.fromstring(xml)
+        assert bot._get_visible_price_options_from_xml(root, allow_ocr=False) == []
+
+    def test_get_visible_price_options_dispatches_to_xml_path_for_u2(self):
+        bot = _make_u2_bot()
+        root = ET.fromstring(_SIMPLE_HIERARCHY)
+        with patch.object(bot, "_get_visible_price_options_from_xml", return_value=[]) as xml_fn:
+            bot.get_visible_price_options(xml_root=root)
+        xml_fn.assert_called_once_with(root, allow_ocr=True)
+
+    def test_dump_hierarchy_xml_returns_parsed_root(self):
+        bot = _make_u2_bot()
+        bot.d.dump_hierarchy = Mock(return_value="<hierarchy><node/></hierarchy>")
+        root = bot._dump_hierarchy_xml()
+        assert root is not None
+        bot.d.dump_hierarchy.assert_called_once()
+
+    def test_dump_hierarchy_xml_returns_none_on_error(self):
+        bot = _make_u2_bot()
+        bot.d.dump_hierarchy = Mock(side_effect=Exception("adb error"))
+        assert bot._dump_hierarchy_xml() is None
+
+    def test_inspect_current_target_event_dumps_hierarchy_once_for_u2(self):
+        bot = _make_u2_bot()
+        bot.d.dump_hierarchy = Mock(return_value="<hierarchy><node/></hierarchy>")
+        sku_probe = {"state": "sku_page", "reservation_mode": False}
+
+        with patch.object(bot, "probe_current_page", return_value=sku_probe), \
+             patch.object(bot, "ensure_sku_page_for_inspection", return_value=sku_probe), \
+             patch.object(bot, "_get_detail_title_text", return_value="演唱会"), \
+             patch.object(bot, "_get_detail_venue_text", return_value="场馆"), \
+             patch.object(bot, "get_visible_date_options", return_value=["04.06"]), \
+             patch.object(bot, "get_visible_price_options", return_value=[]):
+            bot.inspect_current_target_event()
+
+        # Hierarchy should only be dumped once (no re-dump since page didn't navigate).
+        bot.d.dump_hierarchy.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -2990,3 +3232,637 @@ class TestPrepareRuntimeConfig:
             bot = DamaiBot(config=cfg, setup_driver=False)
         assert bot.item_detail is not None
         assert bot.config.keyword is not None  # auto-populated
+
+
+# ---------------------------------------------------------------------------
+# Warm Validation Pipeline
+# ---------------------------------------------------------------------------
+
+class TestWarmValidationPipeline:
+    """Tests for _has_warm_pipeline_coords and _run_warm_validation_pipeline."""
+
+    def _populate_coords(self, bot):
+        """Fill all coords required by the warm pipeline."""
+        bot._cached_hot_path_coords.update({
+            "detail_buy": (540, 1800),
+            "price": (300, 1200),
+            "sku_buy": (540, 2100),
+            "attendee_checkboxes": [(100, 900)],
+            "city": (200, 600),
+        })
+
+    def test_has_warm_pipeline_coords_all_present(self, bot):
+        self._populate_coords(bot)
+        assert bot._has_warm_pipeline_coords() is True
+
+    def test_has_warm_pipeline_coords_missing_price(self, bot):
+        self._populate_coords(bot)
+        del bot._cached_hot_path_coords["price"]
+        assert bot._has_warm_pipeline_coords() is False
+
+    def test_has_warm_pipeline_coords_missing_attendee(self, bot):
+        self._populate_coords(bot)
+        del bot._cached_hot_path_coords["attendee_checkboxes"]
+        assert bot._has_warm_pipeline_coords() is False
+
+    def test_pipeline_success_with_city(self, bot):
+        """Pipeline clicks city + detail_buy via shell, blind clicks, detects confirm, clicks attendee."""
+        bot.config.rush_mode = True
+        bot.config.if_commit_order = False
+        bot.config.city = "北京"
+        bot.config.users = ["UserA"]
+        bot.config.driver_backend = "u2"
+        self._populate_coords(bot)
+
+        mock_d = Mock()
+        mock_d.shell = Mock(return_value=("", ""))
+        bot.d = mock_d
+
+        # _has_element returns True on first call (confirm page found immediately)
+        with patch.object(bot, "_has_element", return_value=True), \
+             patch.object(bot, "_click_coordinates") as click_coords:
+            result = bot._run_warm_validation_pipeline(start_time=_time_module.time())
+
+        assert result is True
+        # Shell called for city+detail_buy batch, and for blind clicks
+        assert mock_d.shell.call_count >= 1
+        first_shell = mock_d.shell.call_args_list[0][0][0]
+        assert "input tap 200 600" in first_shell  # city
+        assert "input tap 540 1800" in first_shell  # detail_buy
+        # Attendee click via _click_coordinates
+        click_coords.assert_called_once_with(100, 900)
+
+    def test_pipeline_success_without_city(self, bot):
+        """Pipeline skips city when city in no_match."""
+        bot.config.rush_mode = True
+        bot.config.if_commit_order = False
+        bot.config.city = "北京"
+        bot.config.users = ["UserA"]
+        bot.config.driver_backend = "u2"
+        self._populate_coords(bot)
+        bot._cached_hot_path_no_match.add("city")
+
+        mock_d = Mock()
+        mock_d.shell = Mock(return_value=("", ""))
+        bot.d = mock_d
+
+        with patch.object(bot, "_has_element", return_value=True), \
+             patch.object(bot, "_click_coordinates"):
+            result = bot._run_warm_validation_pipeline(start_time=_time_module.time())
+
+        assert result is True
+        first_shell = mock_d.shell.call_args_list[0][0][0]
+        assert "input tap 200 600" not in first_shell  # city skipped
+        assert "input tap 540 1800" in first_shell  # detail_buy only
+
+    def test_pipeline_returns_none_on_timeout(self, bot):
+        """Pipeline returns None if confirm page never detected."""
+        bot.config.rush_mode = True
+        bot.config.if_commit_order = False
+        bot.config.users = ["UserA"]
+        bot.config.driver_backend = "u2"
+        self._populate_coords(bot)
+
+        mock_d = Mock()
+        mock_d.shell = Mock(return_value=("", ""))
+        bot.d = mock_d
+
+        call_count = 0
+
+        def has_element_side_effect(by, value):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 3:
+                raise StopIteration("force deadline")
+            return False
+
+        # Simulate timeout by making time advance
+        with patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
+             patch("mobile.damai_app.time") as mock_time:
+            # First call to time.time() for start_time, then deadline check
+            mock_time.time = Mock(side_effect=[100.0, 100.0, 109.0])
+            mock_time.sleep = Mock()
+            result = bot._run_warm_validation_pipeline(start_time=100.0)
+
+        assert result is None
+
+    def test_pipeline_blind_click_uses_shell_batch(self, bot):
+        """Background thread should use shell with batched input tap for price + buy."""
+        bot.config.rush_mode = True
+        bot.config.if_commit_order = False
+        bot.config.users = ["UserA"]
+        bot.config.driver_backend = "u2"
+        self._populate_coords(bot)
+
+        mock_d = Mock()
+        mock_d.shell = Mock(return_value=("", ""))
+        bot.d = mock_d
+
+        # Return True on second _has_element call to give background thread time to fire
+        _call_count = {"n": 0}
+
+        def _delayed_confirm(by, value):
+            _call_count["n"] += 1
+            if _call_count["n"] >= 2:
+                return True
+            _time_module.sleep(0.05)  # give background thread time to fire
+            return False
+
+        with patch.object(bot, "_has_element", side_effect=_delayed_confirm), \
+             patch.object(bot, "_click_coordinates"):
+            result = bot._run_warm_validation_pipeline(start_time=_time_module.time())
+
+        assert result is True
+        # Check that shell was called with batched price+buy taps
+        shell_calls = [c[0][0] for c in mock_d.shell.call_args_list]
+        blind_calls = [c for c in shell_calls if "input tap 300 1200" in c and "input tap 540 2100" in c]
+        assert len(blind_calls) >= 1, f"Expected blind batch calls, got: {shell_calls}"
+
+    def test_pipeline_hooks_into_run_ticket_grabbing(self, bot):
+        """run_ticket_grabbing uses pipeline on warm validation retry with cached coords."""
+        bot.config.rush_mode = True
+        bot.config.if_commit_order = False
+        self._populate_coords(bot)
+        initial_probe = {"state": "detail_page", "purchase_button": True}
+
+        with patch.object(bot, "_run_warm_validation_pipeline", return_value=True) as pipeline:
+            result = bot.run_ticket_grabbing(initial_page_probe=initial_probe)
+
+        assert result is True
+        pipeline.assert_called_once()
+
+    def test_pipeline_fallback_on_missing_coords(self, bot):
+        """run_ticket_grabbing falls through to normal flow when coords not cached."""
+        bot.config.rush_mode = True
+        bot.config.if_commit_order = False
+        # Don't populate coords
+        initial_probe = {"state": "detail_page", "purchase_button": True}
+
+        with patch.object(bot, "_run_warm_validation_pipeline") as pipeline, \
+             patch.object(bot, "_enter_purchase_flow_from_detail_page", return_value=None):
+            result = bot.run_ticket_grabbing(initial_page_probe=initial_probe)
+
+        pipeline.assert_not_called()  # _has_warm_pipeline_coords returned False
+
+
+# ---------------------------------------------------------------------------
+# Fast Back to Detail Page
+# ---------------------------------------------------------------------------
+
+class TestProbeRecoveryState:
+    """Tests for _probe_recovery_state — lightweight recovery probe."""
+
+    def test_detects_detail_page(self, bot):
+        def fake_has_element(by, value):
+            return value == "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
+        with patch.object(bot, "_has_element", side_effect=fake_has_element):
+            result = bot._probe_recovery_state()
+        assert result["state"] == "detail_page"
+        assert result["purchase_button"] is True
+
+    def test_detects_sku_page(self, bot):
+        def fake_has_element(by, value):
+            return value == "cn.damai:id/layout_sku"
+        with patch.object(bot, "_has_element", side_effect=fake_has_element):
+            result = bot._probe_recovery_state()
+        assert result["state"] == "sku_page"
+
+    def test_detects_sku_page_via_container(self, bot):
+        def fake_has_element(by, value):
+            return value == "cn.damai:id/sku_contanier"
+        with patch.object(bot, "_has_element", side_effect=fake_has_element):
+            result = bot._probe_recovery_state()
+        assert result["state"] == "sku_page"
+
+    def test_returns_unknown_when_no_match(self, bot):
+        with patch.object(bot, "_has_element", return_value=False):
+            result = bot._probe_recovery_state()
+        assert result["state"] == "unknown"
+
+    def test_recover_uses_lightweight_probe_in_back_loop(self, bot):
+        """Back-navigation loop should use _probe_recovery_state, not full probe."""
+        initial_probe = {"state": "order_confirm_page"}
+        detail_result = {"state": "detail_page", "purchase_button": True, "price_container": False,
+                         "quantity_picker": False, "submit_button": False, "reservation_mode": False,
+                         "pending_order_dialog": False}
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={"state": "order_confirm_page"}), \
+             patch.object(bot, "_press_keycode_safe", return_value=True), \
+             patch.object(bot, "_probe_recovery_state", return_value=detail_result) as light_mock:
+            result = bot._recover_to_detail_page_for_local_retry(initial_probe)
+        assert result["state"] == "detail_page"
+        light_mock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Cold Rush XML Dump Optimization
+# ---------------------------------------------------------------------------
+
+class TestRushPreSelectViaXml:
+    """Tests for _extract_coords_from_xml_node and _rush_preselect_and_buy_via_xml."""
+
+    DETAIL_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node resource-id="cn.damai:id/title_tv" text="张杰演唱会" bounds="[0,200][1080,260]"/>
+  <node resource-id="" text="北京" bounds="[100,500][200,550]"/>
+  <node resource-id="" text="04.18" bounds="[300,500][400,550]"/>
+  <node resource-id="cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
+        text="" bounds="[0,1800][1080,1920]"/>
+</hierarchy>"""
+
+    DETAIL_XML_NO_CITY = """<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node resource-id="cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
+        text="" bounds="[0,1800][1080,1920]"/>
+</hierarchy>"""
+
+    def test_extract_coords_from_xml_node(self, bot):
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(self.DETAIL_XML)
+        buy_node = root.find('.//*[@resource-id="cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"]')
+        coords = bot._extract_coords_from_xml_node(buy_node)
+        assert coords == (540, 1860)
+
+    def test_extract_coords_no_bounds(self, bot):
+        import xml.etree.ElementTree as ET
+        node = ET.fromstring('<node resource-id="x" text="y"/>')
+        assert bot._extract_coords_from_xml_node(node) is None
+
+    def test_rush_preselect_finds_city_date_buy(self, bot):
+        """Single XML dump extracts city, date, and buy button coords, batch-clicked via shell."""
+        import xml.etree.ElementTree as ET
+        bot.config.driver_backend = "u2"
+        bot.config.city = "北京"
+        bot.config.date = "04.18"
+        bot.config.rush_mode = True
+
+        mock_d = Mock()
+        bot.d = mock_d
+        with patch.object(bot, "_dump_hierarchy_xml", return_value=ET.fromstring(self.DETAIL_XML)):
+            result = bot._rush_preselect_and_buy_via_xml()
+
+        assert result is True
+        assert bot._cached_hot_path_coords["city"] == (150, 525)
+        assert bot._cached_hot_path_coords["date"] == (350, 525)
+        assert bot._cached_hot_path_coords["detail_buy"] == (540, 1860)
+        # All 3 taps batched in a single shell call
+        mock_d.shell.assert_called_once()
+        shell_cmd = mock_d.shell.call_args[0][0]
+        assert "input tap 350 525" in shell_cmd  # date
+        assert "input tap 150 525" in shell_cmd  # city
+        assert "input tap 540 1860" in shell_cmd  # buy
+
+    def test_rush_preselect_no_city_adds_no_match(self, bot):
+        """City not found → added to _cached_hot_path_no_match."""
+        import xml.etree.ElementTree as ET
+        bot.config.driver_backend = "u2"
+        bot.config.city = "上海"
+        bot.config.date = None
+        bot.config.rush_mode = True
+
+        mock_d = Mock()
+        bot.d = mock_d
+        with patch.object(bot, "_dump_hierarchy_xml", return_value=ET.fromstring(self.DETAIL_XML_NO_CITY)):
+            result = bot._rush_preselect_and_buy_via_xml()
+
+        assert result is True
+        assert "city" in bot._cached_hot_path_no_match
+        assert bot._cached_hot_path_coords["detail_buy"] == (540, 1860)
+
+    def test_rush_preselect_no_buy_returns_false(self, bot):
+        """Buy button not found → returns False."""
+        import xml.etree.ElementTree as ET
+        bot.config.driver_backend = "u2"
+        bot.config.city = "北京"
+        bot.config.rush_mode = True
+        no_buy_xml = '<hierarchy><node text="北京" bounds="[100,500][200,550]"/></hierarchy>'
+
+        mock_d = Mock()
+        bot.d = mock_d
+        with patch.object(bot, "_dump_hierarchy_xml", return_value=ET.fromstring(no_buy_xml)):
+            result = bot._rush_preselect_and_buy_via_xml()
+
+        assert result is False
+
+    def test_rush_preselect_xml_dump_fails(self, bot):
+        """dump_hierarchy returns None → returns False."""
+        bot.config.driver_backend = "u2"
+        bot.config.rush_mode = True
+
+        with patch.object(bot, "_dump_hierarchy_xml", return_value=None):
+            result = bot._rush_preselect_and_buy_via_xml()
+
+        assert result is False
+
+    def test_enter_purchase_flow_uses_xml_on_cold_u2(self, bot):
+        """Cold u2 rush mode uses XML dump instead of multiple _cached_tap calls."""
+        bot.config.driver_backend = "u2"
+        bot.config.rush_mode = True
+        bot.config.city = "北京"
+
+        next_probe = {"state": "sku_page", "price_container": True, "reservation_mode": False}
+        with patch.object(bot, "_rush_preselect_and_buy_via_xml", return_value=True) as xml_method, \
+             patch.object(bot, "_wait_for_purchase_entry_result", return_value=next_probe):
+            result = bot._enter_purchase_flow_from_detail_page(prepared=False)
+
+        assert result == next_probe
+        xml_method.assert_called_once()
+
+    def test_enter_purchase_flow_warm_uses_cached_tap(self, bot):
+        """Warm path (detail_buy already cached) uses _cached_tap, not XML dump."""
+        bot.config.rush_mode = True
+        bot._cached_hot_path_coords["detail_buy"] = (540, 1860)
+
+        next_probe = {"state": "sku_page", "price_container": True, "reservation_mode": False}
+        with patch.object(bot, "_rush_preselect_and_buy_via_xml") as xml_method, \
+             patch.object(bot, "_cached_tap", return_value=True), \
+             patch.object(bot, "_wait_for_purchase_entry_result", return_value=next_probe):
+            result = bot._enter_purchase_flow_from_detail_page(prepared=False)
+
+        xml_method.assert_not_called()  # warm path, skip XML dump
+
+
+# ---------------------------------------------------------------------------
+# Coverage gap: ADB device detection (_list_connected_device_ids,
+#                                      _read_device_android_version)
+# ---------------------------------------------------------------------------
+
+class TestAdbDeviceDetection:
+    """Cover subprocess-based ADB helpers (lines 233-264)."""
+
+    def test_list_devices_returns_ids(self, bot):
+        stdout = "List of devices attached\nABC123\tdevice\nDEF456\tdevice\n\n"
+        fake = Mock(stdout=stdout)
+        with patch("mobile.damai_app.subprocess.run", return_value=fake):
+            result = bot._list_connected_device_ids()
+        assert result == ["ABC123", "DEF456"]
+
+    def test_list_devices_skips_non_device_lines(self, bot):
+        stdout = "List of devices attached\nABC123\tunauthorized\nDEF456\tdevice\n"
+        fake = Mock(stdout=stdout)
+        with patch("mobile.damai_app.subprocess.run", return_value=fake):
+            result = bot._list_connected_device_ids()
+        assert result == ["DEF456"]
+
+    def test_list_devices_returns_none_on_file_not_found(self, bot):
+        with patch("mobile.damai_app.subprocess.run", side_effect=FileNotFoundError):
+            assert bot._list_connected_device_ids() is None
+
+    def test_list_devices_returns_none_on_called_process_error(self, bot):
+        with patch(
+            "mobile.damai_app.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, "adb"),
+        ):
+            assert bot._list_connected_device_ids() is None
+
+    def test_read_android_version_success(self, bot):
+        fake = Mock(stdout="14\n")
+        with patch("mobile.damai_app.subprocess.run", return_value=fake):
+            assert bot._read_device_android_version("ABC123") == "14"
+
+    def test_read_android_version_empty_returns_none(self, bot):
+        fake = Mock(stdout="  \n")
+        with patch("mobile.damai_app.subprocess.run", return_value=fake):
+            assert bot._read_device_android_version("ABC123") is None
+
+    def test_read_android_version_returns_none_on_error(self, bot):
+        with patch("mobile.damai_app.subprocess.run", side_effect=FileNotFoundError):
+            assert bot._read_device_android_version("ABC123") is None
+
+
+# ---------------------------------------------------------------------------
+# Coverage gap: element property helpers (_element_rect, _is_clickable,
+#                                          _is_checked)
+# ---------------------------------------------------------------------------
+
+class TestElementPropertyHelpers:
+    """Cover element attribute extraction (lines 492-554)."""
+
+    # -- _element_rect --
+
+    def test_element_rect_from_dict(self, bot):
+        el = Mock()
+        el.rect = {"x": 10, "y": 20, "width": 100, "height": 50}
+        assert bot._element_rect(el) == {"x": 10, "y": 20, "width": 100, "height": 50}
+
+    def test_element_rect_from_tuple(self, bot):
+        el = Mock()
+        el.rect = (10, 20, 100, 50)
+        assert bot._element_rect(el) == {"x": 10, "y": 20, "width": 100, "height": 50}
+
+    def test_element_rect_from_bounds_tuple(self, bot):
+        el = Mock(spec=[])  # no .rect
+        el.bounds = (0, 100, 200, 300)
+        assert bot._element_rect(el) == {"x": 0, "y": 100, "width": 200, "height": 200}
+
+    def test_element_rect_from_bounds_exception_falls_to_info(self, bot):
+        el = Mock(spec=[])  # no .rect
+        type(el).bounds = PropertyMock(side_effect=RuntimeError)
+        el.info = {"bounds": {"left": 5, "top": 10, "right": 105, "bottom": 60}}
+        assert bot._element_rect(el) == {"x": 5, "y": 10, "width": 100, "height": 50}
+
+    def test_element_rect_from_info_dict(self, bot):
+        el = Mock(spec=[])  # no .rect, no .bounds
+        el.info = {"bounds": {"left": 0, "top": 0, "right": 50, "bottom": 80}}
+        assert bot._element_rect(el) == {"x": 0, "y": 0, "width": 50, "height": 80}
+
+    def test_element_rect_info_empty_bounds(self, bot):
+        el = Mock(spec=[])
+        el.info = {"bounds": {}}
+        assert bot._element_rect(el) == {"x": 0, "y": 0, "width": 0, "height": 0}
+
+    # -- _is_clickable --
+
+    def test_is_clickable_via_get_attribute_true(self):
+        el = Mock()
+        el.get_attribute = Mock(return_value="true")
+        assert DamaiBot._is_clickable(el) is True
+
+    def test_is_clickable_via_get_attribute_false(self):
+        el = Mock()
+        el.get_attribute = Mock(return_value="false")
+        assert DamaiBot._is_clickable(el) is False
+
+    def test_is_clickable_get_attribute_raises(self):
+        el = Mock()
+        el.get_attribute = Mock(side_effect=RuntimeError)
+        assert DamaiBot._is_clickable(el) is False
+
+    def test_is_clickable_via_info(self):
+        el = Mock(spec=[])  # no get_attribute
+        el.info = {"clickable": True}
+        assert DamaiBot._is_clickable(el) is True
+
+    def test_is_clickable_info_raises(self):
+        el = Mock(spec=[])
+        type(el).info = PropertyMock(side_effect=RuntimeError)
+        assert DamaiBot._is_clickable(el) is False
+
+    # -- _is_checked --
+
+    def test_is_checked_via_get_attribute_true(self):
+        el = Mock()
+        el.get_attribute = Mock(return_value="true")
+        assert DamaiBot._is_checked(el) is True
+
+    def test_is_checked_via_get_attribute_false(self):
+        el = Mock()
+        el.get_attribute = Mock(return_value="false")
+        assert DamaiBot._is_checked(el) is False
+
+    def test_is_checked_get_attribute_raises(self):
+        el = Mock()
+        el.get_attribute = Mock(side_effect=RuntimeError)
+        assert DamaiBot._is_checked(el) is False
+
+    def test_is_checked_via_info(self):
+        el = Mock(spec=[])
+        el.info = {"checked": True}
+        assert DamaiBot._is_checked(el) is True
+
+    def test_is_checked_info_raises(self):
+        el = Mock(spec=[])
+        type(el).info = PropertyMock(side_effect=RuntimeError)
+        assert DamaiBot._is_checked(el) is False
+
+
+# ---------------------------------------------------------------------------
+# Coverage gap: _container_find_elements (lines 556-618)
+# ---------------------------------------------------------------------------
+
+class TestContainerFindElements:
+    """Cover container-scoped element lookups."""
+
+    def test_delegates_to_find_all_when_container_is_driver(self, bot):
+        """When container is self.driver, delegates to _find_all."""
+        fake_results = [Mock()]
+        with patch.object(bot, "_find_all", return_value=fake_results):
+            result = bot._container_find_elements(bot.driver, By.ID, "some_id")
+        assert result == fake_results
+
+    def test_appium_element_find_elements(self, bot):
+        """Appium-style container with find_elements method."""
+        child = Mock()
+        container = Mock()
+        container.find_elements = Mock(return_value=[child])
+        result = bot._container_find_elements(container, By.ID, "child_id")
+        assert child in result
+
+    def test_u2_container_by_id_via_elem_iter(self, bot):
+        """u2 backend: container.elem.iter() filters by resource-id."""
+        with patch.object(bot, "_using_u2", return_value=True):
+            node_match = Mock()
+            node_match.get = Mock(side_effect=lambda k: "target_id" if k == "resource-id" else None)
+            node_miss = Mock()
+            node_miss.get = Mock(side_effect=lambda k: "other_id" if k == "resource-id" else None)
+
+            container = Mock()
+            container.elem = Mock()
+            container.elem.iter = Mock(return_value=[node_match, node_miss])
+
+            result = bot._container_find_elements(container, By.ID, "target_id")
+        assert result == [node_match]
+
+    def test_u2_container_by_class_via_elem_iter(self, bot):
+        """u2 backend: container.elem.iter() filters by class name."""
+        with patch.object(bot, "_using_u2", return_value=True):
+            node = Mock()
+            node.get = Mock(side_effect=lambda k: "android.widget.TextView" if k == "class" else None)
+
+            container = Mock()
+            container.elem = Mock()
+            container.elem.iter = Mock(return_value=[node])
+
+            result = bot._container_find_elements(container, By.CLASS_NAME, "android.widget.TextView")
+        assert result == [node]
+
+    def test_u2_container_by_id_child_iteration(self, bot):
+        """u2 backend: falls back to child() iteration when no elem."""
+        with patch.object(bot, "_using_u2", return_value=True):
+            child0 = Mock()
+            child0.exists = Mock(return_value=True)
+            child0.info = {"resourceId": "target_id"}
+
+            child1 = Mock()
+            child1.exists = Mock(return_value=False)
+
+            container = Mock(spec=["child"])
+            container.child = Mock(side_effect=[child0, child1])
+
+            with patch.object(bot, "_selector_exists", side_effect=[True, False]):
+                result = bot._container_find_elements(container, By.ID, "target_id")
+        assert result == [child0]
+
+    def test_u2_container_unknown_by_returns_empty(self, bot):
+        """u2 backend: unknown 'by' strategy returns empty list."""
+        with patch.object(bot, "_using_u2", return_value=True):
+            container = Mock(spec=[])
+            result = bot._container_find_elements(container, "unknown_by", "val")
+        assert result == []
+
+    def test_u2_container_elem_iter_exception(self, bot):
+        """u2 backend: elem.iter() raises → falls to child iteration."""
+        with patch.object(bot, "_using_u2", return_value=True):
+            container = Mock(spec=["child", "elem"])
+            container.elem = Mock()
+            container.elem.iter = Mock(side_effect=RuntimeError("broken"))
+            # child iteration — no children exist
+            child_none = Mock()
+            child_none.exists = Mock(return_value=False)
+            container.child = Mock(return_value=child_none)
+
+            with patch.object(bot, "_selector_exists", return_value=False):
+                result = bot._container_find_elements(container, By.ID, "some_id")
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Coverage gap: _selector_exists / _wait_for_element (lines 457-490)
+# ---------------------------------------------------------------------------
+
+class TestSelectorExistsAndWait:
+    """Cover element existence checking and wait helpers."""
+
+    def test_selector_exists_callable_with_timeout(self):
+        sel = Mock()
+        sel.exists = Mock(return_value=True)
+        assert DamaiBot._selector_exists(sel) is True
+        sel.exists.assert_called_with(timeout=0)
+
+    def test_selector_exists_callable_fallback_no_timeout(self):
+        """exists(timeout=0) raises TypeError → falls back to exists()."""
+        sel = Mock()
+        sel.exists = Mock(side_effect=[TypeError, True])
+        assert DamaiBot._selector_exists(sel) is True
+
+    def test_selector_exists_callable_exception(self):
+        """exists() raises non-TypeError → returns False."""
+        sel = Mock()
+        sel.exists = Mock(side_effect=RuntimeError)
+        assert DamaiBot._selector_exists(sel) is False
+
+    def test_selector_exists_bool_true(self):
+        sel = Mock(spec=[])
+        sel.exists = True
+        assert DamaiBot._selector_exists(sel) is True
+
+    def test_selector_exists_bool_false(self):
+        sel = Mock(spec=[])
+        sel.exists = False
+        assert DamaiBot._selector_exists(sel) is False
+
+    def test_selector_exists_via_wait(self):
+        """No exists attr → falls to wait(timeout=0)."""
+        sel = Mock(spec=["wait"])
+        sel.wait = Mock(return_value=True)
+        assert DamaiBot._selector_exists(sel) is True
+
+    def test_selector_exists_wait_exception(self):
+        sel = Mock(spec=["wait"])
+        sel.wait = Mock(side_effect=RuntimeError)
+        assert DamaiBot._selector_exists(sel) is False
+
+    def test_selector_exists_nothing_returns_false(self):
+        """No exists, no wait → False."""
+        sel = Mock(spec=[])
+        assert DamaiBot._selector_exists(sel) is False
