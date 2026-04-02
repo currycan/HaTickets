@@ -477,26 +477,31 @@ def test_config_path_returns_jsonc(monkeypatch):
 
 class TestAutoSyncDeviceConfig:
     def test_auto_sync_uses_single_connected_device(self):
-        base_config = {"udid": "emulator-5554", "platform_version": "15"}
-        with patch("mobile.prompt_runner._list_connected_device_ids", return_value=["c6c4eb67"]), \
-             patch("mobile.prompt_runner._read_device_android_version", return_value="16"):
+        base_config = {"serial": "emulator-5554"}
+        with patch("mobile.prompt_runner._list_connected_device_ids", return_value=["c6c4eb67"]):
             updated, message = _auto_sync_device_config(base_config, "apply")
 
-        assert updated["udid"] == "c6c4eb67"
-        assert updated["platform_version"] == "16"
+        assert updated["serial"] == "c6c4eb67"
         assert "写配置时会一并保存" in message
 
     def test_auto_sync_summary_only_updates_runtime_message(self):
-        base_config = {"udid": "emulator-5554", "platform_version": "15"}
-        with patch("mobile.prompt_runner._list_connected_device_ids", return_value=["c6c4eb67"]), \
-             patch("mobile.prompt_runner._read_device_android_version", return_value="16"):
+        base_config = {"serial": "emulator-5554"}
+        with patch("mobile.prompt_runner._list_connected_device_ids", return_value=["c6c4eb67"]):
             updated, message = _auto_sync_device_config(base_config, "summary")
 
-        assert updated["udid"] == "c6c4eb67"
+        assert updated["serial"] == "c6c4eb67"
         assert "summary 模式仅本次运行使用" in message
 
+    def test_auto_sync_falls_back_to_udid(self):
+        base_config = {"udid": "emulator-5554"}
+        with patch("mobile.prompt_runner._list_connected_device_ids", return_value=["emulator-5554"]):
+            updated, message = _auto_sync_device_config(base_config, "apply")
+
+        assert updated["serial"] == "emulator-5554"
+        assert message is not None
+
     def test_auto_sync_skips_when_multiple_devices_are_ambiguous(self):
-        base_config = {"udid": "emulator-5554", "platform_version": "15"}
+        base_config = {"serial": "emulator-5554"}
         with patch("mobile.prompt_runner._list_connected_device_ids", return_value=["abc", "def"]):
             updated, message = _auto_sync_device_config(base_config, "apply")
 

@@ -161,57 +161,35 @@ def _list_connected_device_ids() -> list[str] | None:
     return device_ids
 
 
-def _read_device_android_version(udid: str) -> str | None:
-    """Return the Android version reported by adb for a device."""
-    try:
-        result = subprocess.run(
-            ["adb", "-s", udid, "shell", "getprop", "ro.build.version.release"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return None
-
-    return result.stdout.strip() or None
-
 
 def _auto_sync_device_config(base_config: dict, mode: str) -> tuple[dict, str | None]:
-    """Auto-sync udid/platform_version from the currently connected Android device when safe."""
+    """Auto-sync serial from the currently connected Android device when safe."""
     connected_devices = _list_connected_device_ids()
     if not connected_devices:
         return dict(base_config), None
 
     updated_config = dict(base_config)
-    configured_udid = updated_config.get("udid")
-    resolved_udid = None
+    configured_serial = updated_config.get("serial") or updated_config.get("udid")
+    resolved_serial = None
 
     if len(connected_devices) == 1:
-        resolved_udid = connected_devices[0]
-    elif configured_udid in connected_devices:
-        resolved_udid = configured_udid
+        resolved_serial = connected_devices[0]
+    elif configured_serial in connected_devices:
+        resolved_serial = configured_serial
     else:
         return updated_config, None
 
     changed_fields = []
-    if resolved_udid and updated_config.get("udid") != resolved_udid:
-        updated_config["udid"] = resolved_udid
-        changed_fields.append("udid")
-
-    resolved_platform = _read_device_android_version(resolved_udid) if resolved_udid else None
-    if resolved_platform and updated_config.get("platform_version") != resolved_platform:
-        updated_config["platform_version"] = resolved_platform
-        changed_fields.append("platform_version")
+    if resolved_serial and updated_config.get("serial") != resolved_serial:
+        updated_config["serial"] = resolved_serial
+        changed_fields.append("serial")
 
     if not changed_fields:
         return updated_config, None
 
-    prefix = "已自动识别当前设备配置"
+    prefix = "已自动识别当前设备"
     suffix = "；summary 模式仅本次运行使用，不会写回配置" if mode == "summary" else "；写配置时会一并保存"
-    message = (
-        f"{prefix}: udid={updated_config.get('udid')}, "
-        f"platform_version={updated_config.get('platform_version')}{suffix}"
-    )
+    message = f"{prefix}: serial={updated_config.get('serial')}{suffix}"
     return updated_config, message
 
 
@@ -580,7 +558,6 @@ def build_updated_config(base_config: dict, intent, discovery: dict, date_text: 
         "auto_navigate": True,
         "rush_mode": True,
         "fast_retry_interval_ms": 80,
-        "wait_cta_ready_timeout_ms": 0,
     })
     return config_data
 
@@ -623,8 +600,7 @@ def main(argv=None):
             logger.info(device_sync_message)
         base_config = Config(**{
             **Config.load_config(str(config_path)).to_dict(),
-            "udid": base_config_dict.get("udid"),
-            "platform_version": base_config_dict.get("platform_version"),
+            "serial": base_config_dict.get("serial") or base_config_dict.get("udid"),
         })
 
         query_config = Config(**{
