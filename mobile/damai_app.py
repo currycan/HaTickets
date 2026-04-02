@@ -111,8 +111,10 @@ class DamaiBot:
             # Share coordinate cache with pipeline
             self._pipeline._cached_coords = self._cached_hot_path_coords
             self._navigator = EventNavigator(self.d, self.config, self._page_probe)
+            self._navigator.set_bot(self)  # circular ref resolved via setter
             self._recovery = RecoveryHelper(self.d, self._page_probe, self._navigator)
             self._price_sel = PriceSelector(self.d, self.config, self._page_probe)
+            self._price_sel.set_bot(self)
             self._attendee_sel = AttendeeSelector(self.d, self.config)
 
     def _set_terminal_failure(self, reason):
@@ -2132,6 +2134,12 @@ class DamaiBot:
         return collected[:max_results]
 
     def navigate_to_target_event(self, initial_probe=None):
+        """Navigate to the target event. Delegates to EventNavigator."""
+        if hasattr(self, '_navigator') and self._navigator is not None:
+            return self._navigator.navigate_to_target_event(initial_probe=initial_probe)
+        return self._navigate_to_target_impl(initial_probe=initial_probe)
+
+    def _navigate_to_target_impl(self, initial_probe=None):
         """Auto-navigate from homepage/search to the target event detail page."""
         if not self.config.auto_navigate:
             return False
