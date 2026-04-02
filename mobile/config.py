@@ -113,7 +113,7 @@ def update_runtime_mode(probe_only, if_commit_order, config_path=None):
 
 
 class Config:
-    def __init__(self, server_url, keyword, users, city, date, price, price_index, if_commit_order,
+    def __init__(self, keyword, users, city, date, price, price_index, if_commit_order,
                  probe_only=False, device_name="Android", udid=None, platform_version=None,
                  app_package="cn.damai", app_activity=".launcher.splash.SplashMainActivity",
                  sell_start_time=None, countdown_lead_ms=3000,
@@ -122,7 +122,8 @@ class Config:
                  rush_mode=False,
                  auto_navigate=True,
                  target_title=None, target_venue=None,
-                 serial=None, driver_backend="u2"):
+                 serial=None, driver_backend="u2",
+                 server_url=None):
         if driver_backend not in {"u2", "appium"}:
             raise ValueError(f"driver_backend 必须是 'u2' 或 'appium'，实际值: {driver_backend!r}")
 
@@ -274,28 +275,30 @@ class Config:
         if "keyword" not in config:
             raise KeyError("配置文件缺少必需字段: keyword")
 
-        return Config(config.get('server_url'),
-                      config.get('keyword'),
-                      config['users'],
-                      config['city'],
-                      config['date'],
-                      config['price'],
-                      config['price_index'],
-                      config['if_commit_order'],
-                      config.get('probe_only', False),
-                      config.get('device_name', 'Android'),
-                      config.get('udid'),
-                      config.get('platform_version'),
-                      config.get('app_package', 'cn.damai'),
-                      config.get('app_activity', '.launcher.splash.SplashMainActivity'),
-                      config.get('sell_start_time'),
-                      config.get('countdown_lead_ms', 3000),
-                      config.get('wait_cta_ready_timeout_ms', 0),
-                      config.get('fast_retry_count', 8),
-                      config.get('fast_retry_interval_ms', 120),
-                      config.get('rush_mode', False),
-                      config.get('auto_navigate', True),
-                      config.get('target_title'),
-                      config.get('target_venue'),
-                      config.get('serial'),
-                      driver_backend)
+        return Config(
+            keyword=config.get('keyword'),
+            users=config['users'],
+            city=config['city'],
+            date=config['date'],
+            price=config['price'],
+            price_index=config['price_index'],
+            if_commit_order=config['if_commit_order'],
+            probe_only=config.get('probe_only', False),
+            device_name=config.get('device_name', 'Android'),
+            udid=config.get('udid'),
+            platform_version=config.get('platform_version'),
+            app_package=config.get('app_package', 'cn.damai'),
+            app_activity=config.get('app_activity', '.launcher.splash.SplashMainActivity'),
+            sell_start_time=config.get('sell_start_time'),
+            countdown_lead_ms=config.get('countdown_lead_ms', 3000),
+            wait_cta_ready_timeout_ms=config.get('wait_cta_ready_timeout_ms', 0),
+            fast_retry_count=config.get('fast_retry_count', 8),
+            fast_retry_interval_ms=config.get('fast_retry_interval_ms', 120),
+            rush_mode=config.get('rush_mode', False),
+            auto_navigate=config.get('auto_navigate', True),
+            target_title=config.get('target_title'),
+            target_venue=config.get('target_venue'),
+            serial=config.get('serial'),
+            driver_backend=driver_backend,
+            server_url=config.get('server_url'),
+        )
