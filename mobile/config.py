@@ -120,7 +120,7 @@ class Config:
                  wait_cta_ready_timeout_ms=0,
                  fast_retry_count=8, fast_retry_interval_ms=120,
                  rush_mode=False,
-                 item_url=None, item_id=None, auto_navigate=True,
+                 auto_navigate=True,
                  target_title=None, target_venue=None,
                  serial=None, driver_backend="u2"):
         if driver_backend not in {"u2", "appium"}:
@@ -137,11 +137,8 @@ class Config:
         if not isinstance(price_index, int) or isinstance(price_index, bool) or price_index < 0:
             raise ValueError(f"price_index 必须是非负整数，实际值: {price_index!r}")
 
-        has_item_reference = item_url is not None or item_id is not None
-        if keyword is not None and (not isinstance(keyword, str) or len(keyword.strip()) == 0):
-            raise ValueError(f"keyword 必须是非空字符串或 null，实际值: {keyword!r}")
-        if keyword is None and not has_item_reference:
-            raise ValueError("keyword 不能为空；如果不提供 keyword，至少需要提供 item_url 或 item_id")
+        if keyword is None or not isinstance(keyword, str) or len(keyword.strip()) == 0:
+            raise ValueError(f"keyword 不能为空，必须是非空字符串，实际值: {keyword!r}")
 
         if not isinstance(if_commit_order, bool):
             raise ValueError(f"if_commit_order 必须是布尔值，实际值: {if_commit_order!r}")
@@ -166,12 +163,6 @@ class Config:
 
         if not isinstance(app_activity, str) or len(app_activity.strip()) == 0:
             raise ValueError(f"app_activity 必须是非空字符串，实际值: {app_activity!r}")
-
-        if item_url is not None:
-            validate_url(item_url, "item_url")
-
-        if item_id is not None and (not isinstance(item_id, str) or not item_id.strip().isdigit()):
-            raise ValueError(f"item_id 必须是纯数字字符串或 null，实际值: {item_id!r}")
 
         if not isinstance(auto_navigate, bool):
             raise ValueError(f"auto_navigate 必须是布尔值，实际值: {auto_navigate!r}")
@@ -213,7 +204,7 @@ class Config:
             raise ValueError(f"rush_mode 必须是布尔值，实际值: {rush_mode!r}")
 
         self.server_url = server_url
-        self.keyword = keyword.strip() if isinstance(keyword, str) else None
+        self.keyword = keyword.strip()
         self.users = users
         self.city = city
         self.date = date
@@ -232,8 +223,6 @@ class Config:
         self.fast_retry_count = fast_retry_count
         self.fast_retry_interval_ms = fast_retry_interval_ms
         self.rush_mode = rush_mode
-        self.item_url = item_url
-        self.item_id = item_id
         self.auto_navigate = auto_navigate
         self.target_title = target_title.strip() if isinstance(target_title, str) else None
         self.target_venue = target_venue.strip() if isinstance(target_venue, str) else None
@@ -251,8 +240,6 @@ class Config:
             "platform_version": self.platform_version,
             "app_package": self.app_package,
             "app_activity": self.app_activity,
-            "item_url": self.item_url,
-            "item_id": self.item_id,
             "keyword": self.keyword,
             "target_title": self.target_title,
             "target_venue": self.target_venue,
@@ -284,8 +271,8 @@ class Config:
         if missing:
             raise KeyError(f"配置文件缺少必需字段: {', '.join(missing)}")
 
-        if "keyword" not in config and "item_url" not in config and "item_id" not in config:
-            raise KeyError("配置文件缺少必需字段: keyword 或 item_url 或 item_id")
+        if "keyword" not in config:
+            raise KeyError("配置文件缺少必需字段: keyword")
 
         return Config(config.get('server_url'),
                       config.get('keyword'),
@@ -307,8 +294,6 @@ class Config:
                       config.get('fast_retry_count', 8),
                       config.get('fast_retry_interval_ms', 120),
                       config.get('rush_mode', False),
-                      config.get('item_url'),
-                      config.get('item_id'),
                       config.get('auto_navigate', True),
                       config.get('target_title'),
                       config.get('target_venue'),

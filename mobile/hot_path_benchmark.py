@@ -109,8 +109,6 @@ def build_benchmark_config(base_config: Config, args) -> Config:
         config_data["date"] = args.date
 
     config_data.update({
-        "item_url": None,
-        "item_id": None,
         "target_title": None,
         "target_venue": None,
         "auto_navigate": False,

@@ -567,8 +567,6 @@ def build_updated_config(base_config: dict, intent, discovery: dict, date_text: 
     venue = inferred_venue or candidate.get("venue")
     config_data = dict(base_config)
     config_data.update({
-        "item_url": None,
-        "item_id": None,
         "keyword": discovery["used_keyword"],
         "target_title": title if title and title != "未识别" else None,
         "target_venue": venue if venue and venue != "未识别" else None,
@@ -634,8 +632,6 @@ def main(argv=None):
             "keyword": intent.search_keyword,
             "target_title": None,
             "target_venue": None,
-            "item_url": None,
-            "item_id": None,
             "if_commit_order": False,
             "probe_only": True,
             "city": intent.city or base_config.city,

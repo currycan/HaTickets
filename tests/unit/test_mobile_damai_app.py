@@ -175,40 +175,6 @@ class TestInitialization:
         assert capabilities["appPackage"] == "cn.damai"
         assert capabilities["appActivity"] == ".launcher.splash.SplashMainActivity"
 
-    def test_init_resolves_item_url_and_fills_keyword(self):
-        mock_driver = Mock()
-        mock_driver.update_settings = Mock()
-
-        mock_config = Config(
-            server_url="http://127.0.0.1:4723",
-            device_name="Android",
-            udid=None,
-            platform_version=None,
-            app_package="cn.damai",
-            app_activity=".launcher.splash.SplashMainActivity",
-            keyword=None,
-            item_url="https://m.damai.cn/shows/item.html?itemId=1016133935724",
-            users=["UserA"],
-            city="北京",
-            date="04.06",
-            price="380元",
-            price_index=0,
-            if_commit_order=False,
-            probe_only=True,
-            driver_backend="appium",
-        )
-        item_detail = _make_item_detail()
-
-        with patch("mobile.damai_app.Config.load_config", return_value=mock_config), \
-             patch("mobile.damai_app.DamaiItemResolver.fetch_item_detail", return_value=item_detail), \
-             patch("mobile.damai_app.webdriver.Remote", return_value=mock_driver), \
-             patch("mobile.damai_app.AppiumOptions"):
-            bot = DamaiBot()
-
-        assert bot.item_detail == item_detail
-        assert bot.config.item_id == "1016133935724"
-        assert bot.config.keyword == item_detail.search_keyword
-
     def test_setup_driver_raises_clear_error_for_missing_udid(self):
         cfg = Config(
             server_url="http://127.0.0.1:4723",
@@ -3162,86 +3128,6 @@ class TestWaitForPageState:
              patch("mobile.damai_app.time.sleep"):
             result = bot.wait_for_page_state({"detail_page"})
         assert result["state"] == "detail_page"
-
-
-# ---------------------------------------------------------------------------
-# _prepare_runtime_config — error handling and city mismatch branches
-# ---------------------------------------------------------------------------
-
-class TestPrepareRuntimeConfig:
-    def _make_config_with_item_url(self, keyword="张杰 演唱会", city="北京"):
-        return Config(
-            server_url="http://127.0.0.1:4723",
-            device_name="Android",
-            udid=None,
-            platform_version=None,
-            app_package="cn.damai",
-            app_activity=".launcher.splash.SplashMainActivity",
-            keyword=keyword,
-            users=["UserA"],
-            city=city,
-            date="04.06",
-            price="580元",
-            price_index=0,
-            if_commit_order=False,
-            probe_only=True,
-            driver_backend="appium",
-            item_url="https://m.damai.cn/damai/detail/item.html?itemId=1016133935724",
-            item_id=None,
-        )
-
-    def test_resolve_error_with_keyword_logs_warning_and_continues(self, caplog):
-        """If DamaiItemResolveError and keyword exists, log warning and return."""
-        from mobile.item_resolver import DamaiItemResolveError
-        cfg = self._make_config_with_item_url(keyword="张杰 演唱会")
-        with patch("mobile.damai_app.DamaiItemResolver") as mock_resolver_cls, \
-             caplog.at_level("WARNING", logger="mobile.damai_app"):
-            mock_resolver_cls.return_value.fetch_item_detail.side_effect = DamaiItemResolveError("网络错误")
-            bot = DamaiBot(config=cfg, setup_driver=False)
-        assert bot.item_detail is None
-        assert "继续使用现有 keyword" in caplog.text
-
-    def test_resolve_error_without_keyword_raises(self):
-        """If DamaiItemResolveError and no keyword (None), re-raise."""
-        from mobile.item_resolver import DamaiItemResolveError
-        cfg = self._make_config_with_item_url(keyword="张杰 演唱会")
-        # Directly set keyword to None after construction to bypass validation
-        cfg.keyword = None
-        with patch("mobile.damai_app.DamaiItemResolver") as mock_resolver_cls:
-            mock_resolver_cls.return_value.fetch_item_detail.side_effect = DamaiItemResolveError("网络错误")
-            with pytest.raises(DamaiItemResolveError):
-                DamaiBot(config=cfg, setup_driver=False)
-
-    def test_city_mismatch_raises_value_error(self):
-        """If fetched city doesn't match config city, raise ValueError."""
-        item_detail = _make_item_detail()  # city_name="北京市"
-        cfg = self._make_config_with_item_url(city="上海")  # mismatch!
-        with patch("mobile.damai_app.DamaiItemResolver") as mock_resolver_cls:
-            mock_resolver_cls.return_value.fetch_item_detail.return_value = item_detail
-            with pytest.raises(ValueError, match="不一致"):
-                DamaiBot(config=cfg, setup_driver=False)
-
-    def test_keyword_auto_populated_from_item_detail(self):
-        """When keyword is None and item resolves OK, keyword is set from item_detail."""
-        item_detail_with_keyword = DamaiItemDetail(
-            item_id="1016133935724",
-            item_name="张杰演唱会",
-            item_name_display="张杰演唱会",
-            city_name="北京市",
-            venue_name="鸟巢",
-            venue_city_name="北京市",
-            show_time="2026.04.06",
-            price_range="580-1280",
-            raw_data={},
-        )
-        cfg = self._make_config_with_item_url(city="北京", keyword="张杰 演唱会")
-        # Directly set keyword to None after construction
-        cfg.keyword = None
-        with patch("mobile.damai_app.DamaiItemResolver") as mock_resolver_cls:
-            mock_resolver_cls.return_value.fetch_item_detail.return_value = item_detail_with_keyword
-            bot = DamaiBot(config=cfg, setup_driver=False)
-        assert bot.item_detail is not None
-        assert bot.config.keyword is not None  # auto-populated
 
 
 # ---------------------------------------------------------------------------

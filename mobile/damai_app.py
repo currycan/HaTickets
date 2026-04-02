@@ -31,7 +31,6 @@ try:
         DamaiItemResolver,
         DamaiItemResolveError,
         city_keyword,
-        extract_item_id,
         normalize_text,
     )
 except ImportError:
@@ -39,7 +38,6 @@ except ImportError:
         DamaiItemResolver,
         DamaiItemResolveError,
         city_keyword,
-        extract_item_id,
         normalize_text,
     )
 
@@ -217,41 +215,8 @@ class DamaiBot(UIPrimitives):
                 )
 
     def _prepare_runtime_config(self):
-        """Resolve item metadata before creating the Appium session."""
-        if self.config.item_url and not self.config.item_id:
-            self.config.item_id = extract_item_id(self.config.item_url)
-
-        if not (self.config.item_url or self.config.item_id):
-            return
-
-        try:
-            self.item_detail = DamaiItemResolver().fetch_item_detail(
-                item_url=self.config.item_url,
-                item_id=self.config.item_id,
-            )
-        except (DamaiItemResolveError, ValueError) as exc:
-            if self.config.keyword:
-                logger.warning(f"解析 item_url/item_id 失败，继续使用现有 keyword: {exc}")
-                return
-            raise
-
-        self.config.item_id = self.item_detail.item_id
-        if not self.config.keyword:
-            self.config.keyword = self.item_detail.search_keyword
-            logger.info(f"已根据 item 链接自动生成搜索关键词: {self.config.keyword}")
-
-        resolved_city = self.item_detail.city_keyword or city_keyword(self.item_detail.venue_city_name)
-        config_city = city_keyword(self.config.city)
-        if resolved_city and config_city and normalize_text(resolved_city) != normalize_text(config_city):
-            raise ValueError(
-                f"配置 city={self.config.city!r} 与 item_url 指向城市={self.item_detail.city_name!r} 不一致"
-            )
-
-        logger.info(
-            f"已解析 itemId={self.item_detail.item_id}，演出={self.item_detail.item_name}，"
-            f"城市={self.item_detail.city_name}，时间={self.item_detail.show_time}，"
-            f"票价范围={self.item_detail.price_range}"
-        )
+        """Pre-flight config checks before creating the driver session."""
+        pass
 
     def _build_capabilities(self):
         """根据配置构造 Appium capabilities。"""

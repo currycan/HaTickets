@@ -171,21 +171,9 @@ class TestMobileConfigValidation:
         with pytest.raises(ValueError, match="keyword"):
             Config(**_make(keyword=123))
 
-    def test_keyword_can_be_none_when_item_url_is_provided(self):
-        cfg = Config(**_make(
-            keyword=None,
-            item_url="https://m.damai.cn/shows/item.html?itemId=1016133935724",
-        ))
-        assert cfg.keyword is None
-        assert cfg.item_url.endswith("1016133935724")
-
-    def test_keyword_none_without_item_reference_raises(self):
+    def test_keyword_none_raises(self):
         with pytest.raises(ValueError, match="keyword 不能为空"):
             Config(**_make(keyword=None))
-
-    def test_item_id_invalid_raises(self):
-        with pytest.raises(ValueError, match="item_id"):
-            Config(**_make(item_id="abc123"))
 
     def test_target_title_empty_raises(self):
         with pytest.raises(ValueError, match="target_title"):
@@ -415,7 +403,7 @@ class TestMobileConfigLoadConfig:
         with pytest.raises(KeyError, match="缺少必需字段"):
             Config.load_config()
 
-    def test_load_config_requires_keyword_or_item_reference(self, tmp_path, monkeypatch):
+    def test_load_config_requires_keyword(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         config_data = {
             "server_url": "http://127.0.0.1:4723",
@@ -428,7 +416,7 @@ class TestMobileConfigLoadConfig:
         }
         (tmp_path / "config.jsonc").write_text(json.dumps(config_data), encoding="utf-8")
 
-        with pytest.raises(KeyError, match="keyword 或 item_url 或 item_id"):
+        with pytest.raises(KeyError, match="keyword"):
             Config.load_config()
 
     def test_load_config_jsonc_with_comments(self, tmp_path, monkeypatch):
@@ -454,32 +442,6 @@ class TestMobileConfigLoadConfig:
         assert cfg.platform_version is None
         assert cfg.price_index == 0
         assert cfg.probe_only is True
-
-    def test_load_config_accepts_item_url_without_keyword(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        config_data = {
-            "server_url": "http://127.0.0.1:4723",
-            "device_name": "Android",
-            "udid": "device-1",
-            "platform_version": "16",
-            "app_package": "cn.damai",
-            "app_activity": ".launcher.splash.SplashMainActivity",
-            "item_url": "https://m.damai.cn/shows/item.html?itemId=1016133935724",
-            "users": ["A"],
-            "city": "北京",
-            "date": "04.06",
-            "price": "380元",
-            "price_index": 0,
-            "if_commit_order": False,
-            "probe_only": True,
-            "auto_navigate": True,
-        }
-        (tmp_path / "config.jsonc").write_text(json.dumps(config_data), encoding="utf-8")
-
-        cfg = Config.load_config()
-        assert cfg.keyword is None
-        assert cfg.item_url.endswith("1016133935724")
-        assert cfg.auto_navigate is True
 
     def test_load_and_save_config_dict_round_trip(self, tmp_path):
         path = tmp_path / "config.jsonc"
@@ -668,18 +630,18 @@ class TestMobileConfigLoadConfig:
 # ---------------------------------------------------------------------------
 
 class TestUncoveredBranches:
-    def test_keyword_none_with_no_item_ref_raises(self):
-        """keyword=None without item_url or item_id raises ValueError."""
+    def test_keyword_none_raises(self):
+        """keyword=None raises ValueError."""
         with pytest.raises(ValueError, match="keyword"):
-            Config(**_make(keyword=None, item_url=None, item_id=None))
+            Config(**_make(keyword=None))
 
     def test_sell_start_time_non_string_raises(self):
         """sell_start_time as int (not str) raises ValueError."""
         with pytest.raises(ValueError, match="sell_start_time"):
             Config(**_make(sell_start_time=12345))
 
-    def test_load_config_missing_keyword_and_item_raises(self, tmp_path, monkeypatch):
-        """Config.load_config raises KeyError when keyword/item_url/item_id all absent."""
+    def test_load_config_missing_keyword_raises(self, tmp_path, monkeypatch):
+        """Config.load_config raises KeyError when keyword is absent."""
         monkeypatch.chdir(tmp_path)
         source = {
             "server_url": "http://127.0.0.1:4723",

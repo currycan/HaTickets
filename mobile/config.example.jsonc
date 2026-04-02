@@ -2,10 +2,8 @@
   "udid": "你的 adb devices 序列号",
   "app_package": "cn.damai",
   "app_activity": ".launcher.splash.SplashMainActivity",
-  // 填写大麦详情页链接，脚本会自动提取 itemId 并尽量自动生成搜索关键词
-  "item_url": "https://m.damai.cn/shows/item.html?from=def&itemId=1016133935724",
-  // 如果 item_url 解析失败，可保留 keyword 作为兜底；否则可写 null
-  "keyword": null,
+  // 搜索关键词（必填），用于在大麦 App 搜索目标演出
+  "keyword": "张杰 演唱会",
   // 如果是通过自然语言查询后写入的配置，这里会落精确标题/场馆，帮助自动搜索更稳定
   "target_title": null,
   "target_venue": null,

@@ -102,8 +102,6 @@ def test_build_updated_config_for_probe_mode():
 
     updated = prompt_runner.build_updated_config(base_config, intent, discovery, "04.06", selected_price, "probe")
 
-    assert updated["item_url"] is None
-    assert updated["item_id"] is None
     assert updated["keyword"] == "张杰 演唱会"
     assert updated["target_title"] == "【北京】2026张杰未·LIVE—「开往1982」演唱会-北京站"
     assert updated["target_venue"] == "国家体育场-鸟巢"

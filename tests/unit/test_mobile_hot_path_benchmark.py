@@ -39,8 +39,6 @@ def _make_config():
         probe_only=True,
         auto_navigate=True,
         rush_mode=False,
-        item_url="https://example.com/item",
-        item_id="123456",
         target_title="旧标题",
         target_venue="旧场馆",
     )
@@ -166,8 +164,6 @@ def test_build_benchmark_config_forces_safe_manual_mode():
     assert cfg.probe_only is False
     assert cfg.auto_navigate is False
     assert cfg.rush_mode is True
-    assert cfg.item_url is None
-    assert cfg.item_id is None
     assert cfg.target_title is None
     assert cfg.target_venue is None
     assert cfg.users == ["张志涛"]
