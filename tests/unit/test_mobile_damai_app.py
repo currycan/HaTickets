@@ -2693,7 +2693,7 @@ class TestXmlHierarchyHelpers:
     def test_get_visible_price_options_dispatches_to_xml_path_for_u2(self):
         bot = _make_u2_bot()
         root = ET.fromstring(_SIMPLE_HIERARCHY)
-        with patch.object(bot, "_get_visible_price_options_from_xml", return_value=[]) as xml_fn:
+        with patch.object(bot._price_sel, "_get_visible_price_options_from_xml", return_value=[]) as xml_fn:
             bot.get_visible_price_options(xml_root=root)
         xml_fn.assert_called_once_with(root, allow_ocr=True)
 

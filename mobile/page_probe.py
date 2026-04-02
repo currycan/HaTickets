@@ -56,9 +56,14 @@ class PageProbe:
     def __init__(self, device: Any, config: Any = None, cache_ttl_s: float = 0.5) -> None:
         self._device = device
         self._config = config
+        self._bot = None
         self._cache_ttl_s = cache_ttl_s
         self._cached_result: Optional[Dict[str, Any]] = None
         self._cached_at: float = 0.0
+
+    def set_bot(self, bot) -> None:
+        """Set DamaiBot reference for delegation (e.g. reservation_mode check)."""
+        self._bot = bot
 
     # ------------------------------------------------------------------
     # Public API
@@ -143,7 +148,9 @@ class PageProbe:
             return _make_result(state="detail_page", purchase_button=purchase_bar)
 
         if "NcovSku" in activity:
-            return _make_result(state="sku_page", price_container=True, quantity_picker=True)
+            reservation = self._check_reservation_mode()
+            return _make_result(state="sku_page", price_container=True, quantity_picker=True,
+                                reservation_mode=reservation)
 
         if "MainActivity" in activity:
             return _make_result(state="homepage")
@@ -177,10 +184,12 @@ class PageProbe:
         sku_layout = self._exists_by_resource_id("cn.damai:id/layout_sku")
         sku_container = self._exists_by_resource_id("cn.damai:id/sku_contanier")
         if sku_layout or sku_container:
+            reservation = self._check_reservation_mode()
             return _make_result(
                 state="sku_page",
                 quantity_picker=True,
                 pending_order_dialog=pending,
+                reservation_mode=reservation,
             )
 
         # Check detail page (fallback)
@@ -240,3 +249,12 @@ class PageProbe:
             return el.exists
         except Exception:
             return False
+
+    def _check_reservation_mode(self) -> bool:
+        """Check if the SKU page is in reservation (not purchase) mode."""
+        if self._bot is not None:
+            try:
+                return self._bot.is_reservation_sku_mode()
+            except Exception:
+                pass
+        return False

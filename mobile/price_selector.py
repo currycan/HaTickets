@@ -6,7 +6,13 @@ providing a clean interface for FastPipeline and other consumers.
 
 from __future__ import annotations
 
+import concurrent.futures
+import os
 import re
+import shutil
+import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
 from typing import TYPE_CHECKING, Optional, Tuple
 
 from appium.webdriver.common.appiumby import AppiumBy
@@ -26,6 +32,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _PRICE_UNAVAILABLE_TAGS = {"无票", "缺货", "缺货登记", "售罄", "已售罄", "不可选", "暂不可售"}
+_MAGICK_BIN = shutil.which("magick")
+_TESSERACT_BIN = shutil.which("tesseract")
 
 
 class PriceSelector:
@@ -420,3 +428,256 @@ class PriceSelector:
             except Exception as backup_error:
                 logger.warning(f"备用票价选择也失败: {backup_error}")
                 return False
+
+    # ------------------------------------------------------------------
+    # OCR helpers (migrated from DamaiBot)
+    # ------------------------------------------------------------------
+
+    def _normalize_ocr_price_text(self, ocr_output):
+        """Extract the leading ticket price from noisy OCR output."""
+        normalized_text = ocr_output if isinstance(ocr_output, str) else ""
+        digits = "".join(re.findall(r"\d", normalized_text))
+        if len(digits) >= 4:
+            leading_four = int(digits[:4])
+            if 1000 <= leading_four <= 1999:
+                return f"{leading_four}元"
+        if len(digits) >= 3:
+            leading_three = int(digits[:3])
+            if 100 <= leading_three <= 999:
+                return f"{leading_three}元"
+        return ""
+
+    def _ocr_price_text_from_card(self, screenshot_path, rect):
+        """OCR the price number from a price-card crop as a last-resort fallback."""
+        if not (_MAGICK_BIN and _TESSERACT_BIN and screenshot_path and rect):
+            return ""
+
+        crop_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+                crop_path = tmp_file.name
+
+            subprocess.run(
+                [
+                    _MAGICK_BIN,
+                    screenshot_path,
+                    "-crop", f"{rect['width']}x{rect['height']}+{rect['x']}+{rect['y']}",
+                    "-resize", "300%",
+                    crop_path,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            result = subprocess.run(
+                [_TESSERACT_BIN, crop_path, "stdout", "-l", "eng+snum", "--psm", "6"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return self._normalize_ocr_price_text(result.stdout)
+        except Exception:
+            return ""
+        finally:
+            if crop_path and os.path.exists(crop_path):
+                try:
+                    os.unlink(crop_path)
+                except OSError:
+                    pass
+
+    # ------------------------------------------------------------------
+    # Visible price options (migrated from DamaiBot)
+    # ------------------------------------------------------------------
+
+    def get_visible_price_options(self, allow_ocr=True, xml_root=None):
+        """Return visible price options from the current sku page."""
+        bot = self._bot
+
+        # Fast path: work entirely from a pre-parsed hierarchy XML (no ADB round-trips).
+        if xml_root is not None and bot._using_u2():
+            return self._get_visible_price_options_from_xml(xml_root, allow_ocr=allow_ocr)
+
+        try:
+            price_container = bot._find(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout")
+        except Exception:
+            return []
+
+        options = []
+        try:
+            cards = bot._container_find_elements(price_container, By.CLASS_NAME, "android.widget.FrameLayout")
+        except Exception:
+            cards = []
+
+        cards = [card for card in cards if bot._is_clickable(card)]
+
+        # Dump hierarchy once so each _collect_descendant_texts reuses the same tree.
+        cached_xml_root = None
+        if bot._using_u2() and cards:
+            try:
+                cached_xml_root = ET.fromstring(bot.d.dump_hierarchy())
+            except Exception:
+                pass
+
+        screenshot_path = None
+        if allow_ocr and cards and _MAGICK_BIN and _TESSERACT_BIN:
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+                    screenshot_path = tmp_file.name
+                if not bot._using_u2():
+                    bot.driver.get_screenshot_as_file(screenshot_path)
+                else:
+                    bot.d.screenshot(screenshot_path)
+            except Exception:
+                screenshot_path = None
+
+        # First pass: collect texts from hierarchy (no ADB round-trips per card).
+        card_data = []
+        ocr_tasks = []  # (card_index, rect) pairs that need OCR
+        for index, card in enumerate(cards):
+            texts = bot._collect_descendant_texts(card, xml_root=cached_xml_root)
+            text = self._price_option_text_from_descendants(texts)
+            source = "ui" if text else ""
+            tag = ""
+            for candidate in texts:
+                if candidate in {"可预约", "预售", "无票", "已预约", "缺货", "售罄", "已售罄", "可选"}:
+                    tag = candidate
+                    break
+            card_data.append({"index": index, "text": text, "tag": tag, "raw_texts": texts, "source": source})
+            if not text and screenshot_path:
+                ocr_tasks.append((index, bot._element_rect(card)))
+
+        # Second pass: OCR in parallel for all cards that need it.
+        ocr_results: dict[int, str] = {}
+        if ocr_tasks and screenshot_path:
+            def _run_ocr(args):
+                idx, rect = args
+                return idx, self._ocr_price_text_from_card(screenshot_path, rect)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(ocr_tasks), 4)) as executor:
+                for idx, ocr_text in executor.map(_run_ocr, ocr_tasks):
+                    if ocr_text:
+                        ocr_results[idx] = ocr_text
+
+        for entry in card_data:
+            index = entry["index"]
+            if not entry["text"] and index in ocr_results:
+                entry["text"] = ocr_results[index]
+                entry["source"] = "ocr"
+            if not entry["text"] and not entry["tag"]:
+                continue
+            options.append({
+                "index": index,
+                "text": entry["text"],
+                "tag": entry["tag"],
+                "raw_texts": entry["raw_texts"],
+                "source": entry["source"] or "ui",
+            })
+
+        if screenshot_path and os.path.exists(screenshot_path):
+            try:
+                os.unlink(screenshot_path)
+            except OSError:
+                pass
+
+        return options
+
+    def _get_visible_price_options_from_xml(self, xml_root, allow_ocr=True):
+        """Pure-XML price option scan: zero ADB round-trips except for screenshot."""
+        bot = self._bot
+
+        # Locate the price container node by resource-id.
+        price_container_node = None
+        for node in xml_root.iter("node"):
+            if node.get("resource-id") == "cn.damai:id/project_detail_perform_price_flowlayout":
+                price_container_node = node
+                break
+        if price_container_node is None:
+            return []
+
+        container_bounds = bot._parse_bounds(price_container_node.get("bounds", ""))
+        if not container_bounds:
+            return []
+
+        # Direct children that are clickable FrameLayouts = price cards.
+        card_nodes = [
+            child for child in price_container_node
+            if child.get("class") == "android.widget.FrameLayout"
+            and child.get("clickable") == "true"
+        ]
+        if not card_nodes:
+            return []
+
+        # Screenshot for OCR (one shot).
+        screenshot_path = None
+        if allow_ocr and _MAGICK_BIN and _TESSERACT_BIN:
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+                    screenshot_path = tmp_file.name
+                bot.d.screenshot(screenshot_path)
+            except Exception:
+                screenshot_path = None
+
+        _UNAVAILABLE = {"可预约", "预售", "无票", "已预约", "缺货", "售罄", "已售罄", "可选"}
+
+        card_data = []
+        ocr_tasks = []
+        for index, card_node in enumerate(card_nodes):
+            # Collect all descendant texts directly from XML nodes.
+            texts: list[str] = []
+            seen: set[str] = set()
+            for desc in card_node.iter("node"):
+                text = (desc.get("text") or "").strip()
+                if text and text not in seen:
+                    texts.append(text)
+                    seen.add(text)
+
+            price_text = self._price_option_text_from_descendants(texts)
+            source = "ui" if price_text else ""
+            tag = next((c for c in texts if c in _UNAVAILABLE), "")
+
+            card_bounds = bot._parse_bounds(card_node.get("bounds", ""))
+            if not price_text and screenshot_path and card_bounds:
+                left, top, right, bottom = card_bounds
+                rect = {"x": left, "y": top, "width": right - left, "height": bottom - top}
+                ocr_tasks.append((index, rect))
+
+            card_data.append({
+                "index": index, "text": price_text, "tag": tag,
+                "raw_texts": texts, "source": source,
+            })
+
+        # Parallel OCR for cards whose price text wasn't in the UI tree.
+        ocr_results: dict[int, str] = {}
+        if ocr_tasks and screenshot_path:
+            def _run_ocr(args):
+                idx, rect = args
+                return idx, self._ocr_price_text_from_card(screenshot_path, rect)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(ocr_tasks), 4)) as executor:
+                for idx, ocr_text in executor.map(_run_ocr, ocr_tasks):
+                    if ocr_text:
+                        ocr_results[idx] = ocr_text
+
+        options = []
+        for entry in card_data:
+            idx = entry["index"]
+            if not entry["text"] and idx in ocr_results:
+                entry["text"] = ocr_results[idx]
+                entry["source"] = "ocr"
+            if not entry["text"] and not entry["tag"]:
+                continue
+            options.append({
+                "index": idx,
+                "text": entry["text"],
+                "tag": entry["tag"],
+                "raw_texts": entry["raw_texts"],
+                "source": entry["source"] or "ui",
+            })
+
+        if screenshot_path and os.path.exists(screenshot_path):
+            try:
+                os.unlink(screenshot_path)
+            except OSError:
+                pass
+
+        return options
