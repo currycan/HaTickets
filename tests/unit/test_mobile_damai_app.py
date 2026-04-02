@@ -2897,38 +2897,44 @@ class TestPriceSelection:
                 return False
             return True
 
-        with caplog.at_level("INFO", logger="mobile.damai_app"), \
-             patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "check_session_valid", return_value=True), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "detail_page",
-                 "purchase_button": True,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "wait_for_sale_start"), \
-             patch.object(bot, "select_performance_date"), \
-             patch.object(bot, "_enter_purchase_flow_from_detail_page", return_value={
-                 "state": "sku_page",
-                 "price_container": True,
-                 "reservation_mode": False,
-             }), \
-             patch.object(bot, "_wait_for_submit_ready", return_value=True), \
-             patch.object(bot, "smart_wait_and_click", return_value=True), \
-             patch.object(bot, "ultra_fast_click", side_effect=ultra_fast_click_side_effect), \
-             patch.object(bot, "ultra_batch_click"), \
-             patch.object(bot, "_submit_order_fast", return_value="success"), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 1.5]
-            # Mock price container for index-based fallback
-            mock_price_container = Mock()
-            mock_target = _make_mock_element()
-            mock_price_container.find_element.return_value = mock_target
-            bot.driver.find_element.return_value = mock_price_container
-            bot.driver.find_elements.return_value = []
+        import logging as _logging
+        _price_logger = _logging.getLogger("mobile.price_selector")
+        _price_logger.propagate = True
+        try:
+            with caplog.at_level("INFO"), \
+                 patch.object(bot, "dismiss_startup_popups"), \
+                 patch.object(bot, "check_session_valid", return_value=True), \
+                 patch.object(bot, "probe_current_page", return_value={
+                     "state": "detail_page",
+                     "purchase_button": True,
+                     "price_container": True,
+                     "quantity_picker": False,
+                     "submit_button": False,
+                 }), \
+                 patch.object(bot, "wait_for_sale_start"), \
+                 patch.object(bot, "select_performance_date"), \
+                 patch.object(bot, "_enter_purchase_flow_from_detail_page", return_value={
+                     "state": "sku_page",
+                     "price_container": True,
+                     "reservation_mode": False,
+                 }), \
+                 patch.object(bot, "_wait_for_submit_ready", return_value=True), \
+                 patch.object(bot, "smart_wait_and_click", return_value=True), \
+                 patch.object(bot, "ultra_fast_click", side_effect=ultra_fast_click_side_effect), \
+                 patch.object(bot, "ultra_batch_click"), \
+                 patch.object(bot, "_submit_order_fast", return_value="success"), \
+                 patch("mobile.damai_app.time") as mock_time:
+                mock_time.time.side_effect = [0.0, 1.5]
+                # Mock price container for index-based fallback
+                mock_price_container = Mock()
+                mock_target = _make_mock_element()
+                mock_price_container.find_element.return_value = mock_target
+                bot.driver.find_element.return_value = mock_price_container
+                bot.driver.find_elements.return_value = []
 
-            result = bot.run_ticket_grabbing()
+                result = bot.run_ticket_grabbing()
+        finally:
+            _price_logger.propagate = False
 
         assert result is True
         assert "通过配置索引直接选择票价" in caplog.text

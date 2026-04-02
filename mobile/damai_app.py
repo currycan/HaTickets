@@ -108,19 +108,26 @@ class DamaiBot(UIPrimitives):
         if setup_driver:
             self._setup_driver()
 
-        # Sub-modules for optimized operations
+        # Sub-modules that work with any backend (Appium or u2)
+        _device = self.d or self.driver
+        self._attendee_sel = AttendeeSelector(_device, self.config)
+        self._attendee_sel.set_bot(self)
+        self._price_sel = PriceSelector(_device, self.config, probe=None)
+        self._price_sel.set_bot(self)
+        self._navigator = EventNavigator(_device, self.config, probe=None)
+        self._navigator.set_bot(self)
+
+        # Sub-modules for u2-optimized operations
         if self.d is not None:
             self._page_probe = PageProbe(self.d, self.config)
             self._guard = BuyButtonGuard(self.d)
             self._pipeline = FastPipeline(self.d, self.config, self._page_probe, self._guard)
             # Share coordinate cache with pipeline
             self._pipeline._cached_coords = self._cached_hot_path_coords
-            self._navigator = EventNavigator(self.d, self.config, self._page_probe)
-            self._navigator.set_bot(self)  # circular ref resolved via setter
+            # Update sub-modules with real probe now that it exists
+            self._navigator._probe = self._page_probe
             self._recovery = RecoveryHelper(self.d, self._page_probe, self._navigator)
-            self._price_sel = PriceSelector(self.d, self.config, self._page_probe)
-            self._price_sel.set_bot(self)
-            self._attendee_sel = AttendeeSelector(self.d, self.config)
+            self._price_sel._probe = self._page_probe
 
     def _set_terminal_failure(self, reason):
         """Mark the current failure as non-retriable."""
@@ -470,360 +477,65 @@ class DamaiBot(UIPrimitives):
         return False
 
     def _attendee_required_count_on_confirm_page(self):
-        """Infer how many attendees must be selected on the confirm page."""
-        hint_text = self._safe_element_text(
-            self.driver,
-            AppiumBy.ANDROID_UIAUTOMATOR,
-            'new UiSelector().textContains("仅需选择")',
-        )
-        match = re.search(r"仅需选择\s*(\d+)\s*位", hint_text or "")
-        if match:
-            return max(1, int(match.group(1)))
+        if hasattr(self, '_attendee_sel'):
+            return self._attendee_sel._attendee_required_count_on_confirm_page()
+        logger.warning("AttendeeSelector 未初始化")
         return max(1, len(self.config.users or []))
 
     def _attendee_checkbox_elements(self):
-        try:
-            return self._find_all(By.ID, "cn.damai:id/checkbox")
-        except Exception:
-            return []
+        if hasattr(self, '_attendee_sel'):
+            return self._attendee_sel._attendee_checkbox_elements()
+        return []
 
     @staticmethod
     def _is_checkbox_selected(checkbox):
         return DamaiBot._is_checked(checkbox)
 
     def _attendee_selected_count(self, checkbox_elements=None, use_source_fallback=True):
-        """Count selected attendee checkboxes, with XML fallback for flaky checked attrs."""
-        elements = checkbox_elements if checkbox_elements is not None else self._attendee_checkbox_elements()
-        selected_count = sum(1 for checkbox in elements if self._is_checkbox_selected(checkbox))
-        if selected_count > 0:
-            return selected_count
-        if (self.config.rush_mode and not self.config.if_commit_order) and not use_source_fallback:
-            # 开发验证极速模式下避免 page_source 级别扫描带来的高延迟。
-            return selected_count
-
-        try:
-            if not self._using_u2():
-                source = self.driver.page_source or ""
-            else:
-                source = self.d.dump_hierarchy() or ""
-        except Exception:
-            return selected_count
-        if not isinstance(source, str):
-            return selected_count
-
-        states = re.findall(
-            r'resource-id="cn\.damai:id/checkbox"[^>]*checked="(true|false)"',
-            source,
-        )
-        if not states:
-            return selected_count
-        return sum(1 for state in states if state == "true")
+        if hasattr(self, '_attendee_sel'):
+            return self._attendee_sel._attendee_selected_count(checkbox_elements, use_source_fallback)
+        return 0
 
     def _click_attendee_checkbox(self, checkbox):
-        """Try multiple click paths and verify checkbox becomes selected."""
-        use_fallback = not (self.config.rush_mode and not self.config.if_commit_order)
-        before_selected = self._attendee_selected_count(use_source_fallback=use_fallback)
-        click_actions = [
-            lambda: self._click_element_center(checkbox, duration=35),
-            lambda: checkbox.click(),
-            lambda: self._burst_click_element_center(checkbox, count=2, interval_ms=30, duration=30),
-        ]
-
-        for action in click_actions:
-            try:
-                action()
-            except Exception:
-                continue
-            time.sleep(0.05)
-            if self._is_checkbox_selected(checkbox):
-                return True
-            if self._attendee_selected_count(use_source_fallback=use_fallback) > before_selected:
-                return True
+        if hasattr(self, '_attendee_sel'):
+            return self._attendee_sel._click_attendee_checkbox(checkbox)
         return False
 
     def _click_attendee_checkbox_fast(self, checkbox):
-        """Low-latency checkbox click path for rush-mode validation."""
-        click_actions = [
-            lambda: checkbox.click(),
-            lambda: self._click_element_center(checkbox, duration=28),
-        ]
-        for action in click_actions:
-            try:
-                action()
-                time.sleep(0.01)
-                return True
-            except Exception:
-                continue
+        if hasattr(self, '_attendee_sel'):
+            return self._attendee_sel._click_attendee_checkbox_fast(checkbox)
         return False
 
     def _select_attendee_checkbox_by_name(self, user_name):
-        checkbox_xpaths = [
-            (
-                f'//*[@resource-id="cn.damai:id/text_name" and normalize-space(@text)="{user_name}"]'
-                '/ancestor::*[.//*[@resource-id="cn.damai:id/checkbox"]][1]'
-                '//*[@resource-id="cn.damai:id/checkbox"]'
-            ),
-            (
-                f'//*[@resource-id="cn.damai:id/text_name" and contains(normalize-space(@text), "{user_name}")]'
-                '/ancestor::*[.//*[@resource-id="cn.damai:id/checkbox"]][1]'
-                '//*[@resource-id="cn.damai:id/checkbox"]'
-            ),
-        ]
-
-        for checkbox_xpath in checkbox_xpaths:
-            try:
-                checkboxes = self._find_all(By.XPATH, checkbox_xpath)
-            except Exception:
-                checkboxes = []
-
-            for checkbox in checkboxes:
-                if self._is_checkbox_selected(checkbox):
-                    return True
-                if self._click_attendee_checkbox(checkbox):
-                    return True
+        if hasattr(self, '_attendee_sel'):
+            return self._attendee_sel._select_attendee_checkbox_by_name(user_name)
         return False
 
     def _ensure_attendees_selected_on_confirm_page(self, require_attendee_section=False):
-        """Make sure required attendee checkboxes are selected before submit."""
-        required_count = max(1, len(self.config.users or []))
-
-        if self.config.rush_mode and not self.config.if_commit_order:
-            # 验证模式极速路径：
-            # 确认页每次都是新加载的，观演人初始状态均为未勾选。
-            # 热重试时用缓存坐标直接点击，完全跳过 XPath dump（省 ~0.1-0.2s）。
-            cached_coords = self._cached_hot_path_coords.get("attendee_checkboxes")
-            if cached_coords:
-                logger.info(f"检测到观演人未选择完成，尝试自动补选（已选 0/{required_count}）")
-                logger.info("开发验证极速路径：按勾选框顺序快速补选观演人")
-                for coords in cached_coords[:required_count]:
-                    self._click_coordinates(*coords)
-                return True
-
-            # 冷路径：XPath dump 获取 checkbox，顺便提取坐标并缓存。
-            checkbox_elements = self._attendee_checkbox_elements()
-            if not checkbox_elements:
-                return not require_attendee_section
-
-            # 从 XPathElement 的已缓存 XML 数据中提取坐标（无额外 HTTP 调用）。
-            _coords = []
-            for el in checkbox_elements:
-                try:
-                    bt = getattr(el, "bounds", None)
-                    if isinstance(bt, (list, tuple)) and len(bt) == 4:
-                        left, top, right, bottom = [int(v) for v in bt]
-                        _coords.append(((left + right) // 2, (top + bottom) // 2))
-                except Exception:
-                    pass
-            if _coords:
-                self._cached_hot_path_coords["attendee_checkboxes"] = _coords
-
-            selected_count = self._attendee_selected_count(checkbox_elements, use_source_fallback=False)
-            if selected_count >= required_count:
-                return True
-
-            logger.info(f"检测到观演人未选择完成，尝试自动补选（已选 {selected_count}/{required_count}）")
-            logger.info("开发验证极速路径：按勾选框顺序快速补选观演人")
-            clicked_count = 0
-            for checkbox in checkbox_elements[:required_count]:
-                if self._click_attendee_checkbox_fast(checkbox):
-                    clicked_count += 1
-            if clicked_count < required_count:
-                logger.warning(f"观演人选择不足（需要 {required_count} 位，当前 {clicked_count} 位）")
-                return False
-            return True
-
-        checkbox_elements = self._attendee_checkbox_elements()
-
-        if self.config.rush_mode:
-            # 极速模式（实际提交）：checkbox 存在即说明观演人区域可见，跳过额外的 UiSelector 文本查找。
-            # required_count 直接取 config.users 长度，避免再发一次 UiSelector 查询（~100ms）。
-            if not checkbox_elements:
-                return not require_attendee_section
-        else:
-            attendee_section_visible = self._has_element(
-                AppiumBy.ANDROID_UIAUTOMATOR,
-                'new UiSelector().textContains("实名观演人")',
-            )
-            if not attendee_section_visible:
-                return not require_attendee_section
-            if not checkbox_elements:
-                logger.warning("确认页存在观演人区域，但未找到可勾选观演人，请手动检查")
-                return False
-            required_count = self._attendee_required_count_on_confirm_page()
-
-        # rush_mode 下跳过 page_source 全页 XML dump（~300-500ms），直接用 get_attribute 结果。
-        selected_count = self._attendee_selected_count(
-            checkbox_elements,
-            use_source_fallback=not self.config.rush_mode,
-        )
-        if selected_count >= required_count:
-            return True
-
-        logger.info(f"检测到观演人未选择完成，尝试自动补选（已选 {selected_count}/{required_count}）")
-
-        unmatched_users = []
-        for user_name in self.config.users or []:
-            if selected_count >= required_count:
-                break
-            if self._select_attendee_checkbox_by_name(user_name):
-                selected_count = self._attendee_selected_count()
-            else:
-                unmatched_users.append(user_name)
-
-        if unmatched_users and selected_count < required_count:
-            logger.warning(f"未能按姓名定位观演人: {'、'.join(unmatched_users)}，将尝试按勾选框兜底")
-
-        if selected_count < required_count:
-            for checkbox in self._attendee_checkbox_elements():
-                if selected_count >= required_count:
-                    break
-                if self._is_checkbox_selected(checkbox):
-                    continue
-                if not self._click_attendee_checkbox(checkbox):
-                    continue
-                selected_count = self._attendee_selected_count()
-
-        if selected_count < required_count:
-            logger.warning(f"观演人选择不足（需要 {required_count} 位，当前 {selected_count} 位）")
-            return False
-        return True
+        if hasattr(self, '_attendee_sel'):
+            return self._attendee_sel._ensure_attendees_selected_on_confirm_page(require_attendee_section)
+        logger.warning("AttendeeSelector 未初始化")
+        return False
 
     def _get_buy_button_coordinates(self, xml_root=None):
-        """Capture the current buy/confirm button coordinates before the hot path needs them."""
-        if self._using_u2():
-            if xml_root is None:
-                xml_root = self._dump_hierarchy_xml()
-            if xml_root is not None:
-                for node in xml_root.iter("node"):
-                    rid = node.get("resource-id", "")
-                    if rid in ("btn_buy_view", "cn.damai:id/btn_buy_view"):
-                        bounds = self._parse_bounds(node.get("bounds", ""))
-                        if bounds:
-                            left, top, right, bottom = bounds
-                            return ((left + right) // 2, (top + bottom) // 2)
-                return None
-
-        selectors = [
-            (By.ID, "cn.damai:id/btn_buy_view"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*确定.*|.*购买.*")'),
-        ]
-        for by, value in selectors:
-            try:
-                elements = self._find_all(by, value)
-            except Exception:
-                continue
-            if not elements:
-                continue
-            rect = self._element_rect(elements[0])
-            return (
-                rect["x"] + rect["width"] // 2,
-                rect["y"] + rect["height"] // 2,
-            )
+        if hasattr(self, '_price_sel'):
+            return self._price_sel._get_buy_button_coordinates(xml_root)
         return None
 
     def _get_price_option_coordinates_by_config_index(self, xml_root=None):
-        """Capture the configured price card center so rush mode can tap by coordinate."""
-        if self._using_u2():
-            if xml_root is None:
-                xml_root = self._dump_hierarchy_xml()
-            if xml_root is not None:
-                for node in xml_root.iter("node"):
-                    if node.get("resource-id") == "cn.damai:id/project_detail_perform_price_flowlayout":
-                        cards = [
-                            child for child in node
-                            if child.get("class") == "android.widget.FrameLayout"
-                            and child.get("clickable") == "true"
-                        ]
-                        if not (0 <= self.config.price_index < len(cards)):
-                            return None
-                        bounds = self._parse_bounds(cards[self.config.price_index].get("bounds", ""))
-                        if bounds:
-                            left, top, right, bottom = bounds
-                            return ((left + right) // 2, (top + bottom) // 2)
-                        return None
-                return None
-
-        try:
-            price_container = self._find(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout")
-        except Exception:
-            return None
-
-        try:
-            cards = self._container_find_elements(price_container, By.CLASS_NAME, "android.widget.FrameLayout")
-        except Exception:
-            return None
-        clickable_cards = [card for card in cards if self._is_clickable(card)]
-        if not (0 <= self.config.price_index < len(clickable_cards)):
-            return None
-
-        rect = self._element_rect(clickable_cards[self.config.price_index])
-        return (
-            rect["x"] + rect["width"] // 2,
-            rect["y"] + rect["height"] // 2,
-        )
+        if hasattr(self, '_price_sel'):
+            return self._price_sel._get_price_option_coordinates_by_config_index(xml_root)
+        return None
 
     def _build_compound_price_text(self, container):
-        """Build a human-readable price string from split price fields."""
-        prefix_ids = (
-            "cn.damai:id/bricks_dm_common_price_prefix",
-            "cn.damai:id/project_price_char",
-        )
-        value_ids = (
-            "cn.damai:id/bricks_dm_common_price_des",
-            "cn.damai:id/project_price_pre",
-            "cn.damai:id/project_price_suffix",
-        )
-        suffix_ids = (
-            "cn.damai:id/bricks_dm_common_price_suffix",
-        )
-
-        prefix = ""
-        value_parts = []
-        suffix = ""
-
-        for resource_id in prefix_ids:
-            prefix = prefix or self._safe_element_text(container, By.ID, resource_id)
-        for resource_id in value_ids:
-            value_parts.extend(self._safe_element_texts(container, By.ID, resource_id))
-        for resource_id in suffix_ids:
-            suffix = suffix or self._safe_element_text(container, By.ID, resource_id)
-
-        value = "".join(value_parts).strip()
-        compound = f"{prefix}{value}{suffix}".strip()
-        if compound == "¥":
-            compound = ""
-        if compound and prefix == "¥" and suffix == "起":
-            return compound
-        if value and value.replace(".", "", 1).isdigit() and not suffix:
-            return f"{value}元"
-        if compound and compound.startswith("¥"):
-            return compound.replace("¥", "¥", 1)
-        return compound
+        if hasattr(self, '_price_sel'):
+            return self._price_sel._build_compound_price_text(container)
+        return ""
 
     def _price_option_text_from_descendants(self, texts):
-        """Collapse descendant texts into a price label."""
-        if not texts:
-            return ""
-
-        filtered = []
-        ignored = {"可预约", "预售", "无票", "已预约", "缺货", "惠", "荐", "热", "售罄"}
-        for text in texts:
-            value = text.strip()
-            if not value or value in ignored:
-                continue
-            filtered.append(value)
-
-        if not filtered:
-            return ""
-
-        merged = "".join(filtered)
-        if merged.isdigit():
-            return f"{merged}元"
-        if re.fullmatch(r"[\u4e00-\u9fffA-Za-z]+[0-9]{2,5}", merged):
-            return f"{merged}元"
-        if re.fullmatch(r"[0-9]{2,5}[A-Za-z\u4e00-\u9fff]+", merged):
-            return merged
-        return merged
+        if hasattr(self, '_price_sel'):
+            return self._price_sel._price_option_text_from_descendants(texts)
+        return ""
 
     def _normalize_ocr_price_text(self, ocr_output):
         """Extract the leading ticket price from noisy OCR output."""
@@ -878,207 +590,44 @@ class DamaiBot(UIPrimitives):
                     pass
 
     def _extract_price_digits(self, text):
-        """Extract the numeric portion of a ticket price label."""
-        normalized_text = text if isinstance(text, str) else ""
-        match = re.search(r"([1-9]\d{1,4})", normalized_text)
-        if match:
-            return int(match.group(1))
+        if hasattr(self, '_price_sel'):
+            return self._price_sel._extract_price_digits(text)
         return None
 
     def _price_text_matches_target(self, text):
-        """Check whether a visible price label matches the configured price."""
-        normalized_target = normalize_text(self.config.price)
-        normalized_text = normalize_text(text)
-        if normalized_target and normalized_text:
-            if normalized_target in normalized_text or normalized_text in normalized_target:
-                return True
-
-        target_digits = self._extract_price_digits(self.config.price)
-        text_digits = self._extract_price_digits(text)
-        return target_digits is not None and target_digits == text_digits
+        if hasattr(self, '_price_sel'):
+            return self._price_sel._price_text_matches_target(text)
+        return False
 
     def _is_price_option_available(self, option):
-        """Return whether a visible price option is actually selectable."""
-        tag = (option.get("tag") or "").strip()
-        return tag not in _PRICE_UNAVAILABLE_TAGS
+        if hasattr(self, '_price_sel'):
+            return self._price_sel._is_price_option_available(option)
+        return True
 
     def _click_visible_price_option(self, card_index):
-        """Click a visible price card by its clickable-card index."""
-        try:
-            price_container = self._find(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout")
-            cards = self._container_find_elements(price_container, By.CLASS_NAME, "android.widget.FrameLayout")
-        except Exception:
-            return False
-
-        clickable_cards = [card for card in cards if self._is_clickable(card)]
-        if 0 <= card_index < len(clickable_cards):
-            self._click_element_center(clickable_cards[card_index], duration=30)
-            return True
+        if hasattr(self, '_price_sel'):
+            return self._price_sel._click_visible_price_option(card_index)
         return False
 
     def _click_price_option_by_config_index(self, burst=False, coords=None):
-        """Click the configured price card index directly without reading ticket texts."""
-        target_coords = coords or self._get_price_option_coordinates_by_config_index()
-        if not target_coords:
-            return False
-        if burst:
-            self._burst_click_coordinates(*target_coords, count=2, interval_ms=25, duration=25)
-        else:
-            self._click_coordinates(*target_coords, duration=30)
-        logger.info(f"通过配置索引直接选择票价: price_index={self.config.price_index}")
-        return True
+        if hasattr(self, '_price_sel'):
+            return self._price_sel._click_price_option_by_config_index(burst, coords)
+        return False
 
     def _select_price_option_fast(self, cached_coords=None):
-        """Use config-driven, low-latency ticket selection before OCR-heavy fallbacks."""
-        if self.config.rush_mode:
-            # 真实提交模式用 burst（双击保险），验证模式单击即可（节省 ~0.2s）。
-            _burst = self.config.if_commit_order
-            if self._click_price_option_by_config_index(burst=_burst, coords=cached_coords):
-                return True
-
-        visible_options = self.get_visible_price_options(allow_ocr=False)
-
-        if visible_options:
-            indexed_option = next((option for option in visible_options if option["index"] == self.config.price_index), None)
-            if indexed_option:
-                if not self._is_price_option_available(indexed_option):
-                    logger.warning(
-                        f"配置索引对应票档当前不可选: {indexed_option.get('text') or '(未识别)'} "
-                        f"[{indexed_option.get('tag') or '不可售'}]"
-                    )
-                    return False
-                if not indexed_option.get("text") or self._price_text_matches_target(indexed_option.get("text") or ""):
-                    if self._click_visible_price_option(indexed_option["index"]):
-                        logger.info(
-                            f"通过配置索引快速选择票价: {indexed_option.get('text') or self.config.price} "
-                            f"(price_index={self.config.price_index})"
-                        )
-                        return True
-            elif self._click_price_option_by_config_index():
-                return True
-
-            matched_options = [
-                option for option in visible_options
-                if self._price_text_matches_target(option.get("text") or "")
-            ]
-            for option in matched_options:
-                if not self._is_price_option_available(option):
-                    logger.warning(
-                        f"目标票档当前不可选: {option.get('text') or '(未识别)'} [{option.get('tag') or '不可售'}]"
-                    )
-                    return False
-                if self._click_visible_price_option(option["index"]):
-                    logger.info(
-                        f"通过可见票档快速匹配选择票价: {option.get('text') or self.config.price} "
-                        f"(index={option['index']})"
-                    )
-                    return True
-
-        price_text_selector = f'new UiSelector().textContains("{self.config.price}")'
-        if self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, price_text_selector, timeout=0.35):
-            logger.info(f"通过文本快速匹配选择票价: {self.config.price}")
-            return True
-
-        if self._click_price_option_by_config_index():
-            return True
-
+        if hasattr(self, '_price_sel'):
+            return self._price_sel._select_price_option_fast(cached_coords)
         return None
 
     def _select_price_option(self, cached_coords=None):
-        """Select the configured price using fast config-driven logic first, then OCR-heavy fallbacks."""
-        fast_result = self._select_price_option_fast(cached_coords=cached_coords)
-        if fast_result is not None:
-            return fast_result
-
-        visible_options = self.get_visible_price_options()
-        matched_options = [option for option in visible_options if self._price_text_matches_target(option.get("text") or "")]
-
-        for option in matched_options:
-            if not self._is_price_option_available(option):
-                logger.warning(
-                    f"目标票档当前不可选: {option.get('text') or '(未识别)'} [{option.get('tag') or '不可售'}]"
-                )
-                return False
-            if self._click_visible_price_option(option["index"]):
-                logger.info(
-                    f"通过可见票档匹配选择票价: {option.get('text') or self.config.price} "
-                    f"(index={option['index']}, source={option.get('source', 'ui')})"
-                )
-                return True
-
-        if visible_options:
-            indexed_option = next((option for option in visible_options if option["index"] == self.config.price_index), None)
-            if indexed_option and self._is_price_option_available(indexed_option):
-                if self._click_visible_price_option(indexed_option["index"]):
-                    logger.info(
-                        f"文本匹配未命中，使用当前可见票档索引选择: {indexed_option.get('text') or self.config.price} "
-                        f"(price_index={self.config.price_index})"
-                    )
-                    return True
-            elif indexed_option and not self._is_price_option_available(indexed_option):
-                logger.warning(
-                    f"配置索引对应票档当前不可选: {indexed_option.get('text') or '(未识别)'} "
-                    f"[{indexed_option.get('tag') or '不可售'}]"
-                )
-                return False
-
-        price_text_selector = f'new UiSelector().textContains("{self.config.price}")'
-        if self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, price_text_selector, timeout=0.8):
-            logger.info(f"通过文本匹配选择票价: {self.config.price}")
-            return True
-
-        logger.info(f"文本匹配失败，使用索引选择票价: price_index={self.config.price_index}")
-        logger.info(f"通过配置索引直接选择票价: price_index={self.config.price_index}")
-        try:
-            price_container = self._find(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout")
-            if not self._using_u2():
-                target_price = price_container.find_element(
-                    AppiumBy.ANDROID_UIAUTOMATOR,
-                    f'new UiSelector().className("android.widget.FrameLayout").index({self.config.price_index}).clickable(true)'
-                )
-            else:
-                cards = self._container_find_elements(price_container, By.CLASS_NAME, "android.widget.FrameLayout")
-                clickable_cards = [card for card in cards if self._is_clickable(card)]
-                target_price = clickable_cards[self.config.price_index]
-            self._click_element_center(target_price, duration=30)
-            return True
-        except Exception as e:
-            logger.warning(f"票价选择失败，启动备用方案: {e}")
-            try:
-                if not self._using_u2() and self.wait is not None:
-                    price_container = self.wait.until(
-                        EC.presence_of_element_located((By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"))
-                    )
-                else:
-                    price_container = self._wait_for_element(
-                        By.ID,
-                        "cn.damai:id/project_detail_perform_price_flowlayout",
-                        timeout=2,
-                    )
-                if not self._using_u2():
-                    target_price = price_container.find_element(
-                        AppiumBy.ANDROID_UIAUTOMATOR,
-                        f'new UiSelector().className("android.widget.FrameLayout").index({self.config.price_index}).clickable(true)'
-                    )
-                else:
-                    cards = self._container_find_elements(price_container, By.CLASS_NAME, "android.widget.FrameLayout")
-                    clickable_cards = [card for card in cards if self._is_clickable(card)]
-                    target_price = clickable_cards[self.config.price_index]
-                self._click_element_center(target_price, duration=30)
-                return True
-            except Exception as backup_error:
-                logger.warning(f"备用票价选择也失败: {backup_error}")
-                return False
+        if hasattr(self, '_price_sel'):
+            return self._price_sel._select_price_option(cached_coords)
+        return False
 
     def _keyword_tokens(self):
-        """Split the configured keyword into reusable fuzzy-match tokens."""
-        keyword = self.config.keyword or ""
-        tokens = []
-        for raw in re.split(r"[\s,，、|/]+", keyword):
-            token = normalize_text(raw)
-            if len(token) >= 2 and token not in tokens:
-                tokens.append(token)
-        return tokens
+        if hasattr(self, '_navigator'):
+            return self._navigator._keyword_tokens()
+        return []
 
     def _get_detail_title_text(self, xml_root=None):
         """Read title text from detail/sku pages."""
@@ -1110,41 +659,14 @@ class DamaiBot(UIPrimitives):
         return "".join(title_parts).strip()
 
     def _title_matches_target(self, title_text):
-        """Check whether a page or search result title matches the configured target."""
-        normalized_title = normalize_text(title_text)
-        if not normalized_title:
-            return False
-
-        candidates = []
-        if self.item_detail:
-            candidates.extend([self.item_detail.item_name, self.item_detail.item_name_display])
-        if self.config.target_title:
-            candidates.append(self.config.target_title)
-        if self.config.keyword:
-            candidates.append(self.config.keyword)
-
-        for candidate in candidates:
-            normalized_candidate = normalize_text(candidate)
-            if not normalized_candidate:
-                continue
-            if normalized_candidate in normalized_title or normalized_title in normalized_candidate:
-                return True
-
-        keyword_tokens = self._keyword_tokens()
-        if keyword_tokens and all(token in normalized_title for token in keyword_tokens):
-            return True
-
+        if hasattr(self, '_navigator'):
+            return self._navigator._title_matches_target(title_text)
         return False
 
     def _current_page_matches_target(self, page_probe):
-        """Check if the current detail/sku page already points at the expected event."""
-        if page_probe["state"] not in {"detail_page", "sku_page"}:
-            return False
-
-        if not self.item_detail and not self.config.target_title and not self.config.keyword:
-            return True
-
-        return self._title_matches_target(self._get_detail_title_text())
+        if hasattr(self, '_navigator'):
+            return self._navigator._current_page_matches_target(page_probe)
+        return False
 
     def _exit_non_target_event_context(self, page_probe, max_back_steps=4, back_delay=0.5):
         """Back out from a non-target detail/sku page until search/homepage is reachable."""
@@ -1233,260 +755,33 @@ class DamaiBot(UIPrimitives):
         return current_probe
 
     def _open_search_from_homepage(self):
-        """Enter the homepage search flow."""
-        search_selectors = [
-            (By.ID, "cn.damai:id/pioneer_homepage_header_search_btn"),
-            (By.ID, "cn.damai:id/homepage_header_search"),
-            (By.ID, "cn.damai:id/homepage_header_search_layout"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("搜索")'),
-        ]
-
-        for by, value in search_selectors:
-            if self.ultra_fast_click(by, value, timeout=0.8):
-                search_probe = self.wait_for_page_state({"search_page"}, timeout=2.5, poll_interval=0.15)
-                if search_probe["state"] == "search_page":
-                    return True
-
-        search_probe = self.probe_current_page()
-        if search_probe["state"] == "search_page":
-            return True
-
-        logger.warning("未能从首页打开搜索页")
+        if hasattr(self, '_navigator'):
+            return self._navigator._open_search_from_homepage()
         return False
 
     def _submit_search_keyword(self):
-        """Fill the configured keyword into the Damai search box and submit."""
-        if not self.config.keyword:
-            logger.warning("缺少 keyword，无法执行自动搜索")
-            return False
-
-        with self._timed_step(
-                "搜索页输入并提交关键词",
-                manual_baseline_seconds=_MANUAL_STEP_BASELINES.get("搜索页输入并提交关键词")):
-            try:
-                search_input = self._wait_for_element(By.ID, "cn.damai:id/header_search_v2_input", timeout=2)
-            except TimeoutException:
-                logger.warning("未找到搜索输入框")
-                return False
-
-            self._click_element_center(search_input)
-            time.sleep(0.12)
-
-            current_text = self._read_element_text(search_input).strip()
-            if current_text and current_text != self.config.keyword:
-                if self._has_element(By.ID, "cn.damai:id/header_search_v2_input_delete"):
-                    self.ultra_fast_click(By.ID, "cn.damai:id/header_search_v2_input_delete", timeout=0.4)
-                    time.sleep(0.05)
-                else:
-                    try:
-                        if hasattr(search_input, "clear"):
-                            search_input.clear()
-                        elif hasattr(search_input, "set_text"):
-                            search_input.set_text("")
-                    except Exception:
-                        pass
-
-            if self._read_element_text(search_input).strip() != self.config.keyword:
-                try:
-                    if self._using_u2() and hasattr(search_input, "set_text"):
-                        search_input.set_text(self.config.keyword)
-                    elif hasattr(search_input, "send_keys"):
-                        search_input.send_keys(self.config.keyword)
-                    elif hasattr(search_input, "set_text"):
-                        search_input.set_text(self.config.keyword)
-                except Exception:
-                    return False
-
-            if not self._press_keycode_safe(66, context="提交搜索关键词"):
-                return False
-            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("演出")'):
-                self.smart_wait_and_click(
-                    AppiumBy.ANDROID_UIAUTOMATOR,
-                    'new UiSelector().text("演出")',
-                    timeout=0.8,
-                )
-                time.sleep(0.1)
-            try:
-                deadline = time.time() + 3.5
-                while time.time() < deadline:
-                    if self._find_all(By.ID, "cn.damai:id/ll_search_item"):
-                        break
-                    time.sleep(0.04)
-                else:
-                    raise TimeoutException("搜索结果加载超时")
-            except TimeoutException:
-                logger.warning("搜索结果加载超时")
-                return False
-
-        return True
+        if hasattr(self, '_navigator'):
+            return self._navigator._submit_search_keyword()
+        return False
 
     def _score_search_result(self, title_text, venue_text):
-        """Score a search result against the configured target."""
-        normalized_title = normalize_text(title_text)
-        normalized_venue = normalize_text(venue_text)
-        if not normalized_title:
-            return -1
-
-        score = 0
-        if self._title_matches_target(title_text):
-            score += 100
-
-        normalized_keyword = normalize_text(self.config.keyword)
-        if normalized_keyword:
-            if normalized_keyword == normalized_title:
-                score += 80
-            elif normalized_keyword in normalized_title:
-                score += 50
-
-        keyword_tokens = self._keyword_tokens()
-        if keyword_tokens:
-            token_hits = sum(1 for token in keyword_tokens if token in normalized_title)
-            score += token_hits * 20
-            if token_hits == len(keyword_tokens) and len(keyword_tokens) >= 2:
-                score += 30
-
-        normalized_city = normalize_text(city_keyword(self.config.city))
-        if normalized_city and normalized_city in normalized_title:
-            score += 20
-
-        if self.item_detail:
-            expected_venue = normalize_text(self.item_detail.venue_name)
-            if expected_venue and expected_venue in normalized_venue:
-                score += 20
-
-            expected_city = normalize_text(self.item_detail.city_keyword)
-            if expected_city and expected_city in normalized_title:
-                score += 10
-
-        if self.config.target_venue:
-            expected_venue = normalize_text(self.config.target_venue)
-            if expected_venue and expected_venue in normalized_venue:
-                score += 30
-
-        return score
+        if hasattr(self, '_navigator'):
+            return self._navigator._score_search_result(title_text, venue_text)
+        return -1
 
     def _scroll_search_results(self):
-        """Scroll the search result list upward."""
-        if not self._using_u2():
-            self.driver.execute_script(
-                "mobile: swipeGesture",
-                {
-                    "left": 96,
-                    "top": 520,
-                    "width": 1088,
-                    "height": 1500,
-                    "direction": "up",
-                    "percent": 0.55,
-                    "speed": 5000,
-                },
-            )
-            return
-        self.d.swipe(540, 1770, 540, 520, duration=0.3)
+        if hasattr(self, '_navigator'):
+            return self._navigator._scroll_search_results()
 
     def _open_target_from_search_results(self, max_scrolls=2, max_results=5, return_details=False):
-        """Open the best-matching event from search results and optionally return scanned summaries."""
-        seen_titles = set()
-        collected = []
-
-        with self._timed_step(
-                "搜索结果扫描并打开目标",
-                manual_baseline_seconds=_MANUAL_STEP_BASELINES.get("搜索结果扫描并打开目标")):
-            for scroll_index in range(max_scrolls + 1):
-                result_cards = self._find_all(By.ID, "cn.damai:id/ll_search_item")
-                best_match = None
-                best_score = -1
-
-                for card in result_cards:
-                    title_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_name")
-                    if not title_text:
-                        continue
-
-                    venue_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_venueName")
-                    city_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_city").replace("|", "").strip()
-                    time_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_time")
-                    score = self._score_search_result(title_text, venue_text)
-
-                    normalized_title = normalize_text(title_text)
-                    if normalized_title and normalized_title not in seen_titles:
-                        collected.append({
-                            "title": title_text,
-                            "venue": venue_text,
-                            "city": city_text,
-                            "time": time_text,
-                            "score": score,
-                        })
-                        seen_titles.add(normalized_title)
-
-                    if score > best_score:
-                        best_score = score
-                        best_match = card
-
-                if best_match is not None and best_score >= 60:
-                    self._click_element_center(best_match)
-                    detail_probe = self.wait_for_page_state({"detail_page", "sku_page"}, timeout=5.5)
-                    if detail_probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(detail_probe):
-                        collected.sort(key=lambda item: item["score"], reverse=True)
-                        details = {"opened": True, "search_results": collected[:max_results]}
-                        return details if return_details else True
-
-                    logger.warning("已进入详情页，但标题与目标演出不一致，返回搜索结果继续尝试")
-                    if not self._press_keycode_safe(4, context="返回搜索列表"):
-                        break
-                    time.sleep(0.25)
-                    self.dismiss_startup_popups()
-                else:
-                    logger.info(f"本屏搜索结果未找到明确匹配项，已扫描: {len(seen_titles)} 条")
-
-                if scroll_index < max_scrolls:
-                    self._scroll_search_results()
-                    time.sleep(0.2)
-
-        logger.warning("自动搜索后未找到目标演出")
-        collected.sort(key=lambda item: item["score"], reverse=True)
-        details = {"opened": False, "search_results": collected[:max_results]}
-        return details if return_details else False
+        if hasattr(self, '_navigator'):
+            return self._navigator._open_target_from_search_results(max_scrolls, max_results, return_details)
+        return {"opened": False, "search_results": []} if return_details else False
 
     def collect_search_results(self, max_scrolls=0, max_results=5):
-        """Collect search result summaries without opening them."""
-        seen = set()
-        collected = []
-
-        for scroll_index in range(max_scrolls + 1):
-            result_cards = self._find_all(By.ID, "cn.damai:id/ll_search_item")
-            for card in result_cards:
-                title_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_name")
-                if not title_text:
-                    continue
-
-                normalized_title = normalize_text(title_text)
-                if normalized_title in seen:
-                    continue
-
-                venue_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_venueName")
-                city_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_city").replace("|", "").strip()
-                time_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_time")
-                price_text = self._build_compound_price_text(card)
-                score = self._score_search_result(title_text, venue_text)
-
-                collected.append({
-                    "title": title_text,
-                    "venue": venue_text,
-                    "city": city_text,
-                    "time": time_text,
-                    "price": price_text,
-                    "score": score,
-                })
-                seen.add(normalized_title)
-
-            if len(collected) >= max_results:
-                break
-
-            if scroll_index < max_scrolls:
-                self._scroll_search_results()
-                time.sleep(0.4)
-
-        collected.sort(key=lambda item: item["score"], reverse=True)
-        return collected[:max_results]
+        if hasattr(self, '_navigator'):
+            return self._navigator.collect_search_results(max_scrolls, max_results)
+        return []
 
     def navigate_to_target_event(self, initial_probe=None):
         """Navigate to the target event. Delegates to EventNavigator."""
@@ -1495,125 +790,13 @@ class DamaiBot(UIPrimitives):
         return self._navigate_to_target_impl(initial_probe=initial_probe)
 
     def _navigate_to_target_impl(self, initial_probe=None):
-        """Auto-navigate from homepage/search to the target event detail page."""
-        if not self.config.auto_navigate:
-            return False
-
-        page_probe = initial_probe or self.probe_current_page()
-        page_probe = self._recover_to_navigation_start(page_probe)
-
-        if page_probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(page_probe):
-            return True
-
-        if page_probe["state"] in {"detail_page", "sku_page"} and not self._current_page_matches_target(page_probe):
-            page_probe = self._exit_non_target_event_context(page_probe)
-
-        if page_probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(page_probe):
-            return True
-
-        if page_probe["state"] == "homepage":
-            logger.info("当前位于首页，开始自动搜索目标演出")
-            if not self._open_search_from_homepage():
-                return False
-            page_probe = self.probe_current_page()
-
-        if page_probe["state"] != "search_page":
-            logger.warning(f"当前页面不适合自动搜索: {page_probe['state']}")
-            return False
-
-        if not self._submit_search_keyword():
-            return False
-
-        return self._open_target_from_search_results()
+        if hasattr(self, '_navigator'):
+            return self._navigator._navigate_to_target_impl(initial_probe)
+        return False
 
     def discover_target_event(self, keyword_candidates, initial_probe=None, search_scrolls=1, result_limit=5):
-        """Try multiple keywords, collect candidate summaries, and open the best match."""
-        self._last_discovery_step_timings = []
-        page_probe = initial_probe or self.probe_current_page()
-        page_probe = self._recover_to_navigation_start(page_probe)
-
-        if page_probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(page_probe):
-            return {
-                "used_keyword": self.config.keyword,
-                "search_results": [],
-                "page_probe": page_probe,
-                "step_timings": list(self._last_discovery_step_timings),
-            }
-
-        if page_probe["state"] in {"detail_page", "sku_page"} and not self._current_page_matches_target(page_probe):
-            page_probe = self._exit_non_target_event_context(page_probe)
-
-        if page_probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(page_probe):
-            return {
-                "used_keyword": self.config.keyword,
-                "search_results": [],
-                "page_probe": page_probe,
-                "step_timings": list(self._last_discovery_step_timings),
-            }
-
-        if page_probe["state"] == "homepage":
-            if not self._open_search_from_homepage():
-                return None
-            page_probe = self.probe_current_page()
-
-        if page_probe["state"] != "search_page":
-            logger.warning(f"当前页面不适合执行提示词检索: {page_probe['state']}")
-            return None
-
-        tried = set()
-        for keyword in keyword_candidates:
-            normalized_keyword = normalize_text(keyword)
-            if not normalized_keyword or normalized_keyword in tried:
-                continue
-
-            # 关键词重试前：关闭弹窗并归一化到 search_page
-            if tried:
-                self.dismiss_startup_popups()
-                probe = self.probe_current_page()
-                if probe["state"] in {"detail_page", "sku_page"}:
-                    probe = self._exit_non_target_event_context(probe)
-                    if probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(probe):
-                        return {
-                            "used_keyword": keyword,
-                            "search_results": [],
-                            "page_probe": probe,
-                            "step_timings": list(self._last_discovery_step_timings),
-                        }
-                if probe["state"] == "homepage":
-                    if not self._open_search_from_homepage():
-                        logger.warning("重试关键词前无法从首页进入搜索页，跳过该关键词")
-                        continue
-                    probe = self.probe_current_page()
-                if probe["state"] != "search_page":
-                    logger.warning(f"重试关键词前页面状态异常: {probe['state']}，跳过该关键词")
-                    continue
-
-            self.config.keyword = keyword
-            logger.info(f"尝试搜索关键词: {keyword}")
-            if not self._submit_search_keyword():
-                tried.add(normalized_keyword)
-                continue
-
-            open_result = self._open_target_from_search_results(
-                max_scrolls=search_scrolls,
-                max_results=result_limit,
-                return_details=True,
-            )
-            search_results = open_result["search_results"]
-            if search_results:
-                logger.info(f"搜索到 {len(search_results)} 条候选结果，最高分 {search_results[0]['score']}")
-            if open_result["opened"]:
-                page_probe = self.probe_current_page()
-                return {
-                    "used_keyword": keyword,
-                    "search_results": search_results,
-                    "page_probe": page_probe,
-                    "step_timings": list(self._last_discovery_step_timings),
-                }
-
-            tried.add(normalized_keyword)
-
-        logger.warning("根据提示词尝试多个搜索关键词后，仍未打开目标演出")
+        if hasattr(self, '_navigator'):
+            return self._navigator.discover_target_event(keyword_candidates, initial_probe, search_scrolls, result_limit)
         return None
 
     def select_performance_date(self, timeout=1.0):
