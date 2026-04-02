@@ -52,6 +52,23 @@ try:
 except ImportError:
     from logger import get_logger
 
+try:
+    from mobile.buy_button_guard import BuyButtonGuard
+    from mobile.page_probe import PageProbe
+    from mobile.fast_pipeline import FastPipeline, poll_until, batch_shell_taps
+    from mobile.recovery import RecoveryHelper
+    from mobile.event_navigator import EventNavigator
+    from mobile.price_selector import PriceSelector
+    from mobile.attendee_selector import AttendeeSelector
+except ImportError:
+    from buy_button_guard import BuyButtonGuard
+    from page_probe import PageProbe
+    from fast_pipeline import FastPipeline, poll_until, batch_shell_taps
+    from recovery import RecoveryHelper
+    from event_navigator import EventNavigator
+    from price_selector import PriceSelector
+    from attendee_selector import AttendeeSelector
+
 logger = get_logger(__name__)
 
 _MAGICK_BIN = shutil.which("magick")
@@ -85,6 +102,16 @@ class DamaiBot:
         self._prepare_runtime_config()
         if setup_driver:
             self._setup_driver()
+
+        # Sub-modules for optimized operations
+        if self.d is not None:
+            self._page_probe = PageProbe(self.d, self.config)
+            self._guard = BuyButtonGuard(self.d)
+            self._pipeline = FastPipeline(self.d, self.config, self._page_probe, self._guard)
+            self._navigator = EventNavigator(self.d, self.config, self._page_probe)
+            self._recovery = RecoveryHelper(self.d, self._page_probe, self._navigator)
+            self._price_sel = PriceSelector(self.d, self.config, self._page_probe)
+            self._attendee_sel = AttendeeSelector(self.d, self.config)
 
     def _set_terminal_failure(self, reason):
         """Mark the current failure as non-retriable."""
@@ -1804,7 +1831,7 @@ class DamaiBot:
                 "quantity_picker": False, "submit_button": False, "reservation_mode": False,
                 "pending_order_dialog": False}
 
-    def _recover_to_detail_page_for_local_retry(self, initial_probe=None, max_back_steps=4, back_delay=0.2):
+    def _recover_to_detail_page_for_local_retry(self, initial_probe=None, max_back_steps=8, back_delay=0.15):
         """Recover locally to the current event detail/sku page without rebuilding the Appium session."""
         current_probe = initial_probe or self.probe_current_page()
         retryable_states = {"detail_page", "sku_page"}
@@ -1829,6 +1856,12 @@ class DamaiBot:
             if current_probe["state"] in retryable_states and (
                     not self.item_detail or self._current_page_matches_target(current_probe)):
                 return current_probe
+
+        # If we ended up on homepage, try forward navigation
+        if current_probe["state"] in {"homepage"}:
+            logger.info("回退到首页，尝试正向导航回详情页")
+            self.navigate_to_target_event()
+            current_probe = self.probe_current_page()
 
         return current_probe
 
@@ -2482,6 +2515,11 @@ class DamaiBot:
             )
             time.sleep(sleep_seconds)
 
+        # Use BuyButtonGuard for precise button-text monitoring
+        if hasattr(self, '_guard') and self._guard.wait_until_safe(timeout_s=8.0, poll_ms=50):
+            logger.info("BuyButtonGuard 检测到可购买按钮")
+            return
+
         # Tight polling loop with multiple purchase signals until the page becomes actionable.
         deadline = sell_time + timedelta(seconds=8)
         while datetime.now(tz=_tz_shanghai) < deadline:
@@ -3057,9 +3095,9 @@ class DamaiBot:
 
         # --- Phase 2: poll for SKU page ---
         logger.info("选择票价...")
-        sku_deadline = time.time() + 6.0
+        global_deadline = start_time + 5.0
         sku_detected = False
-        while time.time() < sku_deadline:
+        while time.time() < global_deadline:
             if self._has_element(By.ID, "cn.damai:id/layout_sku"):
                 sku_detected = True
                 break
@@ -3109,8 +3147,7 @@ class DamaiBot:
         clicker.start()
 
         confirmed = False
-        deadline = time.time() + 8.0
-        while time.time() < deadline:
+        while time.time() < global_deadline:
             if self._has_element(By.ID, "cn.damai:id/checkbox"):
                 confirmed = True
                 break
@@ -3206,7 +3243,7 @@ class DamaiBot:
         logger.info("确定购买...")
 
         confirmed = False
-        deadline = time.time() + 8.0
+        deadline = start_time + 5.0
         while time.time() < deadline:
             if self._has_element(By.ID, "cn.damai:id/checkbox"):
                 confirmed = True
