@@ -1,11 +1,9 @@
 # -*- coding: UTF-8 -*-
 """Tests for mobile.fast_pipeline module."""
 
-import threading
 import time
-from unittest.mock import Mock, MagicMock, patch, call
+from unittest.mock import Mock, patch
 
-import pytest
 
 from mobile.fast_pipeline import (
     FastPipeline,
@@ -19,6 +17,7 @@ from mobile.fast_pipeline import (
 # ---------------------------------------------------------------------------
 # poll_until
 # ---------------------------------------------------------------------------
+
 
 class TestPollUntil:
     """Tests for the generic poll_until utility."""
@@ -61,14 +60,12 @@ class TestPollUntil:
 # batch_shell_taps
 # ---------------------------------------------------------------------------
 
-class TestBatchShellTaps:
 
+class TestBatchShellTaps:
     def test_sends_semicolon_joined_commands(self):
         device = Mock()
         batch_shell_taps(device, [(100, 200), (300, 400)])
-        device.shell.assert_called_once_with(
-            "input tap 100 200; input tap 300 400"
-        )
+        device.shell.assert_called_once_with("input tap 100 200; input tap 300 400")
 
     def test_noop_on_empty_list(self):
         device = Mock()
@@ -85,8 +82,8 @@ class TestBatchShellTaps:
 # FastPipeline.has_warm_coords
 # ---------------------------------------------------------------------------
 
-class TestHasWarmCoords:
 
+class TestHasWarmCoords:
     def _make_pipeline(self, coords=None):
         device = Mock()
         config = Mock()
@@ -120,14 +117,14 @@ class TestHasWarmCoords:
 # FastPipeline.run_cold — deadline enforcement
 # ---------------------------------------------------------------------------
 
-class TestRunColdDeadline:
 
+class TestRunColdDeadline:
     def test_respects_5s_deadline_on_full_timeout(self):
         """When everything times out, run_cold must return within ~5s + margin."""
         device = Mock()
         # dump_hierarchy returns empty so XML parsing is skipped
         device.dump_hierarchy.return_value = ""
-        # Element lookups always fail → poll_until loops until deadline
+        # Element lookups always fail -> poll_until loops until deadline
         mock_element = Mock()
         mock_element.exists = False
         device.return_value = mock_element
@@ -148,8 +145,8 @@ class TestRunColdDeadline:
 # FastPipeline.run_warm — fast completion
 # ---------------------------------------------------------------------------
 
-class TestRunWarmFast:
 
+class TestRunWarmFast:
     def test_completes_fast_with_cached_coords(self):
         """With cached coords and immediate checkbox detection, should be very fast."""
         device = Mock()
@@ -232,7 +229,6 @@ class TestRunWarmFast:
 
 
 class TestValidationHelpers:
-
     def _make_validation_pipeline(self):
         device = Mock()
         device.shell = Mock(return_value=("", ""))
@@ -240,7 +236,7 @@ class TestValidationHelpers:
         config.if_commit_order = False
         config.price_index = 5
         config.users = ["UserA"]
-        config.city = "北京"
+        config.city = "\u5317\u4eac"
         config.date = "04.18"
 
         fp = FastPipeline(device, config, probe=False, guard=Mock())
@@ -271,12 +267,15 @@ class TestValidationHelpers:
         fp, bot, _device = self._make_validation_pipeline()
         fp._cached_coords["detail_buy"] = (540, 1800)
 
-        with \
-            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True), \
-            patch.object(fp, "_wait_for_purchase_entry", return_value={"state": "sku_page"}), \
-            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=True), \
-            patch.object(fp, "_select_price_with_pipeline") as select_price, \
-            patch.object(fp, "_finish_confirm", return_value=True) as finish_confirm:
+        with (
+            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True),
+            patch.object(
+                fp, "_wait_for_purchase_entry", return_value={"state": "sku_page"}
+            ),
+            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=True),
+            patch.object(fp, "_select_price_with_pipeline") as select_price,
+            patch.object(fp, "_finish_confirm", return_value=True) as finish_confirm,
+        ):
             result = fp.run_cold_validation(start_time=time.time())
 
         assert result is True
