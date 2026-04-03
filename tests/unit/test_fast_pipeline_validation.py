@@ -80,53 +80,57 @@ class TestRunColdValidationBranches:
 
     def test_returns_none_when_entry_probe_fails(self):
         fp, bot, _device = _make_validation_pipeline()
-        with (
-            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True),
-            patch.object(fp, "_wait_for_purchase_entry", return_value=None),
-        ):
+        # fmt: off
+        with \
+            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True), \
+            patch.object(fp, "_wait_for_purchase_entry", return_value=None):
             fp._cached_coords["detail_buy"] = (540, 1800)
             bot._click_coordinates = Mock()
             result = fp.run_cold_validation(start_time=time.time())
+        # fmt: on
         assert result is None
 
     def test_goes_to_confirm_on_order_confirm_page(self):
         fp, bot, _device = _make_validation_pipeline()
-        with (
-            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True),
+        # fmt: off
+        with \
+            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True), \
             patch.object(
                 fp,
                 "_wait_for_purchase_entry",
                 return_value={"state": "order_confirm_page"},
-            ),
-            patch.object(fp, "_finish_confirm", return_value=True) as finish_confirm,
-        ):
+            ), \
+            patch.object(fp, "_finish_confirm", return_value=True) as finish_confirm:
             result = fp.run_cold_validation(start_time=time.time())
+        # fmt: on
         assert result is True
         finish_confirm.assert_called_once()
 
     def test_returns_none_on_unknown_state(self):
         fp, bot, _device = _make_validation_pipeline()
-        with (
-            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True),
+        # fmt: off
+        with \
+            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True), \
             patch.object(
                 fp, "_wait_for_purchase_entry", return_value={"state": "unknown_page"}
-            ),
-            patch.object(fp, "_confirm_page_ready", return_value=False),
-        ):
+            ), \
+            patch.object(fp, "_confirm_page_ready", return_value=False):
             result = fp.run_cold_validation(start_time=time.time())
+        # fmt: on
         assert result is None
 
     def test_returns_none_when_no_price_coords(self):
         fp, bot, _device = _make_validation_pipeline()
         bot._get_price_option_coordinates_by_config_index.return_value = None
-        with (
-            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True),
+        # fmt: off
+        with \
+            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True), \
             patch.object(
                 fp, "_wait_for_purchase_entry", return_value={"state": "sku_page"}
-            ),
-            patch.object(fp, "_confirm_page_ready", return_value=False),
-        ):
+            ), \
+            patch.object(fp, "_confirm_page_ready", return_value=False):
             result = fp.run_cold_validation(start_time=time.time())
+        # fmt: on
         assert result is None
 
     def test_element_fallback_when_shell_fails(self):
@@ -135,17 +139,18 @@ class TestRunColdValidationBranches:
         bot._click_price_option_by_config_index = Mock(return_value=True)
         bot._click_sku_buy_button_element = Mock(return_value=True)
 
-        with (
-            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True),
+        # fmt: off
+        with \
+            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True), \
             patch.object(
                 fp, "_wait_for_purchase_entry", return_value={"state": "sku_page"}
-            ),
-            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=False),
-            patch.object(fp, "_wait_for_confirm_ready", return_value=True),
-            patch.object(fp, "_finish_confirm", return_value=True),
-            patch.object(fp, "_confirm_page_ready", return_value=False),
-        ):
+            ), \
+            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=False), \
+            patch.object(fp, "_wait_for_confirm_ready", return_value=True), \
+            patch.object(fp, "_finish_confirm", return_value=True), \
+            patch.object(fp, "_confirm_page_ready", return_value=False):
             result = fp.run_cold_validation(start_time=time.time())
+        # fmt: on
         assert result is True
 
     def test_sold_out_detection(self):
@@ -156,19 +161,20 @@ class TestRunColdValidationBranches:
         bot._is_buy_button_sold_out = Mock(return_value=True)
         bot._set_terminal_failure = Mock()
 
-        with (
-            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True),
+        # fmt: off
+        with \
+            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True), \
             patch.object(
                 fp, "_wait_for_purchase_entry", return_value={"state": "sku_page"}
-            ),
-            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=False),
-            patch.object(fp, "_wait_for_confirm_ready", return_value=False),
-            patch.object(fp, "_confirm_page_ready", return_value=False),
-        ):
+            ), \
+            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=False), \
+            patch.object(fp, "_wait_for_confirm_ready", return_value=False), \
+            patch.object(fp, "_confirm_page_ready", return_value=False):
             # Use a start_time in the past so we're past the 50% mark
             result = fp.run_cold_validation(
                 start_time=time.time() - _PIPELINE_DEADLINE_S * 0.6
             )
+        # fmt: on
         assert result is False
         bot._set_terminal_failure.assert_called_once_with("sold_out")
 
@@ -257,13 +263,14 @@ class TestRunWarmValidation:
     def test_success_via_shell(self):
         fp, bot, device = _make_warm_pipeline()
 
-        with (
+        # fmt: off
+        with \
             patch.object(
                 fp, "_wait_for_purchase_entry", return_value={"state": "sku_page"}
-            ),
-            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=True),
-        ):
+            ), \
+            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=True):
             result = fp.run_warm_validation(start_time=time.time())
+        # fmt: on
 
         assert result is True
         bot._set_run_outcome.assert_called_once_with("validation_ready")
@@ -281,13 +288,14 @@ class TestRunWarmValidation:
     def test_returns_none_on_unknown_state(self):
         fp, bot, device = _make_warm_pipeline()
 
-        with (
+        # fmt: off
+        with \
             patch.object(
                 fp, "_wait_for_purchase_entry", return_value={"state": "unknown"}
-            ),
-            patch.object(fp, "_confirm_page_ready", return_value=False),
-        ):
+            ), \
+            patch.object(fp, "_confirm_page_ready", return_value=False):
             result = fp.run_warm_validation(start_time=time.time())
+        # fmt: on
 
         assert result is None
 
@@ -305,47 +313,50 @@ class TestRunWarmValidation:
     def test_element_fallback_on_shell_failure(self):
         fp, bot, device = _make_warm_pipeline()
 
-        with (
+        # fmt: off
+        with \
             patch.object(
                 fp, "_wait_for_purchase_entry", return_value={"state": "sku_page"}
-            ),
-            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=False),
-            patch.object(fp, "_select_price_with_pipeline", return_value=True),
-            patch.object(fp, "_click_sku_buy_with_pipeline", return_value=True),
-            patch.object(fp, "_wait_for_confirm_ready", return_value=True),
-        ):
+            ), \
+            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=False), \
+            patch.object(fp, "_select_price_with_pipeline", return_value=True), \
+            patch.object(fp, "_click_sku_buy_with_pipeline", return_value=True), \
+            patch.object(fp, "_wait_for_confirm_ready", return_value=True):
             result = fp.run_warm_validation(start_time=time.time())
+        # fmt: on
 
         assert result is True
 
     def test_returns_none_when_price_select_fails(self):
         fp, bot, device = _make_warm_pipeline()
 
-        with (
+        # fmt: off
+        with \
             patch.object(
                 fp, "_wait_for_purchase_entry", return_value={"state": "sku_page"}
-            ),
-            patch.object(fp, "_confirm_page_ready", return_value=False),
-            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=False),
-            patch.object(fp, "_select_price_with_pipeline", return_value=False),
-        ):
+            ), \
+            patch.object(fp, "_confirm_page_ready", return_value=False), \
+            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=False), \
+            patch.object(fp, "_select_price_with_pipeline", return_value=False):
             result = fp.run_warm_validation(start_time=time.time())
+        # fmt: on
 
         assert result is None
 
     def test_returns_none_when_sku_buy_fails(self):
         fp, bot, device = _make_warm_pipeline()
 
-        with (
+        # fmt: off
+        with \
             patch.object(
                 fp, "_wait_for_purchase_entry", return_value={"state": "sku_page"}
-            ),
-            patch.object(fp, "_confirm_page_ready", return_value=False),
-            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=False),
-            patch.object(fp, "_select_price_with_pipeline", return_value=True),
-            patch.object(fp, "_click_sku_buy_with_pipeline", return_value=False),
-        ):
+            ), \
+            patch.object(fp, "_confirm_page_ready", return_value=False), \
+            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=False), \
+            patch.object(fp, "_select_price_with_pipeline", return_value=True), \
+            patch.object(fp, "_click_sku_buy_with_pipeline", return_value=False):
             result = fp.run_warm_validation(start_time=time.time())
+        # fmt: on
 
         assert result is None
 
@@ -378,19 +389,20 @@ class TestRunWarmValidation:
         """When on sku_page and confirm is never reached, returns None."""
         fp, bot, device = _make_warm_pipeline()
 
-        with (
+        # fmt: off
+        with \
             patch.object(
                 fp, "_wait_for_purchase_entry", return_value={"state": "sku_page"}
-            ),
-            patch.object(fp, "_confirm_page_ready", return_value=False),
-            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=False),
-            patch.object(fp, "_select_price_with_pipeline", return_value=True),
-            patch.object(fp, "_click_sku_buy_with_pipeline", return_value=True),
-            patch.object(fp, "_wait_for_confirm_ready", return_value=False),
-        ):
+            ), \
+            patch.object(fp, "_confirm_page_ready", return_value=False), \
+            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=False), \
+            patch.object(fp, "_select_price_with_pipeline", return_value=True), \
+            patch.object(fp, "_click_sku_buy_with_pipeline", return_value=True), \
+            patch.object(fp, "_wait_for_confirm_ready", return_value=False):
             result = fp.run_warm_validation(
                 start_time=time.time() - _PIPELINE_DEADLINE_S
             )
+        # fmt: on
 
         assert result is None
 

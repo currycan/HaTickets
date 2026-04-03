@@ -267,16 +267,17 @@ class TestValidationHelpers:
         fp, bot, _device = self._make_validation_pipeline()
         fp._cached_coords["detail_buy"] = (540, 1800)
 
-        with (
-            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True),
+        # fmt: off
+        with \
+            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True), \
             patch.object(
                 fp, "_wait_for_purchase_entry", return_value={"state": "sku_page"}
-            ),
-            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=True),
-            patch.object(fp, "_select_price_with_pipeline") as select_price,
-            patch.object(fp, "_finish_confirm", return_value=True) as finish_confirm,
-        ):
+            ), \
+            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=True), \
+            patch.object(fp, "_select_price_with_pipeline") as select_price, \
+            patch.object(fp, "_finish_confirm", return_value=True) as finish_confirm:
             result = fp.run_cold_validation(start_time=time.time())
+        # fmt: on
 
         assert result is True
         select_price.assert_not_called()
