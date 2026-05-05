@@ -11,6 +11,8 @@ from mobile.prompt_parser import ParseResult, PromptIntent
 from mobile.prompt_runner import (
     UNACTIONABLE_EXIT_CODE,
     _handle_unactionable_apply,
+    _is_stdin_tty,
+    _update_parse_result_post_discovery,
     parse_args,
 )
 
@@ -90,3 +92,64 @@ class TestUnactionableFallback:
             )
             is False
         )
+
+
+class TestUpdateParseResultPostDiscovery:
+    """覆盖 _update_parse_result_post_discovery 的所有分支。"""
+
+    def _result(self, date=None, confidence=0.5):
+        intent = PromptIntent(raw_prompt="x", search_keyword="k", date=date)
+        return ParseResult(
+            intent=intent, matched_item=None, confidence=confidence, diagnostics=[]
+        )
+
+    def test_no_summary_clears_matched_item(self):
+        r = self._result()
+        _update_parse_result_post_discovery(r, {"summary": {}}, None)
+        assert r.matched_item is None
+
+    def test_intent_date_in_visible_dates(self):
+        r = self._result(date="04.06")
+        summary = {"dates": ["04.05", "04.06"], "title": "X"}
+        _update_parse_result_post_discovery(r, {"summary": summary}, {"text": "880元"})
+        assert r.matched_session == "04.06"
+        assert r.matched_price == "880元"
+        # confidence 应被 +0.05
+        assert r.confidence > 0.5
+
+    def test_single_visible_date_used(self):
+        r = self._result(date=None)
+        summary = {"dates": ["04.07"]}
+        _update_parse_result_post_discovery(r, {"summary": summary}, None)
+        assert r.matched_session == "04.07"
+        # 没 chosen_price 应加 diagnostic
+        assert any("无法从页面票档" in d for d in r.diagnostics)
+
+    def test_multiple_dates_no_match_adds_diagnostic(self):
+        r = self._result(date="04.06")
+        summary = {"dates": ["04.04", "04.05"]}
+        _update_parse_result_post_discovery(r, {"summary": summary}, None)
+        assert r.matched_session is None
+        assert any("未找到唯一匹配" in d for d in r.diagnostics)
+
+    def test_no_dates_with_undefined_intent_date(self):
+        r = self._result(date=None)
+        summary = {"dates": []}
+        _update_parse_result_post_discovery(r, {"summary": summary}, {"text": "580元"})
+        # 没有可见日期且 intent.date 也无 → 走 else 分支，记录 diagnostic
+        assert r.matched_session is None
+        assert any("<未指定>" in d for d in r.diagnostics)
+
+
+class TestIsStdinTty:
+    def test_returns_bool_without_raising(self):
+        # 仅确认调用安全；具体值取决于运行环境
+        result = _is_stdin_tty()
+        assert isinstance(result, bool)
+
+    def test_attribute_error_path(self, monkeypatch):
+        class NoIsattyStdin:
+            pass
+
+        monkeypatch.setattr("mobile.prompt_runner.sys.stdin", NoIsattyStdin())
+        assert _is_stdin_tty() is False
