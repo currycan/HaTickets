@@ -1,11 +1,13 @@
 """Unit tests for mobile/config.py"""
+
 import json
-import os
 
 import pytest
 
 from mobile.config import (
     Config,
+    ConfigError,
+    PRICE_INDEX_LARGE_WARNING_THRESHOLD,
     _load_config_dict_from_path,
     _resolve_existing_config_path,
     _resolve_writable_config_path,
@@ -36,7 +38,6 @@ def _make(**overrides):
 
 
 class TestStripJsoncComments:
-
     def test_strip_single_line_comments(self):
         text = '{\n  "key": "value" // this is a comment\n}'
         result = _strip_jsonc_comments(text)
@@ -58,7 +59,6 @@ class TestStripJsoncComments:
 
 
 class TestMobileConfigInit:
-
     def test_config_init_stores_all_attributes(self):
         cfg = Config(
             keyword="周深",
@@ -86,7 +86,6 @@ class TestMobileConfigInit:
 
 
 class TestMobileConfigValidation:
-
     def test_serial_string_is_valid(self):
         cfg = Config(**_make(serial="c6c4eb67"))
         assert cfg.serial == "c6c4eb67"
@@ -161,7 +160,6 @@ class TestMobileConfigValidation:
 
 
 class TestMobileConfigNewFields:
-
     def test_sell_start_time_valid_iso(self):
         cfg = Config(**_make(sell_start_time="2026-04-01T20:00:00+08:00"))
         assert cfg.sell_start_time == "2026-04-01T20:00:00+08:00"
@@ -220,12 +218,15 @@ class TestMobileConfigNewFields:
 
 
 class TestMobileConfigLoadConfig:
-
     def test_load_config_dict_from_missing_path_raises(self, tmp_path):
-        with pytest.raises(FileNotFoundError, match=f"配置文件未找到: {tmp_path / 'missing.jsonc'}"):
+        with pytest.raises(
+            FileNotFoundError, match=f"配置文件未找到: {tmp_path / 'missing.jsonc'}"
+        ):
             _load_config_dict_from_path(tmp_path / "missing.jsonc")
 
-    def test_resolve_existing_config_path_uses_default_config(self, tmp_path, monkeypatch):
+    def test_resolve_existing_config_path_uses_default_config(
+        self, tmp_path, monkeypatch
+    ):
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("HATICKETS_CONFIG_PATH", raising=False)
         (tmp_path / "config.local.jsonc").write_text("{}", encoding="utf-8")
@@ -233,21 +234,27 @@ class TestMobileConfigLoadConfig:
 
         assert _resolve_existing_config_path() == "config.jsonc"
 
-    def test_resolve_existing_config_path_uses_env_override(self, tmp_path, monkeypatch):
+    def test_resolve_existing_config_path_uses_env_override(
+        self, tmp_path, monkeypatch
+    ):
         monkeypatch.chdir(tmp_path)
         (tmp_path / "config.local.jsonc").write_text("{}", encoding="utf-8")
         monkeypatch.setenv("HATICKETS_CONFIG_PATH", "config.local.jsonc")
 
         assert _resolve_existing_config_path() == "config.local.jsonc"
 
-    def test_resolve_writable_config_path_defaults_to_shared(self, tmp_path, monkeypatch):
+    def test_resolve_writable_config_path_defaults_to_shared(
+        self, tmp_path, monkeypatch
+    ):
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("HATICKETS_CONFIG_PATH", raising=False)
         (tmp_path / "config.jsonc").write_text("{}", encoding="utf-8")
 
         assert _resolve_writable_config_path() == "config.jsonc"
 
-    def test_resolve_writable_config_path_uses_env_override(self, tmp_path, monkeypatch):
+    def test_resolve_writable_config_path_uses_env_override(
+        self, tmp_path, monkeypatch
+    ):
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("HATICKETS_CONFIG_PATH", "config.local.jsonc")
 
@@ -255,7 +262,11 @@ class TestMobileConfigLoadConfig:
 
     def test_load_config_success(self, mock_mobile_config_file, monkeypatch):
         mock_mobile_config_file()
-        monkeypatch.chdir(mock_mobile_config_file.__wrapped__ if hasattr(mock_mobile_config_file, '__wrapped__') else mock_mobile_config_file().parent)
+        monkeypatch.chdir(
+            mock_mobile_config_file.__wrapped__
+            if hasattr(mock_mobile_config_file, "__wrapped__")
+            else mock_mobile_config_file().parent
+        )
         # Re-create since chdir changed
         config_data = {
             "app_package": "cn.damai",
@@ -294,7 +305,9 @@ class TestMobileConfigLoadConfig:
             "price_index": 0,
             "if_commit_order": False,
         }
-        (tmp_path / "config.jsonc").write_text(json.dumps(config_data), encoding="utf-8")
+        (tmp_path / "config.jsonc").write_text(
+            json.dumps(config_data), encoding="utf-8"
+        )
 
         cfg = Config.load_config()
         assert cfg.serial == "abc123"
@@ -327,7 +340,9 @@ class TestMobileConfigLoadConfig:
             "price_index": 0,
             "if_commit_order": False,
         }
-        (tmp_path / "config.jsonc").write_text(json.dumps(config_data), encoding="utf-8")
+        (tmp_path / "config.jsonc").write_text(
+            json.dumps(config_data), encoding="utf-8"
+        )
 
         with pytest.raises(KeyError, match="keyword"):
             Config.load_config()
@@ -420,7 +435,9 @@ class TestMobileConfigLoadConfig:
             "probe_only": True,
             "rush_mode": True,
         }
-        (tmp_path / "config.jsonc").write_text(json.dumps(config_data), encoding="utf-8")
+        (tmp_path / "config.jsonc").write_text(
+            json.dumps(config_data), encoding="utf-8"
+        )
 
         cfg = Config.load_config()
         assert cfg.rush_mode is True
@@ -438,7 +455,9 @@ class TestMobileConfigLoadConfig:
             "probe_only": True,
             "wait_cta_ready_timeout_ms": 45000,
         }
-        (tmp_path / "config.jsonc").write_text(json.dumps(config_data), encoding="utf-8")
+        (tmp_path / "config.jsonc").write_text(
+            json.dumps(config_data), encoding="utf-8"
+        )
 
         cfg = Config.load_config()
         assert cfg.wait_cta_ready_timeout_ms == 45000
@@ -454,20 +473,32 @@ class TestMobileConfigLoadConfig:
             "price_index": 0,
             "if_commit_order": False,
         }
-        (tmp_path / "config.jsonc").write_text(json.dumps({
-            **shared_fields,
-            "keyword": "from-default",
-        }), encoding="utf-8")
-        (tmp_path / "config.local.jsonc").write_text(json.dumps({
-            **shared_fields,
-            "keyword": "from-local",
-        }), encoding="utf-8")
+        (tmp_path / "config.jsonc").write_text(
+            json.dumps(
+                {
+                    **shared_fields,
+                    "keyword": "from-default",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "config.local.jsonc").write_text(
+            json.dumps(
+                {
+                    **shared_fields,
+                    "keyword": "from-local",
+                }
+            ),
+            encoding="utf-8",
+        )
 
         cfg = Config.load_config()
 
         assert cfg.keyword == "from-default"
 
-    def test_load_config_uses_env_override_for_config_local_jsonc(self, tmp_path, monkeypatch):
+    def test_load_config_uses_env_override_for_config_local_jsonc(
+        self, tmp_path, monkeypatch
+    ):
         monkeypatch.chdir(tmp_path)
         shared_fields = {
             "users": ["A"],
@@ -477,14 +508,24 @@ class TestMobileConfigLoadConfig:
             "price_index": 0,
             "if_commit_order": False,
         }
-        (tmp_path / "config.jsonc").write_text(json.dumps({
-            **shared_fields,
-            "keyword": "from-default",
-        }), encoding="utf-8")
-        (tmp_path / "config.local.jsonc").write_text(json.dumps({
-            **shared_fields,
-            "keyword": "from-local",
-        }), encoding="utf-8")
+        (tmp_path / "config.jsonc").write_text(
+            json.dumps(
+                {
+                    **shared_fields,
+                    "keyword": "from-default",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "config.local.jsonc").write_text(
+            json.dumps(
+                {
+                    **shared_fields,
+                    "keyword": "from-local",
+                }
+            ),
+            encoding="utf-8",
+        )
         monkeypatch.setenv("HATICKETS_CONFIG_PATH", "config.local.jsonc")
 
         cfg = Config.load_config()
@@ -509,7 +550,9 @@ class TestMobileConfigLoadConfig:
         assert (tmp_path / "config.jsonc").exists()
         assert load_config_dict() == source
 
-    def test_save_config_dict_uses_env_override_for_config_local_jsonc(self, tmp_path, monkeypatch):
+    def test_save_config_dict_uses_env_override_for_config_local_jsonc(
+        self, tmp_path, monkeypatch
+    ):
         monkeypatch.chdir(tmp_path)
         source = {
             "keyword": "test",
@@ -531,6 +574,7 @@ class TestMobileConfigLoadConfig:
 # ---------------------------------------------------------------------------
 # Uncovered validation branches
 # ---------------------------------------------------------------------------
+
 
 class TestUncoveredBranches:
     def test_keyword_none_raises(self):
@@ -558,6 +602,62 @@ class TestUncoveredBranches:
             "probe_only": False,
         }
         import json
+
         (tmp_path / "config.jsonc").write_text(json.dumps(source))
         with pytest.raises(KeyError, match="keyword"):
             Config.load_config()
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — load_config price_index range validation (P1 #31)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadConfigPriceIndexRange:
+    def _config_dict(self, price_index):
+        return {
+            "keyword": "周深",
+            "users": ["A"],
+            "city": "深圳",
+            "date": "01.01",
+            "price": "100元",
+            "price_index": price_index,
+            "if_commit_order": False,
+        }
+
+    def test_negative_price_index_raises_config_error(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config.jsonc").write_text(
+            json.dumps(self._config_dict(-1)), encoding="utf-8"
+        )
+        with pytest.raises(ConfigError, match="price_index 不能为负数"):
+            Config.load_config()
+
+    def test_config_error_is_value_error_subclass(self):
+        # ConfigError keeps backwards-compat with broad "except ValueError"
+        assert issubclass(ConfigError, ValueError)
+
+    def test_large_price_index_logs_warning(self, tmp_path, monkeypatch, caplog):
+        monkeypatch.chdir(tmp_path)
+        oversized = PRICE_INDEX_LARGE_WARNING_THRESHOLD + 1
+        (tmp_path / "config.jsonc").write_text(
+            json.dumps(self._config_dict(oversized)), encoding="utf-8"
+        )
+        with caplog.at_level("WARNING", logger="mobile.config"):
+            cfg = Config.load_config()
+        assert cfg.price_index == oversized
+        assert any(
+            "price_index" in rec.message and "异常大" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_threshold_value_does_not_warn(self, tmp_path, monkeypatch, caplog):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config.jsonc").write_text(
+            json.dumps(self._config_dict(PRICE_INDEX_LARGE_WARNING_THRESHOLD)),
+            encoding="utf-8",
+        )
+        with caplog.at_level("WARNING", logger="mobile.config"):
+            cfg = Config.load_config()
+        assert cfg.price_index == PRICE_INDEX_LARGE_WARNING_THRESHOLD
+        assert not any("异常大" in rec.message for rec in caplog.records)
