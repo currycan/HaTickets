@@ -10,7 +10,7 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.8"
+python = ">=3.8,<3.14"
 selenium = ">=4.22.0,<4.28"
 uiautomator2 = "^3.2"
 adbutils = "^2.9"

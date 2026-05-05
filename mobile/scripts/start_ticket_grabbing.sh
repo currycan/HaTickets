@@ -52,6 +52,41 @@ else
     echo "🎫 启动大麦抢票脚本..."
 fi
 
+# Python 版本检查（早期 fail-fast，避免后续 poetry/import 失败信息混乱）
+# 推荐 3.10~3.13；3.8/3.9 给警告（兼容老用户）；其他报错退出（含 3.14 — uiautomator2/selenium wheel 未就绪，issue #21）
+_HATICKETS_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_HATICKETS_ROOT_DIR="$(cd "$_HATICKETS_SCRIPT_DIR/../.." && pwd)"
+if [ -x "$_HATICKETS_ROOT_DIR/.venv/bin/python" ]; then
+    _HATICKETS_PYBIN="$_HATICKETS_ROOT_DIR/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    _HATICKETS_PYBIN="$(command -v python3)"
+elif command -v python >/dev/null 2>&1; then
+    _HATICKETS_PYBIN="$(command -v python)"
+else
+    echo "❌ 未找到可用的 Python 解释器（python3 / python / .venv/bin/python 均不存在）"
+    exit 4
+fi
+
+PY_VERSION="$("$_HATICKETS_PYBIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)"
+case "$PY_VERSION" in
+    3.10|3.11|3.12|3.13)
+        # 已在 CI 验证，静默通过
+        ;;
+    3.8|3.9)
+        echo "⚠️  Python $PY_VERSION 处于受限支持区间，建议升级到 3.10 ~ 3.13（仍会继续执行）"
+        ;;
+    "")
+        echo "❌ 无法获取 Python 版本号（解释器：$_HATICKETS_PYBIN）"
+        exit 4
+        ;;
+    *)
+        echo "❌ Python $PY_VERSION 暂不支持。请使用 3.10 ~ 3.13。"
+        echo "   issue #21: Python 3.14 暂未支持（uiautomator2 / selenium 上游 wheel 未就绪）"
+        exit 4
+        ;;
+esac
+unset _HATICKETS_SCRIPT_DIR _HATICKETS_ROOT_DIR _HATICKETS_PYBIN
+
 # 设置Android环境变量（优先使用已有环境变量，否则自动检测常见路径）
 if [ -z "$ANDROID_HOME" ]; then
     if [ -d "$HOME/Library/Android/sdk" ]; then
