@@ -619,6 +619,41 @@ def build_updated_config(
     return config_data
 
 
+UNACTIONABLE_EXIT_CODE = 5
+
+
+def _is_stdin_tty() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _print_unactionable_diagnostics(parse_result, stream=None):
+    stream = stream or sys.stderr
+    print(
+        f"NLP 解析置信度 {parse_result.confidence:.2f}（阈值 0.60），存在以下不确定项：",
+        file=stream,
+    )
+    for line in parse_result.diagnostics:
+        print(f"  - {line}", file=stream)
+
+
+def _handle_unactionable_apply(parse_result, force_non_interactive: bool) -> bool:
+    """is_actionable=False 时的 fallback。
+
+    非交互模式（强制 ``--non-interactive`` 或 stdin 非 TTY）→ 把诊断写到 stderr，
+    返回 ``False`` 表示调用方应 ``exit 5``。
+
+    TTY 模式 → 把诊断写到 stderr，让用户决定是否继续走交互式补缺流程
+    （现有 ``_resolve_confirmed_date`` / ``_resolve_confirmed_price`` 已能交互补缺）。
+    """
+    _print_unactionable_diagnostics(parse_result)
+    if force_non_interactive or not _is_stdin_tty():
+        return False
+    return _prompt_yes_no("解析置信度不足，是否仍然进入交互模式补充缺失项？")
+
+
 def _update_parse_result_post_discovery(parse_result, discovery: dict, chosen_price):
     """在 discover_target_event 之后回填 ParseResult 的匹配状态与诊断。"""
     summary = discovery.get("summary") or {}
@@ -664,6 +699,11 @@ def parse_args(argv=None):
     parser.add_argument(
         "--config",
         help="显式指定配置文件路径；默认写入 mobile/config.jsonc。开发者本地覆盖可配合 HATICKETS_CONFIG_PATH 或 mobile/config.local.jsonc 使用。",
+    )
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="强制非交互行为：is_actionable=False 时直接 exit 5 并把诊断写到 stderr，CI 用",
     )
     return parser.parse_args(argv)
 
@@ -739,6 +779,17 @@ def main(argv=None):
         if args.mode == "summary":
             _print_result(True, _success_detail_for_mode(args.mode))
             return 0
+
+        # apply / probe 模式：is_actionable=False 时拒绝写残缺 config
+        if not parse_result.is_actionable():
+            if not _handle_unactionable_apply(
+                parse_result, force_non_interactive=args.non_interactive
+            ):
+                _print_result(
+                    False,
+                    "解析置信度不足，已停止写入配置；请补充提示词后重试或在 TTY 中重新运行进行交互补缺。",
+                )
+                return UNACTIONABLE_EXIT_CODE
 
         date_text = _resolve_confirmed_date(intent, discovery["summary"], args.yes)
         if not date_text:
