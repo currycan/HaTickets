@@ -47,3 +47,6 @@ tmp_*.png
 tmp_*.xml
 mobile/tmp_*.png
 mobile/tmp_*.xml
+
+# Internal R&D PM workspace (not for public consumption)
+reference/

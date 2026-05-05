@@ -7,10 +7,12 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
 from statistics import mean
+from typing import Optional
 
 try:
     from mobile.config import CONFIG_OVERRIDE_ENV_VAR, Config
@@ -24,12 +26,28 @@ START_STATE = "detail_page"
 
 
 class StepTimelineRecorder(logging.Handler):
-    """Collect run-time step logs and per-step deltas from damai_app logger."""
+    """Collect run-time step logs and per-step deltas from damai_app logger.
+
+    Tracks two additional fields populated when a CTA-match log line is seen
+    (issue #29 — UI 文案变更回归追踪)：
+
+    - ``cta_text_seen``: 命中的 sale-ready 文案（如"立即预订" / "Book Now"），
+      若整轮未命中则为 None。
+    - ``polls_before_match``: ``wait_for_sale_start`` 命中前的轮询次数。
+    """
+
+    # 解析 wait_for_sale_start 的 CTA_MATCH 日志行
+    # 例：CTA_MATCH: text='立即预订' polls=3 (开售已开始)
+    _CTA_MATCH_PATTERN = re.compile(
+        r"CTA_MATCH:\s*text=['\"](?P<text>[^'\"]+)['\"]\s+polls=(?P<polls>\d+)"
+    )
 
     def __init__(self):
         super().__init__(level=logging.INFO)
         self.events = []
         self._last_created = None
+        self.cta_text_seen: Optional[str] = None
+        self.polls_before_match: int = 0
 
     def emit(self, record: logging.LogRecord):
         if record.levelno < logging.INFO:
@@ -38,13 +56,27 @@ class StepTimelineRecorder(logging.Handler):
         if not message:
             return
 
-        delta = 0.0 if self._last_created is None else round(record.created - self._last_created, 2)
+        delta = (
+            0.0
+            if self._last_created is None
+            else round(record.created - self._last_created, 2)
+        )
         self._last_created = record.created
-        self.events.append({
-            "level": record.levelname,
-            "message": message,
-            "delta_seconds": delta,
-        })
+        self.events.append(
+            {
+                "level": record.levelname,
+                "message": message,
+                "delta_seconds": delta,
+            }
+        )
+
+        match = self._CTA_MATCH_PATTERN.search(message)
+        if match:
+            self.cta_text_seen = match.group("text")
+            try:
+                self.polls_before_match = int(match.group("polls"))
+            except (TypeError, ValueError):
+                self.polls_before_match = 0
 
 
 def _attach_timeline_recorder():
@@ -88,10 +120,17 @@ def parse_args(argv=None):
     )
     parser.add_argument("--runs", type=int, default=3, help="压测轮次，默认 3")
     parser.add_argument("--price", help="覆盖当前配置中的票档文本，例如 580元")
-    parser.add_argument("--price-index", type=int, dest="price_index", help="覆盖当前配置中的 price_index")
+    parser.add_argument(
+        "--price-index",
+        type=int,
+        dest="price_index",
+        help="覆盖当前配置中的 price_index",
+    )
     parser.add_argument("--city", help="覆盖当前配置中的城市")
     parser.add_argument("--date", help="覆盖当前配置中的场次日期，例如 04.18")
-    parser.add_argument("--json", action="store_true", dest="json_output", help="输出 JSON 结果")
+    parser.add_argument(
+        "--json", action="store_true", dest="json_output", help="输出 JSON 结果"
+    )
     return parser.parse_args(argv)
 
 
@@ -108,22 +147,28 @@ def build_benchmark_config(base_config: Config, args) -> Config:
     if args.date is not None:
         config_data["date"] = args.date
 
-    config_data.update({
-        "target_title": None,
-        "target_venue": None,
-        "auto_navigate": False,
-        "rush_mode": True,
-        "if_commit_order": False,
-        "probe_only": False,
-        "sell_start_time": None,
-        "wait_cta_ready_timeout_ms": 0,
-    })
+    config_data.update(
+        {
+            "target_title": None,
+            "target_venue": None,
+            "auto_navigate": False,
+            "rush_mode": True,
+            "if_commit_order": False,
+            "probe_only": False,
+            "sell_start_time": None,
+            "wait_cta_ready_timeout_ms": 0,
+        }
+    )
     return Config(**config_data)
 
 
 _DETAIL_PAGE_PROBE = {
-    "state": "detail_page", "purchase_button": True, "price_container": False,
-    "quantity_picker": False, "submit_button": False, "reservation_mode": False,
+    "state": "detail_page",
+    "purchase_button": True,
+    "price_container": False,
+    "quantity_picker": False,
+    "submit_button": False,
+    "reservation_mode": False,
     "pending_order_dialog": False,
 }
 
@@ -135,9 +180,13 @@ def _fast_check_detail_page(bot: DamaiBot) -> dict | None:
     Falls back to the full probe when the fast check is ambiguous.
     """
     from selenium.webdriver.common.by import By
+
     try:
         if hasattr(bot, "_find_all"):
-            els = bot._find_all(By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl")
+            els = bot._find_all(
+                By.ID,
+                "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl",
+            )
         else:
             els = bot.driver.find_elements(
                 by=By.ID,
@@ -230,7 +279,11 @@ def _require_detail_start(bot: DamaiBot, run_label: str) -> dict:
 def summarize_results(results: list[dict]) -> dict:
     """Summarise benchmark results across all runs."""
     elapsed_values = [item["elapsed_seconds"] for item in results]
-    recovery_values = [item["recovery_seconds"] for item in results if item["recovery_seconds"] is not None]
+    recovery_values = [
+        item["recovery_seconds"]
+        for item in results
+        if item["recovery_seconds"] is not None
+    ]
 
     return {
         "runs": len(results),
@@ -238,11 +291,15 @@ def summarize_results(results: list[dict]) -> dict:
         "avg_elapsed_seconds": round(mean(elapsed_values), 2),
         "min_elapsed_seconds": round(min(elapsed_values), 2),
         "max_elapsed_seconds": round(max(elapsed_values), 2),
-        "avg_recovery_seconds": round(mean(recovery_values), 2) if recovery_values else None,
+        "avg_recovery_seconds": round(mean(recovery_values), 2)
+        if recovery_values
+        else None,
     }
 
 
-def _run_one(bot: DamaiBot, run_start_probe: dict, run_label: str) -> tuple[bool, float, dict, list]:
+def _run_one(
+    bot: DamaiBot, run_start_probe: dict, run_label: str
+) -> tuple[bool, float, dict, list]:
     """Execute one timed ticket-grabbing attempt and return (success, elapsed, final_probe, timeline)."""
     recorder, attached_loggers = _attach_timeline_recorder()
     try:
@@ -271,7 +328,11 @@ def run_benchmark(bot: DamaiBot, runs: int) -> dict:
 
     results = []
     for index in range(runs):
-        run_start_probe = initial_probe if index == 0 else _require_detail_start(bot, f"第 {index + 1} 轮开始")
+        run_start_probe = (
+            initial_probe
+            if index == 0
+            else _require_detail_start(bot, f"第 {index + 1} 轮开始")
+        )
 
         success, elapsed_seconds, final_probe, timeline = _run_one(
             bot, run_start_probe, f"第 {index + 1} 轮"
@@ -285,16 +346,18 @@ def run_benchmark(bot: DamaiBot, runs: int) -> dict:
             recovery_seconds = round(time.time() - recovery_start, 2)
             recovery_state = recovery_probe["state"]
 
-        results.append({
-            "run": index + 1,
-            "success": success,
-            "elapsed_seconds": elapsed_seconds,
-            "final_state": final_probe["state"],
-            "submit_button_ready": bool(final_probe.get("submit_button")),
-            "recovery_seconds": recovery_seconds,
-            "recovery_state": recovery_state,
-            "step_timeline": timeline,
-        })
+        results.append(
+            {
+                "run": index + 1,
+                "success": success,
+                "elapsed_seconds": elapsed_seconds,
+                "final_state": final_probe["state"],
+                "submit_button_ready": bool(final_probe.get("submit_button")),
+                "recovery_seconds": recovery_seconds,
+                "recovery_state": recovery_state,
+                "step_timeline": timeline,
+            }
+        )
 
     return {
         "title": initial_title,
@@ -335,21 +398,23 @@ def format_report(payload: dict) -> str:
                 )
 
     summary = payload["summary"]
-    lines.extend([
-        "",
-        "汇总:",
-        f"runs={summary['runs']}, success={summary['success_count']}/{summary['runs']}",
-        (
-            f"avg/min/max = {summary['avg_elapsed_seconds']:.2f}s / "
-            f"{summary['min_elapsed_seconds']:.2f}s / {summary['max_elapsed_seconds']:.2f}s"
-            f"  (n={summary['runs']})"
-        ),
-        (
-            "recovery avg = "
-            f"{summary['avg_recovery_seconds']:.2f}s" if summary["avg_recovery_seconds"] is not None else
-            "recovery avg = -"
-        ),
-    ])
+    lines.extend(
+        [
+            "",
+            "汇总:",
+            f"runs={summary['runs']}, success={summary['success_count']}/{summary['runs']}",
+            (
+                f"avg/min/max = {summary['avg_elapsed_seconds']:.2f}s / "
+                f"{summary['min_elapsed_seconds']:.2f}s / {summary['max_elapsed_seconds']:.2f}s"
+                f"  (n={summary['runs']})"
+            ),
+            (
+                f"recovery avg = {summary['avg_recovery_seconds']:.2f}s"
+                if summary["avg_recovery_seconds"] is not None
+                else "recovery avg = -"
+            ),
+        ]
+    )
     return "\n".join(lines)
 
 

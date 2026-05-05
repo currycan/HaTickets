@@ -6,12 +6,21 @@ __Description__ = "大麦app抢票自动化 - 优化版"
 __Created__ = 2025/09/13 19:27
 """
 
+from __future__ import annotations
+
 import re
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 
-from selenium.webdriver.common.by import By
+try:
+    from selenium.webdriver.common.by import By
+except ModuleNotFoundError as e:
+    raise SystemExit(
+        "依赖缺失：selenium 未安装。\n"
+        "→ 请在项目根目录运行：poetry install\n"
+        "→ 然后通过 mobile/scripts/start_ticket_grabbing.sh 启动而非直接运行 .py"
+    ) from e
 
 try:
     from mobile.config import Config
@@ -68,10 +77,22 @@ _PRICE_UNAVAILABLE_TAGS = {
     "不可选",
     "暂不可售",
 }
-_CTA_READY_KEYWORDS = (
-    "立即购买",
-    "立即抢票",
+# 开售后大麦详情页 / 票务面板上"可点购票"的安全文案集合（issue #29）。
+# 任意一个文案出现即视为开售已开放购买入口；不在此列的文案（如"预约抢票""即将开抢"）
+# 一律视为未开售，避免误点预约入口。
+SALE_READY_TEXTS: tuple[str, ...] = (
+    "立即购票",
     "立即预定",
+    "立即预订",  # 大麦 2026-04 后新增（issue #29）
+    "立即抢票",
+    "Book Now",  # 国际化场景兜底
+)
+# UiSelector textMatches 用：基于 SALE_READY_TEXTS 自动生成的正则联合
+# （新增/修改 SALE_READY_TEXTS 时此处自动同步，避免文案分散）
+_SALE_READY_TEXT_REGEX_OR = "|".join(f".*{t}.*" for t in SALE_READY_TEXTS)
+_CTA_READY_KEYWORDS = (
+    *SALE_READY_TEXTS,
+    "立即购买",
     "选座购买",
     "购买",
     "抢票",
@@ -844,10 +865,11 @@ class DamaiBot(UIPrimitives):
                 timeout=0.2,
             )
             if not _buy_clicked:
+                # 文案集合源 SALE_READY_TEXTS（issue #29）+ 旧文案兜底
                 _buy_clicked = self._cached_tap(
                     "detail_buy",
                     ANDROID_UIAUTOMATOR,
-                    'new UiSelector().textMatches(".*购票.*|.*抢票.*|.*购买.*|.*立即.*")',
+                    f'new UiSelector().textMatches("{_SALE_READY_TEXT_REGEX_OR}|.*购票.*|.*抢票.*|.*购买.*")',
                     timeout=0.25,
                 )
             if _buy_clicked:
@@ -857,6 +879,7 @@ class DamaiBot(UIPrimitives):
                 if next_probe["state"] in {"sku_page", "order_confirm_page"}:
                     return next_probe
 
+        # 文案集合源 SALE_READY_TEXTS（issue #29）+ 旧"预约/购买"兜底
         book_selectors = [
             (
                 By.ID,
@@ -864,7 +887,7 @@ class DamaiBot(UIPrimitives):
             ),
             (
                 ANDROID_UIAUTOMATOR,
-                'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*")',
+                f'new UiSelector().textMatches("{_SALE_READY_TEXT_REGEX_OR}|.*预约.*|.*购买.*")',
             ),
             (By.XPATH, '//*[contains(@text,"预约") or contains(@text,"购买")]'),
         ]
@@ -916,16 +939,25 @@ class DamaiBot(UIPrimitives):
         return any(normalize_text(keyword) in merged for keyword in _CTA_READY_KEYWORDS)
 
     def _is_sale_ready(self):
-        """Check whether the current UI state is actionable for purchase."""
-        ready_selectors = [
-            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("立即购买")'),
-            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("立即抢票")'),
-            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("选座购买")'),
-            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("立即提交")'),
-            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("提交订单")'),
-        ]
-        for by, value in ready_selectors:
-            if self._has_element(by, value):
+        """Check whether the current UI state is actionable for purchase.
+
+        Sale-readiness is detected via :data:`SALE_READY_TEXTS` (开售文案) plus
+        a small set of post-confirm CTAs ("立即购买" / "选座购买" / "提交订单" 等)
+        that may appear once the user has already entered the SKU/order page.
+        """
+        ready_texts = (
+            *SALE_READY_TEXTS,
+            "立即购买",
+            "选座购买",
+            "立即提交",
+            "提交订单",
+        )
+        for text in ready_texts:
+            if self._has_element(
+                ANDROID_UIAUTOMATOR,
+                f'new UiSelector().textContains("{text}")',
+            ):
+                self._last_sale_ready_text = text
                 return True
 
         if self._has_element(
@@ -978,13 +1010,16 @@ class DamaiBot(UIPrimitives):
 
         # Tight polling loop with multiple purchase signals until the page becomes actionable.
         deadline = sell_time + timedelta(seconds=8)
+        polls = 0
         while datetime.now(tz=_tz_shanghai) < deadline:
+            polls += 1
             if self._is_sale_ready():
-                logger.info("检测到可购买按钮，开售已开始")
+                cta_text = getattr(self, "_last_sale_ready_text", None) or "?"
+                logger.info(f"CTA_MATCH: text={cta_text!r} polls={polls} (开售已开始)")
                 return
             time.sleep(0.08)
 
-        logger.warning("等待开售超时，继续执行")
+        logger.warning(f"等待开售超时（轮询 {polls} 次），继续执行")
 
     def verify_order_result(self, timeout=5):
         """验证订单提交结果"""
@@ -1739,9 +1774,7 @@ class DamaiBot(UIPrimitives):
                                     duration=25,
                                 )
                             except Exception:
-                                self.ultra_fast_click(
-                                    By.ID, "cn.damai:id/btn_buy_view"
-                                )
+                                self.ultra_fast_click(By.ID, "cn.damai:id/btn_buy_view")
                 else:
                     if not self.ultra_fast_click(By.ID, "cn.damai:id/btn_buy_view"):
                         self.ultra_fast_click(

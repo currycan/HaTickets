@@ -4,6 +4,21 @@
 #   正式抢票: ./start_ticket_grabbing.sh [--yes] [--config mobile/config.local.jsonc]
 #   安全探测: ./start_ticket_grabbing.sh --probe [--yes] [--config mobile/config.local.jsonc]
 
+# 依赖预检：Poetry + 关键 Python 包（issue #32）
+if ! command -v poetry >/dev/null 2>&1; then
+    echo "❌ Poetry 未安装。请先安装 Poetry: https://python-poetry.org/docs/#installation"
+    exit 2
+fi
+
+if ! poetry run python -c "import selenium, uiautomator2, adbutils" >/dev/null 2>&1; then
+    echo "⚠ 检测到关键 Python 依赖缺失（selenium / uiautomator2 / adbutils）"
+    echo "→ 自动执行: poetry install"
+    if ! poetry install; then
+        echo "❌ poetry install 失败。请手动检查 pyproject.toml 与网络后重试。"
+        exit 3
+    fi
+fi
+
 ASSUME_YES=false
 CONFIG_OVERRIDE=""
 PROBE_MODE=false
