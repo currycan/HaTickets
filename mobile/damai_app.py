@@ -52,10 +52,14 @@ except ImportError:
 
 try:
     from mobile.buy_button_guard import BuyButtonGuard
-    from mobile.page_probe import PageProbe
+    from mobile.page_probe import PageProbe, PageState
     from mobile.fast_pipeline import FastPipeline, poll_until, batch_shell_taps
     from mobile.recovery import RecoveryHelper
-    from mobile.event_navigator import EventNavigator
+    from mobile.event_navigator import (
+        EventNavigator,
+        SessionNotFoundError,
+        select_session,
+    )
     from mobile.price_selector import (
         PriceSelector,
         PriceSelectorError,
@@ -64,10 +68,12 @@ try:
     from mobile.attendee_selector import AttendeeSelector
 except ImportError:
     from buy_button_guard import BuyButtonGuard
-    from page_probe import PageProbe
+    from page_probe import PageProbe  # type: ignore[no-redef]
     from fast_pipeline import FastPipeline
     from recovery import RecoveryHelper
-    from event_navigator import EventNavigator
+    from event_navigator import (  # type: ignore[no-redef]
+        EventNavigator,
+    )
     from price_selector import PriceSelector
     from attendee_selector import AttendeeSelector
 
@@ -808,6 +814,38 @@ class DamaiBot(UIPrimitives):
             logger.info(f"选择场次日期: {self.config.date}")
         else:
             logger.debug(f"未找到日期 '{self.config.date}'，使用默认场次")
+
+    def _handle_session_picker(self):
+        """SESSION_PICKER 状态下按 config.date / config.city 选定场次。
+
+        优先级与 :func:`mobile.event_navigator.select_session` 一致：
+        date+city > date 唯一 > fallback_index(0)。多场次场景下永不跳过，
+        即便 rush_skip_session=True 也强制选场（issue #25 根因防御）。
+        """
+        try:
+            from mobile.date_utils import normalize_date
+        except ImportError:  # pragma: no cover
+            from date_utils import normalize_date  # type: ignore[no-redef]
+
+        normalised_date = normalize_date(self.config.date) if self.config.date else None
+        try:
+            chosen_idx = select_session(
+                self.d,
+                date=normalised_date,
+                city=self.config.city,
+                fallback_index=0,
+            )
+            logger.info(
+                "多场次活动：已选定场次 idx=%d (date=%s, city=%s)",
+                chosen_idx,
+                normalised_date,
+                self.config.city,
+            )
+            return True
+        except SessionNotFoundError as exc:
+            logger.error("多场次活动：select_session 失败 — %s", exc)
+            self._set_terminal_failure("session_not_found")
+            return False
 
     def _select_city_from_detail_page(self, timeout=1.0):
         """Select the configured city on the detail page."""
@@ -1618,7 +1656,11 @@ class DamaiBot(UIPrimitives):
                 )
                 return True
 
-            if page_probe["state"] not in {"detail_page", "sku_page"} or (
+            if page_probe["state"] not in {
+                "detail_page",
+                "sku_page",
+                PageState.SESSION_PICKER.value,
+            } or (
                 self.item_detail and not self._current_page_matches_target(page_probe)
             ):
                 if self.config.auto_navigate:
@@ -1699,6 +1741,12 @@ class DamaiBot(UIPrimitives):
                         page_probe["reservation_mode"] = self.is_reservation_sku_mode()
                 else:
                     page_probe = self.probe_current_page()
+
+            # 多场次活动：识别 SESSION_PICKER 后强制选场，避免抢错场次（issue #25）。
+            if page_probe["state"] == PageState.SESSION_PICKER.value:
+                if not self._handle_session_picker():
+                    return False
+                page_probe = self.probe_current_page()
 
             if page_probe["state"] == "sku_page" and page_probe.get("reservation_mode"):
                 logger.warning(
