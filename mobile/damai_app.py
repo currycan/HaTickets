@@ -12,6 +12,7 @@ import re
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 try:
     from selenium.webdriver.common.by import By
@@ -55,7 +56,11 @@ try:
     from mobile.fast_pipeline import FastPipeline, poll_until, batch_shell_taps
     from mobile.recovery import RecoveryHelper
     from mobile.event_navigator import EventNavigator
-    from mobile.price_selector import PriceSelector
+    from mobile.price_selector import (
+        PriceSelector,
+        PriceSelectorError,
+        SoldOutError,
+    )
     from mobile.attendee_selector import AttendeeSelector
 except ImportError:
     from buy_button_guard import BuyButtonGuard
@@ -65,6 +70,7 @@ except ImportError:
     from event_navigator import EventNavigator
     from price_selector import PriceSelector
     from attendee_selector import AttendeeSelector
+
 
 logger = get_logger(__name__)
 
@@ -547,6 +553,54 @@ class DamaiBot(UIPrimitives):
         if hasattr(self, "_price_sel"):
             return self._price_sel._select_price_option(cached_coords)
         return False
+
+    # ------------------------------------------------------------------
+    # Failure diagnostics (P1 #31)
+    # ------------------------------------------------------------------
+
+    def _save_price_failure_dump(self, reason: str = "") -> Path | None:
+        """Persist a UI hierarchy XML (and best-effort screenshot) to tmp/.
+
+        Called when the price selection path fails so post-mortem analysis
+        does not need a live device. ``tmp/`` is git-ignored.
+        Returns the dump path on success, or ``None`` if nothing could be
+        captured (e.g. driver unavailable).
+        """
+        try:
+            tmp_dir = Path("tmp")
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            xml_path = tmp_dir / f"price_dump_{ts}.xml"
+
+            xml_text = ""
+            try:
+                if self._using_u2():
+                    xml_text = self.d.dump_hierarchy()
+            except Exception as exc:  # pragma: no cover - logged only
+                logger.warning("dump_hierarchy 失败: %s", exc)
+                xml_text = ""
+
+            if not xml_text:
+                logger.warning("无法获取 UI hierarchy，跳过 dump 落盘")
+                return None
+
+            xml_path.write_text(xml_text, encoding="utf-8")
+            suffix = f"（reason={reason}）" if reason else ""
+            logger.error("failure dump saved to %s%s", xml_path, suffix)
+
+            # best-effort screenshot — never block the dump on screenshot failure
+            png_path = xml_path.with_suffix(".png")
+            try:
+                if self._using_u2() and hasattr(self.d, "screenshot"):
+                    self.d.screenshot(str(png_path))
+                    logger.error("failure screenshot saved to %s", png_path)
+            except Exception as exc:  # pragma: no cover - logged only
+                logger.debug("screenshot 不可用: %s", exc)
+
+            return xml_path
+        except Exception as exc:  # pragma: no cover - logged only
+            logger.warning("保存 price dump 失败: %s", exc)
+            return None
 
     def _keyword_tokens(self):
         if hasattr(self, "_navigator"):
@@ -1696,7 +1750,18 @@ class DamaiBot(UIPrimitives):
                 logger.info("开发验证极速路径：检测到已处于可调数量状态，跳过票档点击")
             else:
                 logger.info("选择票价...")
-                if not self._select_price_option(cached_coords=price_coords):
+                try:
+                    selected = self._select_price_option(cached_coords=price_coords)
+                except SoldOutError as exc:
+                    self._save_price_failure_dump(reason=f"sold_out: {exc}")
+                    logger.error("票档已售罄，停止本轮抢票: %s", exc)
+                    return False
+                except PriceSelectorError as exc:
+                    self._save_price_failure_dump(reason=str(exc))
+                    logger.error("价格选择失败: %s", exc)
+                    return False
+                if not selected:
+                    self._save_price_failure_dump(reason="select returned False")
                     return False
 
             # 4. 数量选择
