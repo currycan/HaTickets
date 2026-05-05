@@ -1,7 +1,99 @@
 """Unit tests for PriceSelector."""
 
 from unittest.mock import MagicMock
-from mobile.price_selector import PriceSelector
+
+import pytest
+
+from mobile.price_selector import (
+    PriceCard,
+    PriceSelector,
+    PriceSelectorError,
+    SoldOutError,
+    select_price_by_index,
+)
+
+
+# ---------------------------------------------------------------------------
+# select_price_by_index — boundary guard (P1 #31, Step 1)
+# ---------------------------------------------------------------------------
+
+
+def _card(index: int, text: str = "", **kw) -> PriceCard:
+    return PriceCard(index=index, price_text=text, **kw)
+
+
+class TestSelectPriceByIndexFunctional:
+    def test_returns_card_when_index_in_range(self):
+        cards = [_card(0, "380元"), _card(1, "580元"), _card(2, "880元")]
+        assert select_price_by_index(cards, 1) is cards[1]
+
+    def test_empty_cards_raises_with_three_reasons(self):
+        with pytest.raises(PriceSelectorError) as exc_info:
+            select_price_by_index([], 0)
+        message = str(exc_info.value)
+        assert "未发现可点击价格卡片" in message
+        assert "尚未开售" in message
+        assert "已售罄" in message
+        assert "UI 变更" in message
+
+    def test_negative_index_raises_with_available_listing(self):
+        cards = [_card(0, "380元"), _card(1, "580元")]
+        with pytest.raises(PriceSelectorError) as exc_info:
+            select_price_by_index(cards, -1)
+        message = str(exc_info.value)
+        assert "price_index=-1" in message
+        assert "[0] 380元" in message
+        assert "[1] 580元" in message
+        assert "config.jsonc" in message
+
+    def test_out_of_range_raises_with_available_listing(self):
+        cards = [_card(0, "380元"), _card(1, "580元", tag="缺货")]
+        with pytest.raises(PriceSelectorError) as exc_info:
+            select_price_by_index(cards, 5)
+        message = str(exc_info.value)
+        assert "0..1" in message
+        assert "[1] 580元 [缺货]" in message
+
+    def test_dump_writer_invoked_on_empty_cards(self, tmp_path):
+        dump_path = tmp_path / "price_dump.xml"
+        writer = MagicMock()
+        with pytest.raises(PriceSelectorError) as exc_info:
+            select_price_by_index([], 0, dump_on_fail=dump_path, dump_writer=writer)
+        writer.assert_called_once_with(dump_path)
+        assert str(dump_path) in str(exc_info.value)
+
+    def test_dump_writer_invoked_on_out_of_range(self, tmp_path):
+        dump_path = tmp_path / "price_dump.xml"
+        writer = MagicMock()
+        cards = [_card(0, "380元")]
+        with pytest.raises(PriceSelectorError):
+            select_price_by_index(cards, 9, dump_on_fail=dump_path, dump_writer=writer)
+        writer.assert_called_once_with(dump_path)
+
+    def test_dump_writer_failure_is_swallowed(self, tmp_path):
+        writer = MagicMock(side_effect=OSError("disk full"))
+        with pytest.raises(PriceSelectorError) as exc_info:
+            select_price_by_index(
+                [], 0, dump_on_fail=tmp_path / "x.xml", dump_writer=writer
+            )
+        # No "UI dump" suffix because save failed
+        assert "UI dump 已保存" not in str(exc_info.value)
+
+    def test_dump_path_without_writer_is_noop(self, tmp_path):
+        with pytest.raises(PriceSelectorError) as exc_info:
+            select_price_by_index([], 0, dump_on_fail=tmp_path / "x.xml")
+        assert "UI dump 已保存" not in str(exc_info.value)
+
+
+class TestPriceSelectorErrorTypes:
+    def test_price_selector_error_is_runtime_error(self):
+        assert issubclass(PriceSelectorError, RuntimeError)
+
+    def test_sold_out_error_is_runtime_error(self):
+        assert issubclass(SoldOutError, RuntimeError)
+
+    def test_errors_are_distinct_types(self):
+        assert PriceSelectorError is not SoldOutError
 
 
 class TestSelectByIndex:
