@@ -141,6 +141,9 @@ class Config:
         fast_retry_count=8,
         fast_retry_interval_ms=120,
         rush_mode=False,
+        rush_skip_session=False,
+        rush_skip_price_dump=True,
+        rush_aggressive_retry=True,
         auto_navigate=True,
         target_title=None,
         target_venue=None,
@@ -258,6 +261,14 @@ class Config:
         if not isinstance(rush_mode, bool):
             raise ValueError(f"rush_mode 必须是布尔值，实际值: {rush_mode!r}")
 
+        for _name, _value in (
+            ("rush_skip_session", rush_skip_session),
+            ("rush_skip_price_dump", rush_skip_price_dump),
+            ("rush_aggressive_retry", rush_aggressive_retry),
+        ):
+            if not isinstance(_value, bool):
+                raise ValueError(f"{_name} 必须是布尔值，实际值: {_value!r}")
+
         self.keyword = keyword.strip()
         self.users = users
         self.city = city
@@ -274,6 +285,30 @@ class Config:
         self.fast_retry_count = fast_retry_count
         self.fast_retry_interval_ms = fast_retry_interval_ms
         self.rush_mode = rush_mode
+        # rush_mode 是 alias：当前 release 周期保留兼容；W4 评估废弃。
+        # 解析规则：rush_mode=True 时统一翻转 3 个子开关到「快速」侧；
+        # 但 rush_skip_session 强制为 False — 多场次场景下永远不能跳过选场（issue #25 根因）。
+        if rush_mode:
+            if rush_skip_session:
+                logger.warning(
+                    "rush_mode=True 不会启用 rush_skip_session（多场次场景需选场）"
+                )
+            self.rush_skip_session = False
+            self.rush_skip_price_dump = rush_skip_price_dump
+            self.rush_aggressive_retry = rush_aggressive_retry
+        else:
+            self.rush_skip_session = rush_skip_session
+            self.rush_skip_price_dump = rush_skip_price_dump
+            self.rush_aggressive_retry = rush_aggressive_retry
+
+        logger.info(
+            "rush effective: rush_mode=%s, skip_session=%s, skip_price_dump=%s, aggressive_retry=%s",
+            self.rush_mode,
+            self.rush_skip_session,
+            self.rush_skip_price_dump,
+            self.rush_aggressive_retry,
+        )
+
         self.auto_navigate = auto_navigate
         self.target_title = (
             target_title.strip() if isinstance(target_title, str) else None
@@ -306,6 +341,9 @@ class Config:
             "fast_retry_count": self.fast_retry_count,
             "fast_retry_interval_ms": self.fast_retry_interval_ms,
             "rush_mode": self.rush_mode,
+            "rush_skip_session": self.rush_skip_session,
+            "rush_skip_price_dump": self.rush_skip_price_dump,
+            "rush_aggressive_retry": self.rush_aggressive_retry,
         }
 
     @staticmethod
@@ -358,6 +396,9 @@ class Config:
             fast_retry_count=config.get("fast_retry_count", 8),
             fast_retry_interval_ms=config.get("fast_retry_interval_ms", 120),
             rush_mode=config.get("rush_mode", False),
+            rush_skip_session=config.get("rush_skip_session", False),
+            rush_skip_price_dump=config.get("rush_skip_price_dump", True),
+            rush_aggressive_retry=config.get("rush_aggressive_retry", True),
             auto_navigate=config.get("auto_navigate", True),
             target_title=config.get("target_title"),
             target_venue=config.get("target_venue"),

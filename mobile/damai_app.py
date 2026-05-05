@@ -827,6 +827,11 @@ class DamaiBot(UIPrimitives):
         except ImportError:  # pragma: no cover
             from date_utils import normalize_date  # type: ignore[no-redef]
 
+        if getattr(self.config, "rush_skip_session", False):
+            logger.warning(
+                "rush_skip_session=True 但当前为多场次场次选择页 — 强制选场避免抢错（issue #25）"
+            )
+
         normalised_date = normalize_date(self.config.date) if self.config.date else None
         try:
             chosen_idx = select_session(
