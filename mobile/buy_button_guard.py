@@ -17,26 +17,32 @@ except ImportError:
 
 logger = get_logger(__name__)
 
-SAFE_TEXTS = frozenset({
-    "立即购买",
-    "立即购票",
-    "立即抢票",
-    "立即预定",
-    "选座购买",
-    "购买",
-    "抢票",
-    "预定",
-})
+SAFE_TEXTS = frozenset(
+    {
+        "立即购买",
+        "立即购票",
+        "立即抢票",
+        "立即预定",
+        "立即预订",  # 大麦 2026-04 后新增（issue #29）
+        "Book Now",  # 国际化场景兜底（issue #29）
+        "选座购买",
+        "购买",
+        "抢票",
+        "预定",
+    }
+)
 
-BLOCKED_TEXTS = frozenset({
-    "预约抢票",
-    "预约",
-    "预售",
-    "即将开抢",
-    "待开售",
-    "未开售",
-    "提交抢票预约",
-})
+BLOCKED_TEXTS = frozenset(
+    {
+        "预约抢票",
+        "预约",
+        "预售",
+        "即将开抢",
+        "待开售",
+        "未开售",
+        "提交抢票预约",
+    }
+)
 
 _BUY_BUTTON_RESOURCE_ID = "cn.damai:id/btn_buy_view"
 
