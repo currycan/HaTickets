@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
 try:
+    from mobile.date_utils import normalize_date as _normalize_date_external
     from mobile.item_resolver import normalize_text
 except ImportError:
     from item_resolver import normalize_text
@@ -218,19 +219,8 @@ def _parse_quantity_with_explicit(prompt: str) -> tuple[int, bool]:
 
 
 def _parse_date(prompt: str) -> Optional[str]:
-    patterns = (
-        r"(\d{1,2})\s*月\s*(\d{1,2})\s*[号日好]?",
-        r"(\d{1,2})[./-](\d{1,2})",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, prompt)
-        if not match:
-            continue
-        month = int(match.group(1))
-        day = int(match.group(2))
-        if 1 <= month <= 12 and 1 <= day <= 31:
-            return f"{month:02d}.{day:02d}"
-    return None
+    """委托给 ``mobile.date_utils.normalize_date``，统一为 ``MM.DD``。"""
+    return _normalize_date_external(prompt)
 
 
 def _parse_city(prompt: str) -> Optional[str]:

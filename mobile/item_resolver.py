@@ -75,7 +75,9 @@ def city_keyword(city_name: Optional[str]) -> str:
     return re.sub(r"(特别行政区|自治州|地区|盟|市)$", "", city_name.strip())
 
 
-def build_search_keyword(item_name: Optional[str], item_name_display: Optional[str] = None) -> str:
+def build_search_keyword(
+    item_name: Optional[str], item_name_display: Optional[str] = None
+) -> str:
     """Build a search keyword that works better in the Damai app search page."""
     candidates = [item_name or "", item_name_display or ""]
     for candidate in candidates:
@@ -110,6 +112,29 @@ class DamaiItemDetail:
     def city_keyword(self) -> str:
         return city_keyword(self.city_name)
 
+    @property
+    def normalized_dates(self) -> list:
+        """从 ``show_time`` 中抽取所有可识别的 ``MM.DD`` 候选，统一格式。"""
+        try:
+            from mobile.date_utils import normalize_date
+        except ImportError:  # pragma: no cover - 运行环境兼容
+            from date_utils import normalize_date  # type: ignore[no-redef]
+
+        seen: list = []
+        if not self.show_time:
+            return seen
+        # show_time 可能是 "2026-04-06"、"2026.04.06" 或 "2026-04-06 ~ 2026-04-08"
+        for chunk in re.split(r"\s*[~～至到\-]\s*", self.show_time):
+            candidate = normalize_date(chunk)
+            if candidate and candidate not in seen:
+                seen.append(candidate)
+        if not seen:
+            # 兜底：直接对完整 show_time 跑一次正则
+            candidate = normalize_date(self.show_time)
+            if candidate:
+                seen.append(candidate)
+        return seen
+
 
 class DamaiItemResolver:
     """Resolve Damai item metadata through the official mobile mtop endpoint."""
@@ -125,7 +150,9 @@ class DamaiItemResolver:
         return f"https://m.damai.cn/shows/item.html?itemId={item_id}"
 
     def _request(self, url: str, referer: str) -> str:
-        request = Request(url, headers={"User-Agent": DM_USER_AGENT, "Referer": referer})
+        request = Request(
+            url, headers={"User-Agent": DM_USER_AGENT, "Referer": referer}
+        )
         with self.opener.open(request, timeout=self.timeout) as response:
             return response.read().decode("utf-8")
 
@@ -151,7 +178,9 @@ class DamaiItemResolver:
 
         raise DamaiItemResolveError("无法从大麦接口响应中获取 `_m_h5_tk`")
 
-    def fetch_item_detail(self, item_url: Optional[str] = None, item_id: Optional[str] = None) -> DamaiItemDetail:
+    def fetch_item_detail(
+        self, item_url: Optional[str] = None, item_id: Optional[str] = None
+    ) -> DamaiItemDetail:
         resolved_item_id = extract_item_id(item_id or item_url or "")
         referer = self._referer_for_item(resolved_item_id, item_url)
         data_obj = {
@@ -185,7 +214,9 @@ class DamaiItemResolver:
         try:
             payload = json.loads(body)
         except json.JSONDecodeError as exc:
-            raise DamaiItemResolveError(f"大麦详情接口返回了不可解析内容: {exc}") from exc
+            raise DamaiItemResolveError(
+                f"大麦详情接口返回了不可解析内容: {exc}"
+            ) from exc
 
         ret = payload.get("ret") or []
         if not any("SUCCESS" in entry for entry in ret):
