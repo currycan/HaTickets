@@ -217,6 +217,113 @@ class TestMobileConfigNewFields:
         assert cfg.fast_retry_interval_ms == 120
 
 
+class TestRushSubFlags:
+    """P1 #25 — rush_mode 拆为 3 个子开关。"""
+
+    def test_defaults_match_rush_true_baseline(self):
+        cfg = Config(**_make())
+        assert cfg.rush_skip_session is False
+        assert cfg.rush_skip_price_dump is True
+        assert cfg.rush_aggressive_retry is True
+
+    def test_explicit_sub_flag_values_kept_when_rush_mode_false(self):
+        cfg = Config(
+            **_make(
+                rush_mode=False,
+                rush_skip_session=True,
+                rush_skip_price_dump=False,
+                rush_aggressive_retry=False,
+            )
+        )
+        assert cfg.rush_skip_session is True
+        assert cfg.rush_skip_price_dump is False
+        assert cfg.rush_aggressive_retry is False
+
+    def test_rush_mode_true_forces_skip_session_false(self):
+        """rush_mode=True 永不允许 rush_skip_session=True（issue #25 根因防御）。"""
+        cfg = Config(
+            **_make(rush_mode=True, rush_skip_session=True),
+        )
+        assert cfg.rush_mode is True
+        assert cfg.rush_skip_session is False
+
+    def test_rush_mode_true_keeps_other_sub_flag_overrides(self):
+        cfg = Config(
+            **_make(
+                rush_mode=True,
+                rush_skip_price_dump=False,
+                rush_aggressive_retry=False,
+            )
+        )
+        assert cfg.rush_mode is True
+        assert cfg.rush_skip_price_dump is False
+        assert cfg.rush_aggressive_retry is False
+
+    def test_rush_skip_session_non_bool_raises(self):
+        with pytest.raises(ValueError, match="rush_skip_session"):
+            Config(**_make(rush_skip_session="yes"))
+
+    def test_rush_skip_price_dump_non_bool_raises(self):
+        with pytest.raises(ValueError, match="rush_skip_price_dump"):
+            Config(**_make(rush_skip_price_dump=1))
+
+    def test_rush_aggressive_retry_non_bool_raises(self):
+        with pytest.raises(ValueError, match="rush_aggressive_retry"):
+            Config(**_make(rush_aggressive_retry="off"))
+
+    def test_to_dict_includes_sub_flags(self):
+        cfg = Config(**_make())
+        data = cfg.to_dict()
+        assert data["rush_skip_session"] is False
+        assert data["rush_skip_price_dump"] is True
+        assert data["rush_aggressive_retry"] is True
+        assert data["rush_mode"] is False  # alias still emitted
+
+    def test_load_config_reads_sub_flags(self, tmp_path):
+        cfg_path = tmp_path / "config.jsonc"
+        payload = json.dumps(
+            {
+                "keyword": "周深",
+                "users": ["张三"],
+                "city": "深圳",
+                "date": "12.06",
+                "price": "799元",
+                "price_index": 0,
+                "if_commit_order": False,
+                "rush_skip_session": True,
+                "rush_skip_price_dump": False,
+                "rush_aggressive_retry": False,
+            }
+        )
+        cfg_path.write_text(payload, encoding="utf-8")
+        cfg = Config.load_config(config_path=cfg_path)
+        assert cfg.rush_skip_session is True
+        assert cfg.rush_skip_price_dump is False
+        assert cfg.rush_aggressive_retry is False
+
+    def test_load_config_alias_overrides_skip_session_to_false(self, tmp_path):
+        """rush_mode=True 在 config.jsonc 显式 + rush_skip_session=True 时
+        日志 warning + 强制 skip_session=False。"""
+        cfg_path = tmp_path / "config.jsonc"
+        payload = json.dumps(
+            {
+                "keyword": "周深",
+                "users": ["张三"],
+                "city": "深圳",
+                "date": "12.06",
+                "price": "799元",
+                "price_index": 0,
+                "if_commit_order": False,
+                "rush_mode": True,
+                "rush_skip_session": True,
+            }
+        )
+        cfg_path.write_text(payload, encoding="utf-8")
+        cfg = Config.load_config(config_path=cfg_path)
+        assert cfg.rush_mode is True
+        assert cfg.rush_skip_session is False
+
+
 class TestMobileConfigLoadConfig:
     def test_load_config_dict_from_missing_path_raises(self, tmp_path):
         with pytest.raises(

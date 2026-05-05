@@ -3,15 +3,15 @@
 
 import time as _time_module
 
-import pytest
-from unittest.mock import Mock, patch, PropertyMock
+from unittest.mock import Mock
 
-from mobile.page_probe import PageProbe, _DEFAULT_RESULT
+from mobile.page_probe import PageProbe, PageState, _DEFAULT_RESULT  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_device(activity: str = "") -> Mock:
     """Create a mock u2 device that returns the given activity name."""
@@ -27,6 +27,7 @@ def _make_device(activity: str = "") -> Mock:
 # ---------------------------------------------------------------------------
 # Fast probe tests
 # ---------------------------------------------------------------------------
+
 
 class TestFastProbe:
     """Tests for fast probe mode (Activity-based detection)."""
@@ -91,6 +92,7 @@ class TestFastProbe:
 # TTL cache tests
 # ---------------------------------------------------------------------------
 
+
 class TestTTLCache:
     """Tests for the TTL-based result cache."""
 
@@ -147,6 +149,7 @@ class TestTTLCache:
 # Full probe tests
 # ---------------------------------------------------------------------------
 
+
 class TestFullProbe:
     """Tests for the full probe mode (Activity + element detection)."""
 
@@ -159,7 +162,10 @@ class TestFullProbe:
         def element_factory(**kwargs):
             el = Mock()
             rid = kwargs.get("resourceId", "")
-            if rid == "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl":
+            if (
+                rid
+                == "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
+            ):
                 el.exists = True
             else:
                 el.exists = False
@@ -303,7 +309,10 @@ class TestFullProbe:
         def element_factory(**kwargs):
             el = Mock()
             rid = kwargs.get("resourceId", "")
-            if rid == "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl":
+            if (
+                rid
+                == "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
+            ):
                 el.exists = True
             else:
                 el.exists = False
@@ -334,8 +343,8 @@ class TestFullProbe:
 # get_current_activity tests
 # ---------------------------------------------------------------------------
 
-class TestGetCurrentActivity:
 
+class TestGetCurrentActivity:
     def test_returns_activity_string(self):
         device = _make_device("com.damai.ProjectDetailActivity")
         probe = PageProbe(device)
@@ -348,3 +357,100 @@ class TestGetCurrentActivity:
         probe = PageProbe(device)
 
         assert probe.get_current_activity() == ""
+
+
+# ---------------------------------------------------------------------------
+# Multi-session date picker (P1 #25)
+# ---------------------------------------------------------------------------
+
+
+class TestClassifySessionPicker:
+    """SESSION_PICKER must be detected before sku_page so the navigator can
+    branch into select_session() instead of trying to click prices on a panel
+    that hasn't loaded the price flow-layout yet."""
+
+    def test_classify_session_picker_by_resource_id(self):
+        device = _make_device("com.damai.NcovSkuActivity")
+
+        def element_factory(**kwargs):
+            el = Mock()
+            el.exists = kwargs.get("resourceId") == "cn.damai:id/sku_panel_dates"
+            return el
+
+        device.side_effect = element_factory
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.classify(fast=False)
+
+        assert result["state"] == PageState.SESSION_PICKER.value
+        assert result["state"] == "session_picker"
+        assert result["price_container"] is False
+
+    def test_classify_session_picker_by_text_请选择场次(self):
+        device = _make_device("com.damai.NcovSkuActivity")
+
+        def element_factory(**kwargs):
+            el = Mock()
+            el.exists = kwargs.get("text") == "请选择场次"
+            return el
+
+        device.side_effect = element_factory
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.classify(fast=False)
+
+        assert result["state"] == PageState.SESSION_PICKER.value
+
+    def test_classify_session_picker_fallback_on_unknown_activity(self):
+        """When Activity name does not match but layout_sku + dates panel exist,
+        full probe still returns SESSION_PICKER (not sku_page)."""
+        device = _make_device("com.damai.SomeUnknownActivity")
+
+        def element_factory(**kwargs):
+            el = Mock()
+            rid = kwargs.get("resourceId", "")
+            txt_contains = kwargs.get("textContains", "")
+            el.exists = (
+                rid
+                in {
+                    "cn.damai:id/layout_sku",
+                    "cn.damai:id/sku_panel_dates",
+                }
+                or txt_contains == "选择日期"
+            )
+            return el
+
+        device.side_effect = element_factory
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == PageState.SESSION_PICKER.value
+
+    def test_sku_page_when_no_session_picker_markers(self):
+        """Regression guard: bare NcovSku page without dates panel still
+        classifies as sku_page so the existing rush hot path keeps working."""
+        device = _make_device("com.damai.NcovSkuActivity")
+
+        def element_factory(**kwargs):
+            el = Mock()
+            el.exists = False
+            return el
+
+        device.side_effect = element_factory
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.classify(fast=False)
+
+        assert result["state"] == "sku_page"
+        assert result["state"] != PageState.SESSION_PICKER.value
+
+
+class TestPageStateEnum:
+    def test_session_picker_value(self):
+        assert PageState.SESSION_PICKER.value == "session_picker"
+
+    def test_str_inheritance_keeps_string_compat(self):
+        # Existing string-based equality must keep working.
+        assert PageState.SKU_PAGE == "sku_page"
+        assert PageState.SESSION_PICKER == "session_picker"

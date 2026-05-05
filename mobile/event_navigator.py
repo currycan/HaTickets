@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import re
 import time
-from typing import TYPE_CHECKING, Any, Dict, Optional
+import xml.etree.ElementTree as ET
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from selenium.webdriver.common.by import By
 
@@ -23,10 +24,209 @@ try:
 except ImportError:
     from item_resolver import normalize_text, city_keyword
 
+try:
+    from mobile.date_utils import normalize_date
+except ImportError:
+    from date_utils import normalize_date  # type: ignore[no-redef]
+
 if TYPE_CHECKING:
     from mobile.page_probe import PageProbe
 
 logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Multi-session selection (P1 #25, Step 2)
+# ---------------------------------------------------------------------------
+
+
+class SessionNotFoundError(RuntimeError):
+    """Raised when :func:`select_session` cannot identify a unique target."""
+
+
+_SESSION_PANEL_RESOURCE_ID = "cn.damai:id/sku_panel_dates"
+_SESSION_DATE_RESOURCE_ID = "cn.damai:id/tv_date"
+_BOUNDS_RE = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
+
+
+def _parse_bounds_center(bounds_str: Optional[str]) -> Optional[tuple]:
+    if not bounds_str:
+        return None
+    match = _BOUNDS_RE.match(bounds_str)
+    if not match:
+        return None
+    x1, y1, x2, y2 = (int(v) for v in match.groups())
+    return ((x1 + x2) // 2, (y1 + y2) // 2)
+
+
+def _build_parent_map(root: ET.Element) -> Dict[ET.Element, ET.Element]:
+    return {child: parent for parent in root.iter() for child in parent}
+
+
+def _find_clickable_ancestor(
+    parent_map: Dict[ET.Element, ET.Element], node: ET.Element
+) -> Optional[ET.Element]:
+    cur = parent_map.get(node)
+    while cur is not None:
+        if cur.get("clickable") == "true":
+            return cur
+        cur = parent_map.get(cur)
+    return None
+
+
+def _enumerate_sessions_from_xml(xml_str: str) -> List[Dict[str, Any]]:
+    """Parse a u2 hierarchy dump and return one descriptor per session card."""
+    if not xml_str:
+        return []
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return []
+
+    panel = None
+    for node in root.iter("node"):
+        if node.get("resource-id") == _SESSION_PANEL_RESOURCE_ID:
+            panel = node
+            break
+    if panel is None:
+        return []
+
+    parent_map = _build_parent_map(root)
+    cards: List[Dict[str, Any]] = []
+    for date_node in panel.iter("node"):
+        if date_node.get("resource-id") != _SESSION_DATE_RESOURCE_ID:
+            continue
+        clickable = _find_clickable_ancestor(parent_map, date_node) or date_node
+        texts = [
+            (desc.get("text") or "").strip()
+            for desc in clickable.iter("node")
+            if (desc.get("text") or "").strip()
+        ]
+        cards.append(
+            {
+                "index": len(cards),
+                "date": (date_node.get("text") or "").strip(),
+                "text": " ".join(texts),
+                "bounds": clickable.get("bounds") or date_node.get("bounds"),
+            }
+        )
+    return cards
+
+
+def _date_equals(card_date: str, target_date: str) -> bool:
+    if not card_date or not target_date:
+        return False
+    norm_card = normalize_date(card_date) or card_date.strip()
+    norm_target = normalize_date(target_date) or target_date.strip()
+    return norm_card == norm_target
+
+
+def _click_session_card(driver: Any, card: Dict[str, Any]) -> None:
+    coords = _parse_bounds_center(card.get("bounds"))
+    if coords is None:
+        raise SessionNotFoundError(f"无法解析场次卡片 bounds={card.get('bounds')!r}")
+    try:
+        driver.click(*coords)
+    except Exception as exc:  # noqa: BLE001 — surface as SessionNotFoundError
+        raise SessionNotFoundError(f"点击场次卡片失败: {exc}") from exc
+
+
+def select_session(
+    driver: Any,
+    *,
+    date: Optional[str] = None,
+    city: Optional[str] = None,
+    fallback_index: Optional[int] = None,
+) -> int:
+    """Pick a session on the multi-session SKU panel.
+
+    Priority order:
+
+    1. ``date`` + ``city`` exact match (must be unique).
+    2. ``date`` alone if it identifies a unique session.
+    3. ``fallback_index`` (zero-based) if provided.
+
+    Args:
+        driver: A uiautomator2 device (anything with ``dump_hierarchy()``
+            and ``click(x, y)``).
+        date: Target date in ``MM.DD`` format (output of
+            :func:`mobile.date_utils.normalize_date`).
+        city: City keyword expected to appear in the card text.
+        fallback_index: Zero-based card index used when neither ``date``
+            nor ``city`` resolves a unique candidate.
+
+    Returns:
+        The zero-based index of the selected session.
+
+    Raises:
+        SessionNotFoundError: When no unique candidate can be picked.
+    """
+    try:
+        xml_str = driver.dump_hierarchy()
+    except Exception as exc:  # noqa: BLE001
+        raise SessionNotFoundError(f"dump_hierarchy 失败: {exc}") from exc
+
+    cards = _enumerate_sessions_from_xml(xml_str)
+    if not cards:
+        raise SessionNotFoundError(
+            "未发现可选场次（sku_panel_dates 内未找到 tv_date 节点）"
+        )
+
+    chosen: Optional[Dict[str, Any]] = None
+
+    if date and city:
+        matches = [
+            c for c in cards if _date_equals(c["date"], date) and city in c["text"]
+        ]
+        if len(matches) == 1:
+            chosen = matches[0]
+            logger.info(
+                "select_session: date=%s + city=%s 命中 idx=%d/%d",
+                date,
+                city,
+                chosen["index"],
+                len(cards),
+            )
+        elif len(matches) > 1:
+            raise SessionNotFoundError(
+                f"date={date} + city={city} 命中 {len(matches)} 条场次，无法唯一确定"
+            )
+
+    if chosen is None and date:
+        matches = [c for c in cards if _date_equals(c["date"], date)]
+        if len(matches) == 1:
+            chosen = matches[0]
+            logger.info(
+                "select_session: date=%s 唯一命中 idx=%d/%d",
+                date,
+                chosen["index"],
+                len(cards),
+            )
+        elif len(matches) > 1:
+            raise SessionNotFoundError(
+                f"date={date} 命中 {len(matches)} 条场次，需配合 city 才能确定"
+            )
+
+    if chosen is None and fallback_index is not None:
+        if 0 <= fallback_index < len(cards):
+            chosen = cards[fallback_index]
+            logger.warning(
+                "select_session: 回退到 fallback_index=%d (共 %d 条)",
+                fallback_index,
+                len(cards),
+            )
+        else:
+            raise SessionNotFoundError(
+                f"fallback_index={fallback_index} 越界（共 {len(cards)} 条场次）"
+            )
+
+    if chosen is None:
+        raise SessionNotFoundError(
+            f"未提供 date/city/fallback_index，无法选择场次（共 {len(cards)} 条候选）"
+        )
+
+    _click_session_card(driver, chosen)
+    return chosen["index"]
 
 
 class EventNavigator:
@@ -86,7 +286,9 @@ class EventNavigator:
 
         candidates = []
         if bot.item_detail:
-            candidates.extend([bot.item_detail.item_name, bot.item_detail.item_name_display])
+            candidates.extend(
+                [bot.item_detail.item_name, bot.item_detail.item_name_display]
+            )
         if self._config.target_title:
             candidates.append(self._config.target_title)
         if self._config.keyword:
@@ -96,11 +298,16 @@ class EventNavigator:
             normalized_candidate = normalize_text(candidate)
             if not normalized_candidate:
                 continue
-            if normalized_candidate in normalized_title or normalized_title in normalized_candidate:
+            if (
+                normalized_candidate in normalized_title
+                or normalized_title in normalized_candidate
+            ):
                 return True
 
         keyword_tokens = bot._keyword_tokens()
-        if keyword_tokens and all(token in normalized_title for token in keyword_tokens):
+        if keyword_tokens and all(
+            token in normalized_title for token in keyword_tokens
+        ):
             return True
 
         return False
@@ -111,7 +318,11 @@ class EventNavigator:
         if page_probe["state"] not in {"detail_page", "sku_page"}:
             return False
 
-        if not bot.item_detail and not self._config.target_title and not self._config.keyword:
+        if (
+            not bot.item_detail
+            and not self._config.target_title
+            and not self._config.keyword
+        ):
             return True
 
         return bot._title_matches_target(bot._get_detail_title_text())
@@ -128,7 +339,9 @@ class EventNavigator:
 
         for by, value in search_selectors:
             if bot.ultra_fast_click(by, value, timeout=0.8):
-                search_probe = bot.wait_for_page_state({"search_page"}, timeout=2.5, poll_interval=0.15)
+                search_probe = bot.wait_for_page_state(
+                    {"search_page"}, timeout=2.5, poll_interval=0.15
+                )
                 if search_probe["state"] == "search_page":
                     return True
 
@@ -147,10 +360,15 @@ class EventNavigator:
             return False
 
         with bot._timed_step(
-                "搜索页输入并提交关键词",
-                manual_baseline_seconds=_MANUAL_STEP_BASELINES.get("搜索页输入并提交关键词")):
+            "搜索页输入并提交关键词",
+            manual_baseline_seconds=_MANUAL_STEP_BASELINES.get(
+                "搜索页输入并提交关键词"
+            ),
+        ):
             try:
-                search_input = bot._wait_for_element(By.ID, "cn.damai:id/header_search_v2_input", timeout=2)
+                search_input = bot._wait_for_element(
+                    By.ID, "cn.damai:id/header_search_v2_input", timeout=2
+                )
             except TimeoutException:
                 logger.warning("未找到搜索输入框")
                 return False
@@ -161,7 +379,9 @@ class EventNavigator:
             current_text = bot._read_element_text(search_input).strip()
             if current_text and current_text != self._config.keyword:
                 if bot._has_element(By.ID, "cn.damai:id/header_search_v2_input_delete"):
-                    bot.ultra_fast_click(By.ID, "cn.damai:id/header_search_v2_input_delete", timeout=0.4)
+                    bot.ultra_fast_click(
+                        By.ID, "cn.damai:id/header_search_v2_input_delete", timeout=0.4
+                    )
                     time.sleep(0.05)
                 else:
                     try:
@@ -271,39 +491,58 @@ class EventNavigator:
             return
         bot.d.swipe(540, 1770, 540, 520, duration=0.3)
 
-    def _open_target_from_search_results(self, max_scrolls=2, max_results=5, return_details=False):
+    def _open_target_from_search_results(
+        self, max_scrolls=2, max_results=5, return_details=False
+    ):
         """Open the best-matching event from search results and optionally return scanned summaries."""
         bot = self._bot
         seen_titles = set()
         collected = []
 
         with bot._timed_step(
-                "搜索结果扫描并打开目标",
-                manual_baseline_seconds=_MANUAL_STEP_BASELINES.get("搜索结果扫描并打开目标")):
+            "搜索结果扫描并打开目标",
+            manual_baseline_seconds=_MANUAL_STEP_BASELINES.get(
+                "搜索结果扫描并打开目标"
+            ),
+        ):
             for scroll_index in range(max_scrolls + 1):
                 result_cards = bot._find_all(By.ID, "cn.damai:id/ll_search_item")
                 best_match = None
                 best_score = -1
 
                 for card in result_cards:
-                    title_text = bot._safe_element_text(card, By.ID, "cn.damai:id/tv_project_name")
+                    title_text = bot._safe_element_text(
+                        card, By.ID, "cn.damai:id/tv_project_name"
+                    )
                     if not title_text:
                         continue
 
-                    venue_text = bot._safe_element_text(card, By.ID, "cn.damai:id/tv_project_venueName")
-                    city_text = bot._safe_element_text(card, By.ID, "cn.damai:id/tv_project_city").replace("|", "").strip()
-                    time_text = bot._safe_element_text(card, By.ID, "cn.damai:id/tv_project_time")
+                    venue_text = bot._safe_element_text(
+                        card, By.ID, "cn.damai:id/tv_project_venueName"
+                    )
+                    city_text = (
+                        bot._safe_element_text(
+                            card, By.ID, "cn.damai:id/tv_project_city"
+                        )
+                        .replace("|", "")
+                        .strip()
+                    )
+                    time_text = bot._safe_element_text(
+                        card, By.ID, "cn.damai:id/tv_project_time"
+                    )
                     score = bot._score_search_result(title_text, venue_text)
 
                     normalized_title = normalize_text(title_text)
                     if normalized_title and normalized_title not in seen_titles:
-                        collected.append({
-                            "title": title_text,
-                            "venue": venue_text,
-                            "city": city_text,
-                            "time": time_text,
-                            "score": score,
-                        })
+                        collected.append(
+                            {
+                                "title": title_text,
+                                "venue": venue_text,
+                                "city": city_text,
+                                "time": time_text,
+                                "score": score,
+                            }
+                        )
                         seen_titles.add(normalized_title)
 
                     if score > best_score:
@@ -312,19 +551,31 @@ class EventNavigator:
 
                 if best_match is not None and best_score >= 60:
                     bot._click_element_center(best_match)
-                    detail_probe = bot.wait_for_page_state({"detail_page", "sku_page"}, timeout=5.5)
-                    if detail_probe["state"] in {"detail_page", "sku_page"} and bot._current_page_matches_target(detail_probe):
+                    detail_probe = bot.wait_for_page_state(
+                        {"detail_page", "sku_page"}, timeout=5.5
+                    )
+                    if detail_probe["state"] in {
+                        "detail_page",
+                        "sku_page",
+                    } and bot._current_page_matches_target(detail_probe):
                         collected.sort(key=lambda item: item["score"], reverse=True)
-                        details = {"opened": True, "search_results": collected[:max_results]}
+                        details = {
+                            "opened": True,
+                            "search_results": collected[:max_results],
+                        }
                         return details if return_details else True
 
-                    logger.warning("已进入详情页，但标题与目标演出不一致，返回搜索结果继续尝试")
+                    logger.warning(
+                        "已进入详情页，但标题与目标演出不一致，返回搜索结果继续尝试"
+                    )
                     if not bot._press_keycode_safe(4, context="返回搜索列表"):
                         break
                     time.sleep(0.25)
                     bot.dismiss_startup_popups()
                 else:
-                    logger.info(f"本屏搜索结果未找到明确匹配项，已扫描: {len(seen_titles)} 条")
+                    logger.info(
+                        f"本屏搜索结果未找到明确匹配项，已扫描: {len(seen_titles)} 条"
+                    )
 
                 if scroll_index < max_scrolls:
                     bot._scroll_search_results()
@@ -344,7 +595,9 @@ class EventNavigator:
         for scroll_index in range(max_scrolls + 1):
             result_cards = bot._find_all(By.ID, "cn.damai:id/ll_search_item")
             for card in result_cards:
-                title_text = bot._safe_element_text(card, By.ID, "cn.damai:id/tv_project_name")
+                title_text = bot._safe_element_text(
+                    card, By.ID, "cn.damai:id/tv_project_name"
+                )
                 if not title_text:
                     continue
 
@@ -352,20 +605,30 @@ class EventNavigator:
                 if normalized_title in seen:
                     continue
 
-                venue_text = bot._safe_element_text(card, By.ID, "cn.damai:id/tv_project_venueName")
-                city_text = bot._safe_element_text(card, By.ID, "cn.damai:id/tv_project_city").replace("|", "").strip()
-                time_text = bot._safe_element_text(card, By.ID, "cn.damai:id/tv_project_time")
+                venue_text = bot._safe_element_text(
+                    card, By.ID, "cn.damai:id/tv_project_venueName"
+                )
+                city_text = (
+                    bot._safe_element_text(card, By.ID, "cn.damai:id/tv_project_city")
+                    .replace("|", "")
+                    .strip()
+                )
+                time_text = bot._safe_element_text(
+                    card, By.ID, "cn.damai:id/tv_project_time"
+                )
                 price_text = bot._build_compound_price_text(card)
                 score = bot._score_search_result(title_text, venue_text)
 
-                collected.append({
-                    "title": title_text,
-                    "venue": venue_text,
-                    "city": city_text,
-                    "time": time_text,
-                    "price": price_text,
-                    "score": score,
-                })
+                collected.append(
+                    {
+                        "title": title_text,
+                        "venue": venue_text,
+                        "city": city_text,
+                        "time": time_text,
+                        "price": price_text,
+                        "score": score,
+                    }
+                )
                 seen.add(normalized_title)
 
             if len(collected) >= max_results:
@@ -387,13 +650,22 @@ class EventNavigator:
         page_probe = initial_probe or bot.probe_current_page()
         page_probe = bot._recover_to_navigation_start(page_probe)
 
-        if page_probe["state"] in {"detail_page", "sku_page"} and bot._current_page_matches_target(page_probe):
+        if page_probe["state"] in {
+            "detail_page",
+            "sku_page",
+        } and bot._current_page_matches_target(page_probe):
             return True
 
-        if page_probe["state"] in {"detail_page", "sku_page"} and not bot._current_page_matches_target(page_probe):
+        if page_probe["state"] in {
+            "detail_page",
+            "sku_page",
+        } and not bot._current_page_matches_target(page_probe):
             page_probe = bot._exit_non_target_event_context(page_probe)
 
-        if page_probe["state"] in {"detail_page", "sku_page"} and bot._current_page_matches_target(page_probe):
+        if page_probe["state"] in {
+            "detail_page",
+            "sku_page",
+        } and bot._current_page_matches_target(page_probe):
             return True
 
         if page_probe["state"] == "homepage":
@@ -411,14 +683,19 @@ class EventNavigator:
 
         return bot._open_target_from_search_results()
 
-    def discover_target_event(self, keyword_candidates, initial_probe=None, search_scrolls=1, result_limit=5):
+    def discover_target_event(
+        self, keyword_candidates, initial_probe=None, search_scrolls=1, result_limit=5
+    ):
         """Try multiple keywords, collect candidate summaries, and open the best match."""
         bot = self._bot
         bot._last_discovery_step_timings = []
         page_probe = initial_probe or bot.probe_current_page()
         page_probe = bot._recover_to_navigation_start(page_probe)
 
-        if page_probe["state"] in {"detail_page", "sku_page"} and bot._current_page_matches_target(page_probe):
+        if page_probe["state"] in {
+            "detail_page",
+            "sku_page",
+        } and bot._current_page_matches_target(page_probe):
             return {
                 "used_keyword": self._config.keyword,
                 "search_results": [],
@@ -426,10 +703,16 @@ class EventNavigator:
                 "step_timings": list(bot._last_discovery_step_timings),
             }
 
-        if page_probe["state"] in {"detail_page", "sku_page"} and not bot._current_page_matches_target(page_probe):
+        if page_probe["state"] in {
+            "detail_page",
+            "sku_page",
+        } and not bot._current_page_matches_target(page_probe):
             page_probe = bot._exit_non_target_event_context(page_probe)
 
-        if page_probe["state"] in {"detail_page", "sku_page"} and bot._current_page_matches_target(page_probe):
+        if page_probe["state"] in {
+            "detail_page",
+            "sku_page",
+        } and bot._current_page_matches_target(page_probe):
             return {
                 "used_keyword": self._config.keyword,
                 "search_results": [],
@@ -457,7 +740,10 @@ class EventNavigator:
                 probe = bot.probe_current_page()
                 if probe["state"] in {"detail_page", "sku_page"}:
                     probe = bot._exit_non_target_event_context(probe)
-                    if probe["state"] in {"detail_page", "sku_page"} and bot._current_page_matches_target(probe):
+                    if probe["state"] in {
+                        "detail_page",
+                        "sku_page",
+                    } and bot._current_page_matches_target(probe):
                         return {
                             "used_keyword": keyword,
                             "search_results": [],
@@ -470,7 +756,9 @@ class EventNavigator:
                         continue
                     probe = bot.probe_current_page()
                 if probe["state"] != "search_page":
-                    logger.warning(f"重试关键词前页面状态异常: {probe['state']}，跳过该关键词")
+                    logger.warning(
+                        f"重试关键词前页面状态异常: {probe['state']}，跳过该关键词"
+                    )
                     continue
 
             self._config.keyword = keyword
@@ -486,7 +774,9 @@ class EventNavigator:
             )
             search_results = open_result["search_results"]
             if search_results:
-                logger.info(f"搜索到 {len(search_results)} 条候选结果，最高分 {search_results[0]['score']}")
+                logger.info(
+                    f"搜索到 {len(search_results)} 条候选结果，最高分 {search_results[0]['score']}"
+                )
             if open_result["opened"]:
                 page_probe = bot.probe_current_page()
                 return {

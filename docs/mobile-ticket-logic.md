@@ -316,6 +316,30 @@ flowchart TD
 - 匹配成功则点击对应日期，失败则使用默认场次
 - 超时仅 1 秒，不阻塞主流程
 
+#### 多场次活动配置示例
+
+巡演 / 音乐节 / 多日演出在 SKU 面板会先出现「请选择场次」/「选择日期」卡片。
+`page_probe` 识别后会进入 `session_picker` 状态并调用
+`event_navigator.select_session()`，匹配优先级：
+`date + city` 精确 → `date` 唯一 → `fallback_index=0`。
+
+```jsonc
+{
+  "keyword": "张杰 演唱会",
+  "users": ["张三"],
+  "city": "上海",          // 巡演 → 同一日期可能多城，city 是去重关键
+  "date": "04.06",          // 统一为 MM.DD 格式（normalize_date 输出）
+  "price": "780元",
+  "price_index": 2,
+  "rush_skip_session": false  // 多场次必须 false；alias rush_mode=true 也会强制 false
+}
+```
+
+匹配失败会抛 `SessionNotFoundError` 并将运行结果标为
+`session_not_found`，不会盲点。日期格式可写
+`4月6号 / 04-06 / 04.06 / 2026-04-06`，`date_utils.normalize_date()` 统一归一为
+`MM.DD` 后再比对。
+
 ### 11. 改进的票价选择
 
 票价选择采用两级策略：

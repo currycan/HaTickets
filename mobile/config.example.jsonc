@@ -37,8 +37,18 @@
   "countdown_lead_ms": 3000,
 
   // ── 性能调优 ──
-  // 极速模式：信任 price_index 跳过冗余 UI 读取，推荐开启
+  // 极速模式：信任 price_index 跳过冗余 UI 读取，推荐开启。
+  // rush_mode 是下面 3 个子开关的 alias；显式设置子开关可获更细控制。
   "rush_mode": true,
+  // ── rush 子开关（rush_mode 的细粒度版本） ──
+  // 多场次活动跳过场次选择 → 永远不要在多场次场景开启（issue #25 根因）。
+  // 单场次活动可设 true 略微加速。即便此处填 true，多场次场景下系统也会
+  // 强制选场并 warning 日志。
+  "rush_skip_session": false,
+  // 价格选择失败时是否跳过 UI dump（dump 写到 tmp/price_dump_*.xml 帮助排查）
+  "rush_skip_price_dump": true,
+  // 失败后的激进快速重试（缩短退避、增加并发轮询）
+  "rush_aggressive_retry": true,
   // 快速重试次数（不重建 driver）
   "fast_retry_count": 8,
   // 快速重试间隔（毫秒）
