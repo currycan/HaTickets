@@ -13,7 +13,9 @@ import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
-from typing import TYPE_CHECKING, Optional, Tuple
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable, Optional, Sequence, Tuple
 
 from selenium.webdriver.common.by import By
 
@@ -32,19 +34,117 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_PRICE_UNAVAILABLE_TAGS = {"无票", "缺货", "缺货登记", "售罄", "已售罄", "不可选", "暂不可售"}
+_PRICE_UNAVAILABLE_TAGS = {
+    "无票",
+    "缺货",
+    "缺货登记",
+    "售罄",
+    "已售罄",
+    "不可选",
+    "暂不可售",
+}
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic exceptions and price-card data class (P1 #31)
+# ---------------------------------------------------------------------------
+
+
+class PriceSelectorError(RuntimeError):
+    """价格选择失败：卡片为空 / index 越界 / 加载超时等。
+
+    Inherits from RuntimeError so existing broad ``except Exception`` /
+    ``except RuntimeError`` call sites keep working unchanged.
+    """
+
+
+class SoldOutError(RuntimeError):
+    """价格面板检测到全部票档售罄；与越界明确区分以便上层决定是否重试。"""
+
+
+@dataclass(frozen=True)
+class PriceCard:
+    """A single clickable price card surfaced from the Damai SKU/detail page."""
+
+    index: int
+    price_text: str
+    coords: Optional[Tuple[int, int]] = None
+    tag: str = ""
+    raw_texts: Tuple[str, ...] = field(default_factory=tuple)
+
+
+def _safe_call_dump_writer(
+    dump_writer: Optional[Callable[[Path], None]],
+    dump_on_fail: Optional[Path],
+) -> Optional[Path]:
+    """Persist a UI dump if a writer + path were provided. Best-effort, never raises."""
+    if dump_writer is None or dump_on_fail is None:
+        return None
+    try:
+        dump_writer(dump_on_fail)
+        return dump_on_fail
+    except Exception as exc:  # pragma: no cover - logged for diagnostics
+        logger.warning("price dump 写入失败 (%s): %s", dump_on_fail, exc)
+        return None
+
+
+def select_price_by_index(
+    cards: Sequence[PriceCard],
+    index: int,
+    *,
+    dump_on_fail: Optional[Path] = None,
+    dump_writer: Optional[Callable[[Path], None]] = None,
+) -> PriceCard:
+    """Return ``cards[index]`` with actionable diagnostics on failure.
+
+    On any failure the optional ``dump_writer`` is invoked with ``dump_on_fail``
+    so the caller (e.g. DamaiBot) can persist a hierarchy XML before the
+    exception bubbles up. The dump path, if any, is appended to the message.
+
+    Raises:
+        PriceSelectorError: when ``cards`` is empty or ``index`` is out of range.
+    """
+
+    if not cards:
+        saved = _safe_call_dump_writer(dump_writer, dump_on_fail)
+        suffix = f"\nUI dump 已保存：{saved}" if saved else ""
+        raise PriceSelectorError(
+            "未发现可点击价格卡片。可能原因：\n"
+            "  1. 演出尚未开售（CTA 显示「待开售」）\n"
+            "  2. 价格区已售罄\n"
+            "  3. 大麦 App UI 变更，需更新选择器" + suffix
+        )
+
+    if index < 0 or index >= len(cards):
+        saved = _safe_call_dump_writer(dump_writer, dump_on_fail)
+        suffix = f"\nUI dump 已保存：{saved}" if saved else ""
+        available = "\n".join(
+            f"  [{c.index}] {c.price_text or '(空)'}" + (f" [{c.tag}]" if c.tag else "")
+            for c in cards
+        )
+        raise PriceSelectorError(
+            f"price_index={index} 越界（可用 0..{len(cards) - 1}）。\n"
+            f"可用价档：\n{available}\n"
+            "请修改 mobile/config.jsonc 中 price_index" + suffix
+        )
+
+    return cards[index]
+
+
 _MAGICK_BIN = shutil.which("magick")
 _TESSERACT_BIN = shutil.which("tesseract")
-_OCR_CHAR_TRANSLATIONS = str.maketrans({
-    "O": "0",
-    "o": "0",
-    "I": "1",
-    "l": "1",
-    "|": "1",
-    "S": "5",
-    "s": "5",
-    "B": "8",
-})
+_OCR_CHAR_TRANSLATIONS = str.maketrans(
+    {
+        "O": "0",
+        "o": "0",
+        "I": "1",
+        "l": "1",
+        "|": "1",
+        "S": "5",
+        "s": "5",
+        "B": "8",
+    }
+)
 
 
 class PriceSelector:
@@ -65,7 +165,16 @@ class PriceSelector:
     # ------------------------------------------------------------------
 
     def select_by_index(self, xml_root=None) -> bool:
-        """Select price option by config.price_index. Returns True on success."""
+        """Select price option by config.price_index. Returns True on success.
+
+        Before attempting to click, the price panel state is sampled via
+        ``page_probe.detect_price_panel_state`` (P1 #31). On ``loading`` the
+        method waits up to 2s for the panel to appear; on ``sold_out`` it
+        raises ``SoldOutError``; on ``ready`` / ``unknown`` it proceeds with
+        the existing coordinate-based click path.
+        """
+        self._await_price_panel_or_raise()
+
         coords = self.get_price_coords_by_index(xml_root=xml_root)
         if coords is None:
             logger.warning(f"无法定位 price_index={self._config.price_index} 的坐标")
@@ -74,11 +183,53 @@ class PriceSelector:
         logger.info(f"通过配置索引选择票价: price_index={self._config.price_index}")
         return True
 
+    def _await_price_panel_or_raise(self, *, max_wait_s: float = 2.0) -> str:
+        """Sample the price panel state, blocking up to ``max_wait_s`` on loading.
+
+        Returns the final state. Raises ``SoldOutError`` when the panel
+        reports sold-out, and ``PriceSelectorError("加载超时")`` if it stays
+        in ``loading`` past the timeout.
+        """
+        # Lazy import to avoid hard dependency on page_probe in unit tests
+        # that exercise PriceSelector in isolation (the import below is
+        # cheap; we only delay it to keep top-of-file import order minimal).
+        try:
+            from mobile.page_probe import detect_price_panel_state
+        except ImportError:  # pragma: no cover - fallback for non-package runs
+            from page_probe import detect_price_panel_state  # type: ignore
+
+        state = detect_price_panel_state(self._d)
+        if state == "loading":
+            import time as _time
+
+            deadline = _time.monotonic() + max_wait_s
+            while _time.monotonic() < deadline:
+                _time.sleep(0.1)
+                state = detect_price_panel_state(self._d)
+                if state != "loading":
+                    break
+            if state == "loading":
+                raise PriceSelectorError(
+                    f"价格面板加载超时（>{max_wait_s:.1f}s），疑似设备/网络异常"
+                )
+
+        if state == "sold_out":
+            raise SoldOutError("价格面板检测到全部票档售罄")
+
+        if state == "unknown":
+            logger.warning(
+                "price panel state=unknown — 选择器/UI 可能已变更，继续尝试索引点击"
+            )
+
+        return state
+
     def get_price_coords_by_index(self, xml_root=None) -> Optional[Tuple[int, int]]:
         """Get coordinates for price option at config.price_index."""
         if self._bot is not None:
             try:
-                return self._bot._get_price_option_coordinates_by_config_index(xml_root=xml_root)
+                return self._bot._get_price_option_coordinates_by_config_index(
+                    xml_root=xml_root
+                )
             except Exception as exc:
                 logger.warning(f"获取票价坐标失败: {exc}")
                 return None
@@ -148,6 +299,7 @@ class PriceSelector:
             # Retry once after short wait (cards may still be loading)
             if xml_root is not None:
                 import time
+
                 time.sleep(0.3)
                 result = self._get_price_coords_from_xml(None)  # fresh XML dump
                 if result is not None:
@@ -155,12 +307,16 @@ class PriceSelector:
             return None
 
         try:
-            price_container = bot._find(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout")
+            price_container = bot._find(
+                By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"
+            )
         except Exception:
             return None
 
         try:
-            cards = bot._container_find_elements(price_container, By.CLASS_NAME, "android.widget.FrameLayout")
+            cards = bot._container_find_elements(
+                price_container, By.CLASS_NAME, "android.widget.FrameLayout"
+            )
         except Exception:
             return None
         clickable_cards = [card for card in cards if bot._is_clickable(card)]
@@ -193,7 +349,8 @@ class PriceSelector:
             for node in xml_root.iter("node"):
                 if node.get("resource-id") == container_id:
                     cards = [
-                        child for child in node
+                        child
+                        for child in node
                         if child.get("class") == "android.widget.FrameLayout"
                         and child.get("clickable") == "true"
                     ]
@@ -205,7 +362,9 @@ class PriceSelector:
                             f"中的 {len(cards)} 个可点击卡片"
                         )
                         continue
-                    bounds = bot._parse_bounds(cards[self._config.price_index].get("bounds", ""))
+                    bounds = bot._parse_bounds(
+                        cards[self._config.price_index].get("bounds", "")
+                    )
                     if bounds:
                         left, top, right, bottom = bounds
                         return ((left + right) // 2, (top + bottom) // 2)
@@ -224,7 +383,10 @@ class PriceSelector:
         normalized_target = normalize_text(self._config.price)
         normalized_text = normalize_text(text)
         if normalized_target and normalized_text:
-            if normalized_target in normalized_text or normalized_text in normalized_target:
+            if (
+                normalized_target in normalized_text
+                or normalized_text in normalized_target
+            ):
                 return True
 
         target_digits = self._extract_price_digits(self._config.price)
@@ -240,8 +402,12 @@ class PriceSelector:
         """Click a visible price card by its clickable-card index."""
         bot = self._bot
         try:
-            price_container = bot._find(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout")
-            cards = bot._container_find_elements(price_container, By.CLASS_NAME, "android.widget.FrameLayout")
+            price_container = bot._find(
+                By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"
+            )
+            cards = bot._container_find_elements(
+                price_container, By.CLASS_NAME, "android.widget.FrameLayout"
+            )
         except Exception:
             return False
 
@@ -260,14 +426,18 @@ class PriceSelector:
         bot = self._bot
         # Primary: element click — Damai price cards may not respond to coordinate taps
         if self._click_price_card_element(self._config.price_index):
-            logger.info(f"通过配置索引直接选择票价: price_index={self._config.price_index}")
+            logger.info(
+                f"通过配置索引直接选择票价: price_index={self._config.price_index}"
+            )
             return True
         # Fallback: coordinate click
         target_coords = coords or bot._get_price_option_coordinates_by_config_index()
         if not target_coords:
             return False
         if burst:
-            bot._burst_click_coordinates(*target_coords, count=2, interval_ms=25, duration=25)
+            bot._burst_click_coordinates(
+                *target_coords, count=2, interval_ms=25, duration=25
+            )
         else:
             bot._click_coordinates(*target_coords, duration=30)
         logger.info(f"通过配置索引直接选择票价: price_index={self._config.price_index}")
@@ -280,10 +450,14 @@ class PriceSelector:
         not raw touch coordinates.
         """
         try:
-            container = self._d(resourceId="cn.damai:id/project_detail_perform_price_flowlayout")
+            container = self._d(
+                resourceId="cn.damai:id/project_detail_perform_price_flowlayout"
+            )
             if not container.exists:
                 return False
-            children = container.child(className="android.widget.FrameLayout", clickable=True)
+            children = container.child(
+                className="android.widget.FrameLayout", clickable=True
+            )
             if children.count > index:
                 children[index].click()
                 return True
@@ -303,9 +477,7 @@ class PriceSelector:
             "cn.damai:id/project_price_pre",
             "cn.damai:id/project_price_suffix",
         )
-        suffix_ids = (
-            "cn.damai:id/bricks_dm_common_price_suffix",
-        )
+        suffix_ids = ("cn.damai:id/bricks_dm_common_price_suffix",)
 
         prefix = ""
         value_parts = []
@@ -360,13 +532,22 @@ class PriceSelector:
         bot = self._bot
         if self._config.rush_mode:
             _burst = self._config.if_commit_order
-            if bot._click_price_option_by_config_index(burst=_burst, coords=cached_coords):
+            if bot._click_price_option_by_config_index(
+                burst=_burst, coords=cached_coords
+            ):
                 return True
 
         visible_options = bot.get_visible_price_options(allow_ocr=False)
 
         if visible_options:
-            indexed_option = next((option for option in visible_options if option["index"] == self._config.price_index), None)
+            indexed_option = next(
+                (
+                    option
+                    for option in visible_options
+                    if option["index"] == self._config.price_index
+                ),
+                None,
+            )
             if indexed_option:
                 if not bot._is_price_option_available(indexed_option):
                     logger.warning(
@@ -374,7 +555,9 @@ class PriceSelector:
                         f"[{indexed_option.get('tag') or '不可售'}]"
                     )
                     return False
-                if not indexed_option.get("text") or bot._price_text_matches_target(indexed_option.get("text") or ""):
+                if not indexed_option.get("text") or bot._price_text_matches_target(
+                    indexed_option.get("text") or ""
+                ):
                     if bot._click_visible_price_option(indexed_option["index"]):
                         logger.info(
                             f"通过配置索引快速选择票价: {indexed_option.get('text') or self._config.price} "
@@ -385,7 +568,8 @@ class PriceSelector:
                 return True
 
             matched_options = [
-                option for option in visible_options
+                option
+                for option in visible_options
                 if bot._price_text_matches_target(option.get("text") or "")
             ]
             for option in matched_options:
@@ -419,7 +603,11 @@ class PriceSelector:
             return fast_result
 
         visible_options = bot.get_visible_price_options()
-        matched_options = [option for option in visible_options if bot._price_text_matches_target(option.get("text") or "")]
+        matched_options = [
+            option
+            for option in visible_options
+            if bot._price_text_matches_target(option.get("text") or "")
+        ]
 
         for option in matched_options:
             if not bot._is_price_option_available(option):
@@ -435,7 +623,14 @@ class PriceSelector:
                 return True
 
         if visible_options:
-            indexed_option = next((option for option in visible_options if option["index"] == self._config.price_index), None)
+            indexed_option = next(
+                (
+                    option
+                    for option in visible_options
+                    if option["index"] == self._config.price_index
+                ),
+                None,
+            )
             if indexed_option and bot._is_price_option_available(indexed_option):
                 if bot._click_visible_price_option(indexed_option["index"]):
                     logger.info(
@@ -455,20 +650,28 @@ class PriceSelector:
             logger.info(f"通过文本匹配选择票价: {self._config.price}")
             return True
 
-        logger.info(f"文本匹配失败，使用索引选择票价: price_index={self._config.price_index}")
+        logger.info(
+            f"文本匹配失败，使用索引选择票价: price_index={self._config.price_index}"
+        )
         logger.info(f"通过配置索引直接选择票价: price_index={self._config.price_index}")
         try:
-            price_container = bot._find(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout")
+            price_container = bot._find(
+                By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"
+            )
             if not bot._using_u2():
                 target_price = price_container.find_element(
                     ANDROID_UIAUTOMATOR,
-                    f'new UiSelector().className("android.widget.FrameLayout").index({self._config.price_index}).clickable(true)'
+                    f'new UiSelector().className("android.widget.FrameLayout").index({self._config.price_index}).clickable(true)',
                 )
             else:
-                cards = bot._container_find_elements(price_container, By.CLASS_NAME, "android.widget.FrameLayout")
+                cards = bot._container_find_elements(
+                    price_container, By.CLASS_NAME, "android.widget.FrameLayout"
+                )
                 clickable_cards = [card for card in cards if bot._is_clickable(card)]
                 if not (0 <= self._config.price_index < len(clickable_cards)):
-                    logger.warning(f"price_index={self._config.price_index} 超出可点击卡片数量 {len(clickable_cards)}")
+                    logger.warning(
+                        f"price_index={self._config.price_index} 超出可点击卡片数量 {len(clickable_cards)}"
+                    )
                     return False
                 target_price = clickable_cards[self._config.price_index]
             bot._click_element_center(target_price, duration=30)
@@ -478,7 +681,12 @@ class PriceSelector:
             try:
                 if not bot._using_u2() and bot.wait is not None:
                     price_container = bot.wait.until(
-                        EC.presence_of_element_located((By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"))
+                        EC.presence_of_element_located(
+                            (
+                                By.ID,
+                                "cn.damai:id/project_detail_perform_price_flowlayout",
+                            )
+                        )
                     )
                 else:
                     price_container = bot._wait_for_element(
@@ -489,13 +697,19 @@ class PriceSelector:
                 if not bot._using_u2():
                     target_price = price_container.find_element(
                         ANDROID_UIAUTOMATOR,
-                        f'new UiSelector().className("android.widget.FrameLayout").index({self._config.price_index}).clickable(true)'
+                        f'new UiSelector().className("android.widget.FrameLayout").index({self._config.price_index}).clickable(true)',
                     )
                 else:
-                    cards = bot._container_find_elements(price_container, By.CLASS_NAME, "android.widget.FrameLayout")
-                    clickable_cards = [card for card in cards if bot._is_clickable(card)]
+                    cards = bot._container_find_elements(
+                        price_container, By.CLASS_NAME, "android.widget.FrameLayout"
+                    )
+                    clickable_cards = [
+                        card for card in cards if bot._is_clickable(card)
+                    ]
                     if not (0 <= self._config.price_index < len(clickable_cards)):
-                        logger.warning(f"备用方案: price_index={self._config.price_index} 超出 {len(clickable_cards)}")
+                        logger.warning(
+                            f"备用方案: price_index={self._config.price_index} 超出 {len(clickable_cards)}"
+                        )
                         return False
                     target_price = clickable_cards[self._config.price_index]
                 bot._click_element_center(target_price, duration=30)
@@ -594,10 +808,7 @@ class PriceSelector:
             return focus_13
 
         ranked = sorted(
-            (
-                (count, price)
-                for price, count in price_counts.items()
-            ),
+            ((count, price) for price, count in price_counts.items()),
             reverse=True,
         )
         if ranked:
@@ -698,16 +909,22 @@ class PriceSelector:
 
         # Fast path: work entirely from a pre-parsed hierarchy XML (no ADB round-trips).
         if xml_root is not None and bot._using_u2():
-            return self._get_visible_price_options_from_xml(xml_root, allow_ocr=allow_ocr)
+            return self._get_visible_price_options_from_xml(
+                xml_root, allow_ocr=allow_ocr
+            )
 
         try:
-            price_container = bot._find(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout")
+            price_container = bot._find(
+                By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"
+            )
         except Exception:
             return []
 
         options = []
         try:
-            cards = bot._container_find_elements(price_container, By.CLASS_NAME, "android.widget.FrameLayout")
+            cards = bot._container_find_elements(
+                price_container, By.CLASS_NAME, "android.widget.FrameLayout"
+            )
         except Exception:
             cards = []
 
@@ -724,7 +941,9 @@ class PriceSelector:
         screenshot_path = None
         if allow_ocr and cards and _MAGICK_BIN and _TESSERACT_BIN:
             try:
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+                with tempfile.NamedTemporaryFile(
+                    suffix=".png", delete=False
+                ) as tmp_file:
                     screenshot_path = tmp_file.name
                 if not bot._using_u2():
                     bot.driver.get_screenshot_as_file(screenshot_path)
@@ -742,21 +961,41 @@ class PriceSelector:
             source = "ui" if text else ""
             tag = ""
             for candidate in texts:
-                if candidate in {"可预约", "预售", "无票", "已预约", "缺货", "售罄", "已售罄", "可选"}:
+                if candidate in {
+                    "可预约",
+                    "预售",
+                    "无票",
+                    "已预约",
+                    "缺货",
+                    "售罄",
+                    "已售罄",
+                    "可选",
+                }:
                     tag = candidate
                     break
-            card_data.append({"index": index, "text": text, "tag": tag, "raw_texts": texts, "source": source})
+            card_data.append(
+                {
+                    "index": index,
+                    "text": text,
+                    "tag": tag,
+                    "raw_texts": texts,
+                    "source": source,
+                }
+            )
             if not text and screenshot_path:
                 ocr_tasks.append((index, bot._element_rect(card)))
 
         # Second pass: OCR in parallel for all cards that need it.
         ocr_results: dict[int, str] = {}
         if ocr_tasks and screenshot_path:
+
             def _run_ocr(args):
                 idx, rect = args
                 return idx, self._ocr_price_text_from_card(screenshot_path, rect)
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(ocr_tasks), 4)) as executor:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(len(ocr_tasks), 4)
+            ) as executor:
                 for idx, ocr_text in executor.map(_run_ocr, ocr_tasks):
                     if ocr_text:
                         ocr_results[idx] = ocr_text
@@ -768,13 +1007,15 @@ class PriceSelector:
                 entry["source"] = "ocr"
             if not entry["text"] and not entry["tag"]:
                 continue
-            options.append({
-                "index": index,
-                "text": entry["text"],
-                "tag": entry["tag"],
-                "raw_texts": entry["raw_texts"],
-                "source": entry["source"] or "ui",
-            })
+            options.append(
+                {
+                    "index": index,
+                    "text": entry["text"],
+                    "tag": entry["tag"],
+                    "raw_texts": entry["raw_texts"],
+                    "source": entry["source"] or "ui",
+                }
+            )
 
         if screenshot_path and os.path.exists(screenshot_path):
             try:
@@ -791,7 +1032,10 @@ class PriceSelector:
         # Locate the price container node by resource-id.
         price_container_node = None
         for node in xml_root.iter("node"):
-            if node.get("resource-id") == "cn.damai:id/project_detail_perform_price_flowlayout":
+            if (
+                node.get("resource-id")
+                == "cn.damai:id/project_detail_perform_price_flowlayout"
+            ):
                 price_container_node = node
                 break
         if price_container_node is None:
@@ -803,7 +1047,8 @@ class PriceSelector:
 
         # Direct children that are clickable FrameLayouts = price cards.
         card_nodes = [
-            child for child in price_container_node
+            child
+            for child in price_container_node
             if child.get("class") == "android.widget.FrameLayout"
             and child.get("clickable") == "true"
         ]
@@ -814,13 +1059,24 @@ class PriceSelector:
         screenshot_path = None
         if allow_ocr and _MAGICK_BIN and _TESSERACT_BIN:
             try:
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+                with tempfile.NamedTemporaryFile(
+                    suffix=".png", delete=False
+                ) as tmp_file:
                     screenshot_path = tmp_file.name
                 bot.d.screenshot(screenshot_path)
             except Exception:
                 screenshot_path = None
 
-        _UNAVAILABLE = {"可预约", "预售", "无票", "已预约", "缺货", "售罄", "已售罄", "可选"}
+        _UNAVAILABLE = {
+            "可预约",
+            "预售",
+            "无票",
+            "已预约",
+            "缺货",
+            "售罄",
+            "已售罄",
+            "可选",
+        }
 
         card_data = []
         ocr_tasks = []
@@ -841,22 +1097,35 @@ class PriceSelector:
             card_bounds = bot._parse_bounds(card_node.get("bounds", ""))
             if not price_text and screenshot_path and card_bounds:
                 left, top, right, bottom = card_bounds
-                rect = {"x": left, "y": top, "width": right - left, "height": bottom - top}
+                rect = {
+                    "x": left,
+                    "y": top,
+                    "width": right - left,
+                    "height": bottom - top,
+                }
                 ocr_tasks.append((index, rect))
 
-            card_data.append({
-                "index": index, "text": price_text, "tag": tag,
-                "raw_texts": texts, "source": source,
-            })
+            card_data.append(
+                {
+                    "index": index,
+                    "text": price_text,
+                    "tag": tag,
+                    "raw_texts": texts,
+                    "source": source,
+                }
+            )
 
         # Parallel OCR for cards whose price text wasn't in the UI tree.
         ocr_results: dict[int, str] = {}
         if ocr_tasks and screenshot_path:
+
             def _run_ocr(args):
                 idx, rect = args
                 return idx, self._ocr_price_text_from_card(screenshot_path, rect)
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(ocr_tasks), 4)) as executor:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(len(ocr_tasks), 4)
+            ) as executor:
                 for idx, ocr_text in executor.map(_run_ocr, ocr_tasks):
                     if ocr_text:
                         ocr_results[idx] = ocr_text
@@ -869,13 +1138,15 @@ class PriceSelector:
                 entry["source"] = "ocr"
             if not entry["text"] and not entry["tag"]:
                 continue
-            options.append({
-                "index": idx,
-                "text": entry["text"],
-                "tag": entry["tag"],
-                "raw_texts": entry["raw_texts"],
-                "source": entry["source"] or "ui",
-            })
+            options.append(
+                {
+                    "index": idx,
+                    "text": entry["text"],
+                    "tag": entry["tag"],
+                    "raw_texts": entry["raw_texts"],
+                    "source": entry["source"] or "ui",
+                }
+            )
 
         if screenshot_path and os.path.exists(screenshot_path):
             try:

@@ -1,7 +1,113 @@
 """Unit tests for PriceSelector."""
 
-from unittest.mock import MagicMock
-from mobile.price_selector import PriceSelector
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from mobile.price_selector import (
+    PriceCard,
+    PriceSelector,
+    PriceSelectorError,
+    SoldOutError,
+    select_price_by_index,
+)
+
+
+@pytest.fixture(autouse=True)
+def _force_price_panel_ready():
+    """Most legacy PriceSelector tests do not care about page_probe state.
+
+    Default to ``"ready"`` so the new pre-flight check does not turn passive
+    MagicMock device probes into accidental ``loading`` / ``sold_out``.
+    Individual state tests patch this themselves.
+    """
+    with patch(
+        "mobile.page_probe.detect_price_panel_state", return_value="ready"
+    ) as mocked:
+        yield mocked
+
+
+# ---------------------------------------------------------------------------
+# select_price_by_index — boundary guard (P1 #31, Step 1)
+# ---------------------------------------------------------------------------
+
+
+def _card(index: int, text: str = "", **kw) -> PriceCard:
+    return PriceCard(index=index, price_text=text, **kw)
+
+
+class TestSelectPriceByIndexFunctional:
+    def test_returns_card_when_index_in_range(self):
+        cards = [_card(0, "380元"), _card(1, "580元"), _card(2, "880元")]
+        assert select_price_by_index(cards, 1) is cards[1]
+
+    def test_empty_cards_raises_with_three_reasons(self):
+        with pytest.raises(PriceSelectorError) as exc_info:
+            select_price_by_index([], 0)
+        message = str(exc_info.value)
+        assert "未发现可点击价格卡片" in message
+        assert "尚未开售" in message
+        assert "已售罄" in message
+        assert "UI 变更" in message
+
+    def test_negative_index_raises_with_available_listing(self):
+        cards = [_card(0, "380元"), _card(1, "580元")]
+        with pytest.raises(PriceSelectorError) as exc_info:
+            select_price_by_index(cards, -1)
+        message = str(exc_info.value)
+        assert "price_index=-1" in message
+        assert "[0] 380元" in message
+        assert "[1] 580元" in message
+        assert "config.jsonc" in message
+
+    def test_out_of_range_raises_with_available_listing(self):
+        cards = [_card(0, "380元"), _card(1, "580元", tag="缺货")]
+        with pytest.raises(PriceSelectorError) as exc_info:
+            select_price_by_index(cards, 5)
+        message = str(exc_info.value)
+        assert "0..1" in message
+        assert "[1] 580元 [缺货]" in message
+
+    def test_dump_writer_invoked_on_empty_cards(self, tmp_path):
+        dump_path = tmp_path / "price_dump.xml"
+        writer = MagicMock()
+        with pytest.raises(PriceSelectorError) as exc_info:
+            select_price_by_index([], 0, dump_on_fail=dump_path, dump_writer=writer)
+        writer.assert_called_once_with(dump_path)
+        assert str(dump_path) in str(exc_info.value)
+
+    def test_dump_writer_invoked_on_out_of_range(self, tmp_path):
+        dump_path = tmp_path / "price_dump.xml"
+        writer = MagicMock()
+        cards = [_card(0, "380元")]
+        with pytest.raises(PriceSelectorError):
+            select_price_by_index(cards, 9, dump_on_fail=dump_path, dump_writer=writer)
+        writer.assert_called_once_with(dump_path)
+
+    def test_dump_writer_failure_is_swallowed(self, tmp_path):
+        writer = MagicMock(side_effect=OSError("disk full"))
+        with pytest.raises(PriceSelectorError) as exc_info:
+            select_price_by_index(
+                [], 0, dump_on_fail=tmp_path / "x.xml", dump_writer=writer
+            )
+        # No "UI dump" suffix because save failed
+        assert "UI dump 已保存" not in str(exc_info.value)
+
+    def test_dump_path_without_writer_is_noop(self, tmp_path):
+        with pytest.raises(PriceSelectorError) as exc_info:
+            select_price_by_index([], 0, dump_on_fail=tmp_path / "x.xml")
+        assert "UI dump 已保存" not in str(exc_info.value)
+
+
+class TestPriceSelectorErrorTypes:
+    def test_price_selector_error_is_runtime_error(self):
+        assert issubclass(PriceSelectorError, RuntimeError)
+
+    def test_sold_out_error_is_runtime_error(self):
+        assert issubclass(SoldOutError, RuntimeError)
+
+    def test_errors_are_distinct_types(self):
+        assert PriceSelectorError is not SoldOutError
 
 
 class TestSelectByIndex:
@@ -264,3 +370,65 @@ class TestGetPriceCoordsFromXml:
             xml_root=xml_small
         )
         assert result is not None  # retry succeeded
+
+
+# ---------------------------------------------------------------------------
+# Page-probe integration (P1 #31, Step 3)
+# ---------------------------------------------------------------------------
+
+
+class TestSelectByIndexPanelStateIntegration:
+    def _make_selector(self, *, coords=(10, 20)):
+        bot = MagicMock()
+        bot._get_price_option_coordinates_by_config_index.return_value = coords
+        selector = PriceSelector(
+            device=MagicMock(),
+            config=MagicMock(price_index=0),
+            probe=MagicMock(),
+        )
+        selector.set_bot(bot)
+        return selector
+
+    def test_sold_out_raises_sold_out_error(self, _force_price_panel_ready):
+        _force_price_panel_ready.return_value = "sold_out"
+        selector = self._make_selector()
+        with pytest.raises(SoldOutError):
+            selector.select_by_index()
+
+    def test_loading_then_ready_succeeds(self, _force_price_panel_ready):
+        _force_price_panel_ready.side_effect = ["loading", "ready"]
+        selector = self._make_selector()
+        with patch("time.sleep") as mock_sleep:
+            with patch(
+                "time.monotonic",
+                side_effect=[0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3],
+            ):
+                assert selector.select_by_index() is True
+        assert mock_sleep.called
+
+    def test_loading_timeout_raises_price_selector_error(
+        self, _force_price_panel_ready
+    ):
+        _force_price_panel_ready.return_value = "loading"
+        selector = self._make_selector()
+        # monotonic: first start = 0.0, deadline = 2.0; subsequent values jump past
+        with patch("time.sleep"):
+            with patch("time.monotonic", side_effect=[0.0, 0.5, 1.0, 1.5, 2.5]):
+                with pytest.raises(PriceSelectorError, match="加载超时"):
+                    selector.select_by_index()
+
+    def test_unknown_logs_warning_and_continues(self, _force_price_panel_ready):
+        _force_price_panel_ready.return_value = "unknown"
+        selector = self._make_selector()
+        with patch("mobile.price_selector.logger") as mock_logger:
+            assert selector.select_by_index() is True
+        warning_calls = [c for c in mock_logger.warning.call_args_list]
+        assert any("state=unknown" in str(c) for c in warning_calls)
+
+    def test_ready_proceeds_without_warning(self, _force_price_panel_ready):
+        _force_price_panel_ready.return_value = "ready"
+        selector = self._make_selector()
+        with patch("mobile.price_selector.logger") as mock_logger:
+            assert selector.select_by_index() is True
+        warning_calls = [c for c in mock_logger.warning.call_args_list]
+        assert not any("state=unknown" in str(c) for c in warning_calls)

@@ -19,6 +19,67 @@ except ImportError:
 
 logger = get_logger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Price panel state detection (P1 #31, Step 3)
+# ---------------------------------------------------------------------------
+
+# Resource IDs / text patterns checked when classifying the price panel state.
+_PRICE_LOADING_INDICATORS = (
+    "cn.damai:id/loading_progress",
+    "cn.damai:id/sku_loading",
+    "cn.damai:id/loading_view",
+)
+_PRICE_READY_CONTAINERS = (
+    "cn.damai:id/project_detail_perform_price_flowlayout",
+    "cn.damai:id/layout_price",
+)
+_PRICE_SOLD_OUT_TEXTS = (
+    "已售罄",
+    "全部售罄",
+    "无票",
+    "暂无可售票档",
+    "缺货登记",
+)
+
+
+def _safe_exists(driver: Any, **selector: Any) -> bool:
+    """Return ``driver(**selector).exists`` swallowing any device error."""
+    try:
+        return bool(driver(**selector).exists)
+    except Exception:
+        return False
+
+
+def detect_price_panel_state(driver: Any) -> str:
+    """Classify the visible price panel state.
+
+    Returns one of: ``"loading"``, ``"ready"``, ``"sold_out"``, ``"unknown"``.
+
+    The order is intentional:
+      1. ``loading`` — a loading spinner is present, caller should wait briefly.
+      2. ``sold_out`` — visible text matches a sold-out marker.
+      3. ``ready`` — a known price container resource-id exists.
+      4. ``unknown`` — none of the above; caller should fall back gracefully.
+    """
+    # 1. loading spinner takes priority — the panel may render later
+    for resource_id in _PRICE_LOADING_INDICATORS:
+        if _safe_exists(driver, resourceId=resource_id):
+            return "loading"
+
+    # 2. sold-out markers (text/textContains) — never try to click empty cards
+    for text in _PRICE_SOLD_OUT_TEXTS:
+        if _safe_exists(driver, text=text) or _safe_exists(driver, textContains=text):
+            return "sold_out"
+
+    # 3. ready when a known price container is present
+    for container_id in _PRICE_READY_CONTAINERS:
+        if _safe_exists(driver, resourceId=container_id):
+            return "ready"
+
+    return "unknown"
+
+
 # Activity substrings → state mapping (used by fast probe)
 _ACTIVITY_STATE_MAP = (
     ("ProjectDetail", "detail_page"),
@@ -53,7 +114,9 @@ class PageProbe:
         cache_ttl_s: How long (seconds) a cached probe result stays valid.
     """
 
-    def __init__(self, device: Any, config: Any = None, cache_ttl_s: float = 0.5) -> None:
+    def __init__(
+        self, device: Any, config: Any = None, cache_ttl_s: float = 0.5
+    ) -> None:
         self._device = device
         self._config = config
         self._bot = None
@@ -80,8 +143,13 @@ class PageProbe:
             A dict describing the page state and key element presence.
         """
         now = time.time()
-        if self._cached_result is not None and (now - self._cached_at) < self._cache_ttl_s:
-            logger.debug("page probe: returning cached result (age=%.3fs)", now - self._cached_at)
+        if (
+            self._cached_result is not None
+            and (now - self._cached_at) < self._cache_ttl_s
+        ):
+            logger.debug(
+                "page probe: returning cached result (age=%.3fs)", now - self._cached_at
+            )
             return self._cached_result
 
         if fast:
@@ -149,8 +217,12 @@ class PageProbe:
 
         if "NcovSku" in activity:
             reservation = self._check_reservation_mode()
-            return _make_result(state="sku_page", price_container=True, quantity_picker=True,
-                                reservation_mode=reservation)
+            return _make_result(
+                state="sku_page",
+                price_container=True,
+                quantity_picker=True,
+                reservation_mode=reservation,
+            )
 
         if "MainActivity" in activity:
             return _make_result(state="homepage")
@@ -196,7 +268,9 @@ class PageProbe:
         purchase_bar = self._exists_by_resource_id(
             "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
         )
-        price_layout = self._exists_by_resource_id("cn.damai:id/project_detail_price_layout")
+        price_layout = self._exists_by_resource_id(
+            "cn.damai:id/project_detail_price_layout"
+        )
         title_tv = self._exists_by_resource_id("cn.damai:id/title_tv")
         if purchase_bar or price_layout or title_tv:
             return _make_result(
@@ -207,7 +281,9 @@ class PageProbe:
             )
 
         # Check homepage (fallback)
-        search_header = self._exists_by_resource_id("cn.damai:id/homepage_header_search")
+        search_header = self._exists_by_resource_id(
+            "cn.damai:id/homepage_header_search"
+        )
         search_btn = self._exists_by_resource_id(
             "cn.damai:id/pioneer_homepage_header_search_btn"
         )

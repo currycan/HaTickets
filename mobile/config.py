@@ -5,34 +5,44 @@ __Version__ = "1.0.0"
 __Description__ = "配置类"
 __Created__ = 2023/10/27 09:54
 """
+
 import json
+import logging
 import re
 import sys
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from shared.config_validator import validate_url, validate_non_empty_list
+from shared.config_validator import validate_non_empty_list
 
 DEFAULT_CONFIG_FILENAME = "config.jsonc"
 LOCAL_CONFIG_FILENAME = "config.local.jsonc"
 CONFIG_OVERRIDE_ENV_VAR = "HATICKETS_CONFIG_PATH"
 DEFAULT_CONFIG_FILENAMES = (DEFAULT_CONFIG_FILENAME,)
 
+PRICE_INDEX_LARGE_WARNING_THRESHOLD = 50
+
+logger = logging.getLogger(__name__)
+
+
+class ConfigError(ValueError):
+    """配置加载/校验失败。继承 ValueError 以保持现有 except 兼容。"""
+
 
 def _strip_jsonc_comments(text):
     """移除 JSONC 文件中的 // 和 /* */ 注释"""
     # 移除单行注释（不在字符串内的 //）
-    text = re.sub(r'(?<!:)//.*?$', '', text, flags=re.MULTILINE)
+    text = re.sub(r"(?<!:)//.*?$", "", text, flags=re.MULTILINE)
     # 移除多行注释
-    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
     return text
 
 
 def _load_config_dict_from_path(path):
     try:
-        with open(path, 'r', encoding='utf-8') as config_file:
+        with open(path, "r", encoding="utf-8") as config_file:
             raw_text = config_file.read()
     except FileNotFoundError:
         raise FileNotFoundError(f"配置文件未找到: {path}")
@@ -87,7 +97,7 @@ def load_config_dict(config_path=None):
 def save_config_dict(config_dict, config_path=None):
     """Persist a config dictionary back to disk as UTF-8 JSON."""
     resolved_path = _resolve_writable_config_path(config_path)
-    with open(resolved_path, 'w', encoding='utf-8') as config_file:
+    with open(resolved_path, "w", encoding="utf-8") as config_file:
         config_file.write(_dump_config_dict(config_dict))
 
 
@@ -113,37 +123,61 @@ def update_runtime_mode(probe_only, if_commit_order, config_path=None):
 
 
 class Config:
-    def __init__(self, keyword, users, city, date, price, price_index, if_commit_order,
-                 probe_only=False,
-                 app_package="cn.damai", app_activity=".launcher.splash.SplashMainActivity",
-                 sell_start_time=None, countdown_lead_ms=3000,
-                 wait_cta_ready_timeout_ms=0,
-                 fast_retry_count=8, fast_retry_interval_ms=120,
-                 rush_mode=False,
-                 auto_navigate=True,
-                 target_title=None, target_venue=None,
-                 serial=None,
-                 # Deprecated Appium-era params — accepted for config file compat, ignored
-                 driver_backend="u2", server_url=None, device_name="Android",
-                 udid=None, platform_version=None):
+    def __init__(
+        self,
+        keyword,
+        users,
+        city,
+        date,
+        price,
+        price_index,
+        if_commit_order,
+        probe_only=False,
+        app_package="cn.damai",
+        app_activity=".launcher.splash.SplashMainActivity",
+        sell_start_time=None,
+        countdown_lead_ms=3000,
+        wait_cta_ready_timeout_ms=0,
+        fast_retry_count=8,
+        fast_retry_interval_ms=120,
+        rush_mode=False,
+        auto_navigate=True,
+        target_title=None,
+        target_venue=None,
+        serial=None,
+        # Deprecated Appium-era params — accepted for config file compat, ignored
+        driver_backend="u2",
+        server_url=None,
+        device_name="Android",
+        udid=None,
+        platform_version=None,
+    ):
 
         # Validate users
         validate_non_empty_list(users, "users")
 
         # Validate price_index
-        if not isinstance(price_index, int) or isinstance(price_index, bool) or price_index < 0:
+        if (
+            not isinstance(price_index, int)
+            or isinstance(price_index, bool)
+            or price_index < 0
+        ):
             raise ValueError(f"price_index 必须是非负整数，实际值: {price_index!r}")
 
         if keyword is None or not isinstance(keyword, str) or len(keyword.strip()) == 0:
             raise ValueError(f"keyword 不能为空，必须是非空字符串，实际值: {keyword!r}")
 
         if not isinstance(if_commit_order, bool):
-            raise ValueError(f"if_commit_order 必须是布尔值，实际值: {if_commit_order!r}")
+            raise ValueError(
+                f"if_commit_order 必须是布尔值，实际值: {if_commit_order!r}"
+            )
 
         if not isinstance(probe_only, bool):
             raise ValueError(f"probe_only 必须是布尔值，实际值: {probe_only!r}")
 
-        if serial is not None and (not isinstance(serial, str) or len(serial.strip()) == 0):
+        if serial is not None and (
+            not isinstance(serial, str) or len(serial.strip()) == 0
+        ):
             raise ValueError(f"serial 必须是非空字符串或 null，实际值: {serial!r}")
 
         if not isinstance(app_package, str) or len(app_package.strip()) == 0:
@@ -155,38 +189,71 @@ class Config:
         if not isinstance(auto_navigate, bool):
             raise ValueError(f"auto_navigate 必须是布尔值，实际值: {auto_navigate!r}")
 
-        if target_title is not None and (not isinstance(target_title, str) or len(target_title.strip()) == 0):
-            raise ValueError(f"target_title 必须是非空字符串或 null，实际值: {target_title!r}")
+        if target_title is not None and (
+            not isinstance(target_title, str) or len(target_title.strip()) == 0
+        ):
+            raise ValueError(
+                f"target_title 必须是非空字符串或 null，实际值: {target_title!r}"
+            )
 
-        if target_venue is not None and (not isinstance(target_venue, str) or len(target_venue.strip()) == 0):
-            raise ValueError(f"target_venue 必须是非空字符串或 null，实际值: {target_venue!r}")
+        if target_venue is not None and (
+            not isinstance(target_venue, str) or len(target_venue.strip()) == 0
+        ):
+            raise ValueError(
+                f"target_venue 必须是非空字符串或 null，实际值: {target_venue!r}"
+            )
 
         # Validate sell_start_time
         if sell_start_time is not None:
             if not isinstance(sell_start_time, str):
-                raise ValueError(f"sell_start_time 必须是 ISO 格式的时间字符串或 null，实际值: {sell_start_time!r}")
+                raise ValueError(
+                    f"sell_start_time 必须是 ISO 格式的时间字符串或 null，实际值: {sell_start_time!r}"
+                )
             try:
                 datetime.fromisoformat(sell_start_time)
             except (ValueError, TypeError):
-                raise ValueError(f"sell_start_time 无法解析为 ISO 时间格式，实际值: {sell_start_time!r}")
+                raise ValueError(
+                    f"sell_start_time 无法解析为 ISO 时间格式，实际值: {sell_start_time!r}"
+                )
 
         # Validate countdown_lead_ms
-        if not isinstance(countdown_lead_ms, int) or isinstance(countdown_lead_ms, bool) or countdown_lead_ms < 0:
-            raise ValueError(f"countdown_lead_ms 必须是非负整数，实际值: {countdown_lead_ms!r}")
+        if (
+            not isinstance(countdown_lead_ms, int)
+            or isinstance(countdown_lead_ms, bool)
+            or countdown_lead_ms < 0
+        ):
+            raise ValueError(
+                f"countdown_lead_ms 必须是非负整数，实际值: {countdown_lead_ms!r}"
+            )
 
-        if not isinstance(wait_cta_ready_timeout_ms, int) or \
-                isinstance(wait_cta_ready_timeout_ms, bool) or wait_cta_ready_timeout_ms < 0:
+        if (
+            not isinstance(wait_cta_ready_timeout_ms, int)
+            or isinstance(wait_cta_ready_timeout_ms, bool)
+            or wait_cta_ready_timeout_ms < 0
+        ):
             raise ValueError(
                 f"wait_cta_ready_timeout_ms 必须是非负整数，实际值: {wait_cta_ready_timeout_ms!r}"
             )
 
         # Validate fast_retry_count
-        if not isinstance(fast_retry_count, int) or isinstance(fast_retry_count, bool) or fast_retry_count < 0:
-            raise ValueError(f"fast_retry_count 必须是非负整数，实际值: {fast_retry_count!r}")
+        if (
+            not isinstance(fast_retry_count, int)
+            or isinstance(fast_retry_count, bool)
+            or fast_retry_count < 0
+        ):
+            raise ValueError(
+                f"fast_retry_count 必须是非负整数，实际值: {fast_retry_count!r}"
+            )
 
         # Validate fast_retry_interval_ms
-        if not isinstance(fast_retry_interval_ms, int) or isinstance(fast_retry_interval_ms, bool) or fast_retry_interval_ms < 0:
-            raise ValueError(f"fast_retry_interval_ms 必须是非负整数，实际值: {fast_retry_interval_ms!r}")
+        if (
+            not isinstance(fast_retry_interval_ms, int)
+            or isinstance(fast_retry_interval_ms, bool)
+            or fast_retry_interval_ms < 0
+        ):
+            raise ValueError(
+                f"fast_retry_interval_ms 必须是非负整数，实际值: {fast_retry_interval_ms!r}"
+            )
 
         if not isinstance(rush_mode, bool):
             raise ValueError(f"rush_mode 必须是布尔值，实际值: {rush_mode!r}")
@@ -208,8 +275,12 @@ class Config:
         self.fast_retry_interval_ms = fast_retry_interval_ms
         self.rush_mode = rush_mode
         self.auto_navigate = auto_navigate
-        self.target_title = target_title.strip() if isinstance(target_title, str) else None
-        self.target_venue = target_venue.strip() if isinstance(target_venue, str) else None
+        self.target_title = (
+            target_title.strip() if isinstance(target_title, str) else None
+        )
+        self.target_venue = (
+            target_venue.strip() if isinstance(target_venue, str) else None
+        )
         self.serial = serial.strip() if isinstance(serial, str) else None
 
     def to_dict(self):
@@ -241,7 +312,14 @@ class Config:
     def load_config(config_path=None):
         config = load_config_dict(config_path)
 
-        required_keys = ['users', 'city', 'date', 'price', 'price_index', 'if_commit_order']
+        required_keys = [
+            "users",
+            "city",
+            "date",
+            "price",
+            "price_index",
+            "if_commit_order",
+        ]
         missing = [k for k in required_keys if k not in config]
         if missing:
             raise KeyError(f"配置文件缺少必需字段: {', '.join(missing)}")
@@ -249,25 +327,39 @@ class Config:
         if "keyword" not in config:
             raise KeyError("配置文件缺少必需字段: keyword")
 
+        # P1 #31 — 启动期校验 price_index 范围
+        raw_price_index = config["price_index"]
+        if isinstance(raw_price_index, int) and not isinstance(raw_price_index, bool):
+            if raw_price_index < 0:
+                raise ConfigError(f"price_index 不能为负数（当前 {raw_price_index}）")
+            if raw_price_index > PRICE_INDEX_LARGE_WARNING_THRESHOLD:
+                logger.warning(
+                    "price_index=%d 异常大（>%d），请确认 mobile/config.jsonc 是否填错",
+                    raw_price_index,
+                    PRICE_INDEX_LARGE_WARNING_THRESHOLD,
+                )
+
         return Config(
-            keyword=config.get('keyword'),
-            users=config['users'],
-            city=config['city'],
-            date=config['date'],
-            price=config['price'],
-            price_index=config['price_index'],
-            if_commit_order=config['if_commit_order'],
-            probe_only=config.get('probe_only', False),
-            app_package=config.get('app_package', 'cn.damai'),
-            app_activity=config.get('app_activity', '.launcher.splash.SplashMainActivity'),
-            sell_start_time=config.get('sell_start_time'),
-            countdown_lead_ms=config.get('countdown_lead_ms', 3000),
-            wait_cta_ready_timeout_ms=config.get('wait_cta_ready_timeout_ms', 0),
-            fast_retry_count=config.get('fast_retry_count', 8),
-            fast_retry_interval_ms=config.get('fast_retry_interval_ms', 120),
-            rush_mode=config.get('rush_mode', False),
-            auto_navigate=config.get('auto_navigate', True),
-            target_title=config.get('target_title'),
-            target_venue=config.get('target_venue'),
-            serial=config.get('serial'),
+            keyword=config.get("keyword"),
+            users=config["users"],
+            city=config["city"],
+            date=config["date"],
+            price=config["price"],
+            price_index=config["price_index"],
+            if_commit_order=config["if_commit_order"],
+            probe_only=config.get("probe_only", False),
+            app_package=config.get("app_package", "cn.damai"),
+            app_activity=config.get(
+                "app_activity", ".launcher.splash.SplashMainActivity"
+            ),
+            sell_start_time=config.get("sell_start_time"),
+            countdown_lead_ms=config.get("countdown_lead_ms", 3000),
+            wait_cta_ready_timeout_ms=config.get("wait_cta_ready_timeout_ms", 0),
+            fast_retry_count=config.get("fast_retry_count", 8),
+            fast_retry_interval_ms=config.get("fast_retry_interval_ms", 120),
+            rush_mode=config.get("rush_mode", False),
+            auto_navigate=config.get("auto_navigate", True),
+            target_title=config.get("target_title"),
+            target_venue=config.get("target_venue"),
+            serial=config.get("serial"),
         )
