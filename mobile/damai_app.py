@@ -6,6 +6,8 @@ __Description__ = "大麦app抢票自动化 - 优化版"
 __Created__ = 2025/09/13 19:27
 """
 
+from __future__ import annotations
+
 import re
 import time
 from contextlib import contextmanager

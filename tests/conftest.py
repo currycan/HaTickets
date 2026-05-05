@@ -176,14 +176,12 @@ def mock_damai_bot(mobile_config, mock_u2_driver):
     mock_u2_driver.find_element = Mock()
     mock_u2_driver.find_elements = Mock(return_value=[])
 
-    with (
-        patch("mobile.damai_app.Config.load_config", return_value=mobile_config),
-        patch("uiautomator2.connect", return_value=mock_u2_driver),
-    ):
-        from mobile.damai_app import DamaiBot
+    with patch("mobile.damai_app.Config.load_config", return_value=mobile_config):
+        with patch("uiautomator2.connect", return_value=mock_u2_driver):
+            from mobile.damai_app import DamaiBot
 
-        bot = DamaiBot()
-        yield bot
+            bot = DamaiBot()
+            yield bot
 
 
 @pytest.fixture
