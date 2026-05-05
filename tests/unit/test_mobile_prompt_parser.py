@@ -72,7 +72,9 @@ class TestParsePrompt:
         assert intent.artist == "顽童mj116"
 
     def test_parse_prompt_extracts_single_attendee_name(self):
-        intent = parse_prompt("帮张志涛抢一张 4 月 4 号余佳运的演唱会门票，内场，票价 1080 元")
+        intent = parse_prompt(
+            "帮张志涛抢一张 4 月 4 号余佳运的演唱会门票，内场，票价 1080 元"
+        )
 
         assert intent.attendee_names == ["张志涛"]
         assert intent.artist == "余佳运"
@@ -81,14 +83,18 @@ class TestParsePrompt:
         assert intent.price_hint == "内场1080元"
 
     def test_parse_prompt_extracts_multiple_attendee_names(self):
-        intent = parse_prompt("帮张志涛和李四抢两张 4 月 4 号余佳运的演唱会门票，内场，票价 1080 元")
+        intent = parse_prompt(
+            "帮张志涛和李四抢两张 4 月 4 号余佳运的演唱会门票，内场，票价 1080 元"
+        )
 
         assert intent.attendee_names == ["张志涛", "李四"]
         assert intent.quantity == 2
         assert intent.quantity_explicit is True
 
     def test_parse_prompt_infers_quantity_from_attendee_names_when_omitted(self):
-        intent = parse_prompt("帮张文、张志涛抢，6 月 6 号，陈慧娴的演唱会门票，上海站，内场，票价 1380 元")
+        intent = parse_prompt(
+            "帮张文、张志涛抢，6 月 6 号，陈慧娴的演唱会门票，上海站，内场，票价 1380 元"
+        )
 
         assert intent.attendee_names == ["张文", "张志涛"]
         assert intent.quantity == 2
@@ -96,7 +102,9 @@ class TestParsePrompt:
         assert not any("购票张数" in note for note in intent.notes)
 
     def test_parse_prompt_supports_artist_with_city_station_inside_phrase(self):
-        intent = parse_prompt("给张三和李四抢4 月 6 号张杰的北京站演唱会内场门票，票价 1680 元")
+        intent = parse_prompt(
+            "给张三和李四抢4 月 6 号张杰的北京站演唱会内场门票，票价 1680 元"
+        )
 
         assert intent.attendee_names == ["张三", "李四"]
         assert intent.quantity == 2
@@ -106,7 +114,9 @@ class TestParsePrompt:
         assert intent.price_hint == "内场1680元"
 
     def test_parse_prompt_supports_city_station_before_artist(self):
-        intent = parse_prompt("帮张文、张志涛抢，6 月 6 号，上海站陈慧娴的演唱会门票，内场，票价 1380 元")
+        intent = parse_prompt(
+            "帮张文、张志涛抢，6 月 6 号，上海站陈慧娴的演唱会门票，内场，票价 1380 元"
+        )
 
         assert intent.attendee_names == ["张文", "张志涛"]
         assert intent.quantity == 2
@@ -114,8 +124,12 @@ class TestParsePrompt:
         assert intent.artist == "陈慧娴"
         assert intent.search_keyword == "陈慧娴 演唱会"
 
-    def test_parse_prompt_supports_dot_date_without_misreading_zhang_surname_as_quantity(self):
-        intent = parse_prompt("给张三和李四抢4.6 张杰的北京站演唱会内场门票，票价 1680 元")
+    def test_parse_prompt_supports_dot_date_without_misreading_zhang_surname_as_quantity(
+        self,
+    ):
+        intent = parse_prompt(
+            "给张三和李四抢4.6 张杰的北京站演唱会内场门票，票价 1680 元"
+        )
 
         assert intent.attendee_names == ["张三", "李四"]
         assert intent.quantity == 2
@@ -126,13 +140,17 @@ class TestParsePrompt:
         assert intent.search_keyword == "张杰 演唱会"
 
     def test_parse_prompt_filters_low_signal_noisy_candidate_keywords(self):
-        intent = parse_prompt("给张志涛抢4 月 6 号张杰的北京站演唱会内场门票，票价 1680 元")
+        intent = parse_prompt(
+            "给张志涛抢4 月 6 号张杰的北京站演唱会内场门票，票价 1680 元"
+        )
 
         assert intent.candidate_keywords[:2] == ["张杰 演唱会", "张杰"]
         assert all("价 元" not in keyword for keyword in intent.candidate_keywords)
 
     def test_parse_prompt_adds_note_when_attendee_count_mismatches_quantity(self):
-        intent = parse_prompt("帮张文和张志涛抢一张 4 月 4 号余佳运的演唱会门票，内场，票价 1080 元")
+        intent = parse_prompt(
+            "帮张文和张志涛抢一张 4 月 4 号余佳运的演唱会门票，内场，票价 1080 元"
+        )
 
         assert intent.attendee_names == ["张文", "张志涛"]
         assert intent.quantity == 1
@@ -191,6 +209,7 @@ class TestChoosePriceOption:
 # _parse_chinese_int
 # ---------------------------------------------------------------------------
 
+
 class TestParseChineseInt:
     def test_zero(self):
         assert _parse_chinese_int("零") == 0
@@ -230,6 +249,7 @@ class TestParseChineseInt:
 # _parse_quantity
 # ---------------------------------------------------------------------------
 
+
 class TestParseQuantity:
     def test_arabic_digit(self):
         assert _parse_quantity("买3张") == 3
@@ -262,6 +282,7 @@ class TestParseQuantity:
 # ---------------------------------------------------------------------------
 # _parse_date
 # ---------------------------------------------------------------------------
+
 
 class TestParseDate:
     def test_month_day_ri(self):
@@ -299,6 +320,7 @@ class TestParseDate:
 # _parse_city
 # ---------------------------------------------------------------------------
 
+
 class TestParseCity:
     def test_known_city_exact(self):
         assert _parse_city("北京演唱会") == "北京"
@@ -328,6 +350,7 @@ class TestParseCity:
 # ---------------------------------------------------------------------------
 # _parse_price_hints
 # ---------------------------------------------------------------------------
+
 
 class TestParsePriceHints:
     def test_seat_and_price(self):
@@ -370,6 +393,7 @@ class TestParsePriceHints:
 # is_price_option_available
 # ---------------------------------------------------------------------------
 
+
 class TestIsAvailable:
     def test_available_tag(self):
         assert is_price_option_available({"tag": "可预约"}) is True
@@ -399,6 +423,7 @@ class TestIsAvailable:
 # ---------------------------------------------------------------------------
 # score_price_option
 # ---------------------------------------------------------------------------
+
 
 class TestScorePriceOption:
     def _intent(self, price_hint=None, seat_hint=None, numeric_price=None):
@@ -432,7 +457,8 @@ class TestScorePriceOption:
     def test_numeric_exact_match(self):
         intent = self._intent(numeric_price=1280)
         score = score_price_option(intent, {"text": "1280元", "tag": ""})
-        assert score >= 150
+        # fix-plan #26 Step 3：精确命中分数从 150 降为 100（区分 +120 文字 hint 加分）
+        assert score >= 100
 
     def test_numeric_mismatch_penalty(self):
         intent = self._intent(numeric_price=1280)
@@ -455,6 +481,7 @@ class TestScorePriceOption:
 # choose_price_option (extended)
 # ---------------------------------------------------------------------------
 
+
 class TestChoosePriceOptionExtended:
     def _intent(self, price_hint=None, seat_hint=None, numeric_price=None):
         return PromptIntent(
@@ -469,7 +496,10 @@ class TestChoosePriceOptionExtended:
 
     def test_all_unavailable_with_price_hint_returns_none(self):
         intent = self._intent(price_hint="内场")
-        options = [{"text": "内场580元", "tag": "售罄"}, {"text": "580元", "tag": "无票"}]
+        options = [
+            {"text": "内场580元", "tag": "售罄"},
+            {"text": "580元", "tag": "无票"},
+        ]
         assert choose_price_option(intent, options) is None
 
     def test_no_price_hint_all_unavailable_returns_none(self):
@@ -478,12 +508,16 @@ class TestChoosePriceOptionExtended:
 
     def test_score_field_added_to_result(self):
         intent = self._intent(numeric_price=1280)
-        result = choose_price_option(intent, [{"index": 0, "text": "1280元", "tag": "可预约"}])
+        result = choose_price_option(
+            intent, [{"index": 0, "text": "1280元", "tag": "可预约"}]
+        )
         assert result is not None and "score" in result
 
     def test_single_available_option_returned(self):
         intent = self._intent()
-        result = choose_price_option(intent, [{"index": 0, "text": "580元", "tag": "可选"}])
+        result = choose_price_option(
+            intent, [{"index": 0, "text": "580元", "tag": "可选"}]
+        )
         assert result is not None and result["index"] == 0
 
     def test_high_score_option_wins(self):
@@ -495,10 +529,57 @@ class TestChoosePriceOptionExtended:
         ]
         assert choose_price_option(intent, options)["index"] == 1
 
+    def test_choose_price_option_nearest_neighbor_within_50_percent(self):
+        # fix-plan #26 Step 3：用户输入 899 元，候选 880 元应作为最近邻命中
+        intent = self._intent(numeric_price=899)
+        options = [
+            {"index": 0, "text": "880元", "tag": "可预约"},
+            {"index": 1, "text": "1880元", "tag": "可预约"},
+        ]
+        result = choose_price_option(intent, options)
+        assert result is not None
+        assert result["index"] == 0
+
+    def test_choose_price_option_within_10_percent_tolerance(self):
+        # ±10% 容忍：用户输入 1280 元，候选 1380 元（差 7.8%）也应被接受
+        intent = self._intent(numeric_price=1280)
+        options = [
+            {"index": 0, "text": "1380元", "tag": "可预约"},
+            {"index": 1, "text": "2580元", "tag": "可预约"},
+        ]
+        result = choose_price_option(intent, options)
+        assert result is not None
+        assert result["index"] == 0
+        # 容忍区间分数应至少 60，落在 60-80 区间内
+        assert result["score"] >= 60
+
+    def test_choose_price_option_range_hit(self):
+        # 区间命中：500-800 元区间内的 680 元应得 +50
+        intent = PromptIntent(
+            raw_prompt="test",
+            numeric_price_min=500,
+            numeric_price_max=800,
+        )
+        options = [
+            {"index": 0, "text": "380元", "tag": "可预约"},
+            {"index": 1, "text": "680元", "tag": "可预约"},
+            {"index": 2, "text": "1280元", "tag": "可预约"},
+        ]
+        result = choose_price_option(intent, options)
+        assert result is not None
+        assert result["index"] == 1
+
+    def test_choose_price_option_rejects_extreme_outlier(self):
+        # 距离 > 50% 时拒绝最近邻：999 元 hint vs 380 元 (差距 62%)
+        intent = self._intent(numeric_price=999)
+        options = [{"index": 0, "text": "380元", "tag": "可预约"}]
+        assert choose_price_option(intent, options) is None
+
 
 # ---------------------------------------------------------------------------
 # parse_prompt — validation and notes
 # ---------------------------------------------------------------------------
+
 
 class TestParsePromptValidation:
     def test_empty_string_raises(self):
@@ -540,6 +621,7 @@ class TestParsePromptNotes:
 # ---------------------------------------------------------------------------
 # Edge cases: keyword extraction
 # ---------------------------------------------------------------------------
+
 
 class TestKeywordExtractionEdgeCases:
     def test_only_stopwords_raises_value_error(self):

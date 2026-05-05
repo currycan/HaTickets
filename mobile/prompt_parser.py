@@ -133,6 +133,8 @@ class PromptIntent:
     price_hint: Optional[str] = None
     seat_hint: Optional[str] = None
     numeric_price_hint: Optional[int] = None
+    numeric_price_min: Optional[int] = None
+    numeric_price_max: Optional[int] = None
     notes: list[str] = field(default_factory=list)
 
 
@@ -373,6 +375,21 @@ def _parse_price_hints(
     return None, None, None
 
 
+def _parse_price_range(prompt: str) -> tuple[Optional[int], Optional[int]]:
+    """从 ``500-800元`` / ``500到800`` 等区间表达中识别 (min, max)。"""
+    match = re.search(
+        r"([1-9]\d{1,4})\s*[-~到至]\s*([1-9]\d{1,4})\s*元?",
+        prompt or "",
+    )
+    if not match:
+        return None, None
+    low = int(match.group(1))
+    high = int(match.group(2))
+    if low > high:
+        low, high = high, low
+    return low, high
+
+
 def parse_prompt(prompt: str) -> "ParseResult":
     """解析自然语言提示词。
 
@@ -394,6 +411,15 @@ def parse_prompt(prompt: str) -> "ParseResult":
     if attendee_names and not quantity_explicit:
         parsed_quantity = len(attendee_names)
     price_hint, seat_hint, numeric_price = _parse_price_hints(normalized_prompt)
+    price_min, price_max = _parse_price_range(normalized_prompt)
+    if price_min is not None and price_max is not None:
+        # 区间优先：避免「500-800元」被识别为「500元」单值 hint
+        numeric_price = None
+        price_hint = (
+            f"{seat_hint}{price_min}-{price_max}元"
+            if seat_hint
+            else f"{price_min}-{price_max}元"
+        )
     removable_tokens = []
     removable_tokens.extend(attendee_names)
     if parsed_city:
@@ -423,6 +449,8 @@ def parse_prompt(prompt: str) -> "ParseResult":
         price_hint=price_hint,
         seat_hint=seat_hint,
         numeric_price_hint=numeric_price,
+        numeric_price_min=price_min,
+        numeric_price_max=price_max,
     )
 
     if not intent.search_keyword:
@@ -492,7 +520,37 @@ def is_price_option_available(option: dict) -> bool:
     return tag not in _UNAVAILABLE_TAGS
 
 
+def _score_numeric_match(target: int, option_digits: int) -> tuple[int, str]:
+    """对单值数字 hint 进行宽容打分，返回 (分数, 说明)。"""
+    if option_digits == target:
+        return 100, f"{option_digits} 元 = {target} 元 精确命中（+100）"
+    ratio = abs(option_digits - target) / target
+    if ratio <= 0.10:
+        # ±10%：精确点 80 分，到容忍边界 60 分（线性递减）
+        tolerance_score = round(80 - (ratio / 0.10) * 20)
+        return tolerance_score, (
+            f"{option_digits} 元 ≈ {target} 元（差 {ratio * 100:.1f}%，±10% 容忍 +{tolerance_score}）"
+        )
+    return 0, f"{option_digits} 元 与 {target} 元 偏差 {ratio * 100:.1f}% 超出容忍区间"
+
+
+def _score_range_match(low: int, high: int, option_digits: int) -> tuple[int, str]:
+    """区间 hint 命中评分。命中区间 +50；其它情况 0。"""
+    if low <= option_digits <= high:
+        return 50, f"{option_digits} 元 落在区间 [{low}, {high}] 内（+50）"
+    return 0, f"{option_digits} 元 不在区间 [{low}, {high}] 内"
+
+
 def score_price_option(intent: PromptIntent, option: dict) -> int:
+    """对单个 UI 票档进行打分。
+
+    评分构成（与 ``ParseResult.diagnostics`` 同步）：
+    - 文字 hint 包含：+120
+    - seat_hint 包含：+80
+    - 数字 hint 精确：+100；±10% 容忍：60-80 线性递减；超过：0
+    - 区间 hint 命中：+50
+    - 不可用 tag：-1000；常规可预约/预售：+10
+    """
     text = option.get("text") or ""
     tag = option.get("tag") or ""
     normalized_text = normalize_text(text)
@@ -507,12 +565,19 @@ def score_price_option(intent: PromptIntent, option: dict) -> int:
     if intent.seat_hint and normalize_text(intent.seat_hint) in normalized_text:
         score += 80
 
-    if intent.numeric_price_hint is not None:
-        digits = _extract_digits(text)
-        if digits == intent.numeric_price_hint:
-            score += 150
-        elif digits is not None:
-            score -= abs(digits - intent.numeric_price_hint)
+    digits = _extract_digits(text)
+    if digits is not None:
+        if (
+            intent.numeric_price_min is not None
+            and intent.numeric_price_max is not None
+        ):
+            range_score, _ = _score_range_match(
+                intent.numeric_price_min, intent.numeric_price_max, digits
+            )
+            score += range_score
+        elif intent.numeric_price_hint is not None:
+            single_score, _ = _score_numeric_match(intent.numeric_price_hint, digits)
+            score += single_score
 
     if tag in {"可预约", "预售", "可选"}:
         score += 10
@@ -520,22 +585,70 @@ def score_price_option(intent: PromptIntent, option: dict) -> int:
     return score
 
 
+_NEAREST_NEIGHBOR_MAX_RATIO = 0.50
+
+
+def _nearest_numeric_option(target: int, options: Iterable[dict]) -> Optional[dict]:
+    """返回价格数字与 ``target`` 距离最近且可用的票档。
+
+    距离超过 ``±50%`` 不接受（避免 999 元 hint 错配到 380 元这类离谱情况）。
+    """
+    nearest = None
+    nearest_distance = None
+    for option in options:
+        if not is_price_option_available(option):
+            continue
+        digits = _extract_digits(option.get("text") or "")
+        if digits is None:
+            continue
+        distance = abs(digits - target)
+        if nearest_distance is None or distance < nearest_distance:
+            nearest = option
+            nearest_distance = distance
+    if nearest is None or nearest_distance is None:
+        return None
+    if nearest_distance / max(target, 1) > _NEAREST_NEIGHBOR_MAX_RATIO:
+        return None
+    return nearest
+
+
 def choose_price_option(
     intent: PromptIntent, options: Iterable[dict]
 ) -> Optional[dict]:
+    options_list = list(options)
+    if not options_list:
+        return None
+
     ranked = []
-    for option in options:
+    for option in options_list:
         scored = dict(option)
         scored["score"] = score_price_option(intent, option)
         ranked.append(scored)
 
-    if not ranked:
-        return None
-
     ranked.sort(key=lambda item: item["score"], reverse=True)
     best = ranked[0]
 
-    if intent.price_hint and best["score"] < 100:
+    has_numeric = (
+        intent.numeric_price_hint is not None or intent.numeric_price_max is not None
+    )
+
+    # 数字 hint：可以接受最近邻 fallback（30 分）
+    if has_numeric and best["score"] < 60:
+        target = intent.numeric_price_hint
+        if target is None and intent.numeric_price_max is not None:
+            mid = (intent.numeric_price_min + intent.numeric_price_max) // 2
+            target = mid
+        if target is not None:
+            nearest = _nearest_numeric_option(target, options_list)
+            if nearest is not None:
+                fallback = dict(nearest)
+                fallback["score"] = 30
+                fallback["match_reason"] = "nearest_neighbor"
+                return fallback
+        return None
+
+    # 仅文字 hint（如「内场」无具体价格）：保留严格阈值，避免错配看似无关的票档
+    if intent.price_hint and not has_numeric and best["score"] < 100:
         return None
 
     if not intent.price_hint and not is_price_option_available(best):
