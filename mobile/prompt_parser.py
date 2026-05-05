@@ -29,16 +29,73 @@ _CHINESE_DIGITS = {
 }
 
 _KNOWN_CITY_TOKENS = (
-    "北京", "上海", "深圳", "广州", "杭州", "成都", "重庆", "武汉", "南京", "西安",
-    "苏州", "天津", "长沙", "郑州", "青岛", "宁波", "福州", "厦门", "南昌", "沈阳",
-    "大连", "合肥", "无锡", "佛山", "东莞", "珠海", "昆明", "贵阳", "南宁", "长春",
-    "哈尔滨", "太原", "石家庄", "济南", "兰州", "海口", "三亚", "乌鲁木齐", "呼和浩特",
+    "北京",
+    "上海",
+    "深圳",
+    "广州",
+    "杭州",
+    "成都",
+    "重庆",
+    "武汉",
+    "南京",
+    "西安",
+    "苏州",
+    "天津",
+    "长沙",
+    "郑州",
+    "青岛",
+    "宁波",
+    "福州",
+    "厦门",
+    "南昌",
+    "沈阳",
+    "大连",
+    "合肥",
+    "无锡",
+    "佛山",
+    "东莞",
+    "珠海",
+    "昆明",
+    "贵阳",
+    "南宁",
+    "长春",
+    "哈尔滨",
+    "太原",
+    "石家庄",
+    "济南",
+    "兰州",
+    "海口",
+    "三亚",
+    "乌鲁木齐",
+    "呼和浩特",
 )
 
 _REQUEST_STOPWORDS = (
-    "帮我", "帮忙", "抢票", "抢一张", "抢两张", "抢", "买", "订", "门票", "票", "演出票",
-    "给我", "给", "一下", "尽快", "尽量", "麻烦", "我要", "想要", "请", "能不能", "可以", "帮",
-    "票价", "价位",
+    "帮我",
+    "帮忙",
+    "抢票",
+    "抢一张",
+    "抢两张",
+    "抢",
+    "买",
+    "订",
+    "门票",
+    "票",
+    "演出票",
+    "给我",
+    "给",
+    "一下",
+    "尽快",
+    "尽量",
+    "麻烦",
+    "我要",
+    "想要",
+    "请",
+    "能不能",
+    "可以",
+    "帮",
+    "票价",
+    "价位",
 )
 
 _LOW_SIGNAL_KEYWORD_TOKENS = {"演唱会", "音乐会", "演出", "巡演", "live", "门票"}
@@ -78,6 +135,39 @@ class PromptIntent:
     notes: list[str] = field(default_factory=list)
 
 
+@dataclass
+class ParseResult:
+    """诊断框架：parse_prompt 的可观测返回值。
+
+    保留向后兼容：调用方通过属性转发仍可直接读取 intent 字段
+    （如 result.attendee_names 等同 result.intent.attendee_names）。
+    """
+
+    intent: "PromptIntent"
+    matched_item: object = None
+    matched_session: Optional[str] = None
+    matched_price: Optional[str] = None
+    diagnostics: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+
+    _ACTIONABLE_THRESHOLD: ClassVar[float] = 0.6
+
+    def is_actionable(self) -> bool:
+        return (
+            self.confidence >= self._ACTIONABLE_THRESHOLD
+            and self.matched_item is not None
+        )
+
+    def __getattr__(self, name: str):
+        # 仅当常规属性查找失败时才转发到 intent；避免无穷递归
+        if name.startswith("_") or name in {"intent"}:
+            raise AttributeError(name)
+        intent = self.__dict__.get("intent")
+        if intent is None:
+            raise AttributeError(name)
+        return getattr(intent, name)
+
+
 def _normalize_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
@@ -94,7 +184,12 @@ def _parse_chinese_int(token: str) -> Optional[int]:
         return 10 + _CHINESE_DIGITS[token[1]]
     if len(token) == 2 and token[1] == "十" and token[0] in _CHINESE_DIGITS:
         return _CHINESE_DIGITS[token[0]] * 10
-    if len(token) == 3 and token[1] == "十" and token[0] in _CHINESE_DIGITS and token[2] in _CHINESE_DIGITS:
+    if (
+        len(token) == 3
+        and token[1] == "十"
+        and token[0] in _CHINESE_DIGITS
+        and token[2] in _CHINESE_DIGITS
+    ):
         return _CHINESE_DIGITS[token[0]] * 10 + _CHINESE_DIGITS[token[2]]
     return None
 
@@ -172,7 +267,9 @@ def _parse_attendee_names(prompt: str) -> list[str]:
     return []
 
 
-def _clean_prompt_for_keyword(prompt: str, removable_tokens: Optional[Iterable[str]] = None) -> str:
+def _clean_prompt_for_keyword(
+    prompt: str, removable_tokens: Optional[Iterable[str]] = None
+) -> str:
     cleaned = prompt
     cleaned = re.sub(r"https?://\S+", " ", cleaned)
     cleaned = re.sub(r"\d{1,2}\s*月\s*\d{1,2}\s*[号日好]?", " ", cleaned)
@@ -221,11 +318,16 @@ def _compact_keyword_phrase(value: str) -> str:
     return _normalize_whitespace(" ".join(compact_tokens))
 
 
-def _parse_artist_and_keyword(prompt: str, removable_tokens: Optional[Iterable[str]] = None) -> tuple[Optional[str], Optional[str], list[str]]:
+def _parse_artist_and_keyword(
+    prompt: str, removable_tokens: Optional[Iterable[str]] = None
+) -> tuple[Optional[str], Optional[str], list[str]]:
     cleaned = _clean_prompt_for_keyword(prompt, removable_tokens=removable_tokens)
 
     artist = None
-    artist_match = re.search(r"([\u4e00-\u9fffA-Za-z0-9·•]+?)(?:的)?(?:演唱会|音乐会|演出|live|LIVE|巡演)", cleaned)
+    artist_match = re.search(
+        r"([\u4e00-\u9fffA-Za-z0-9·•]+?)(?:的)?(?:演唱会|音乐会|演出|live|LIVE|巡演)",
+        cleaned,
+    )
     if artist_match:
         artist = artist_match.group(1).strip(" ，,。！？")
     else:
@@ -245,7 +347,12 @@ def _parse_artist_and_keyword(prompt: str, removable_tokens: Optional[Iterable[s
     for candidate in candidates:
         value = _compact_keyword_phrase(candidate)
         normalized = normalize_text(value)
-        if not value or not normalized or normalized in seen or _is_low_signal_candidate(value):
+        if (
+            not value
+            or not normalized
+            or normalized in seen
+            or _is_low_signal_candidate(value)
+        ):
             continue
         deduped.append(value)
         seen.add(normalized)
@@ -253,7 +360,9 @@ def _parse_artist_and_keyword(prompt: str, removable_tokens: Optional[Iterable[s
     return artist, (deduped[0] if deduped else None), deduped
 
 
-def _parse_price_hints(prompt: str) -> tuple[Optional[str], Optional[str], Optional[int]]:
+def _parse_price_hints(
+    prompt: str,
+) -> tuple[Optional[str], Optional[str], Optional[int]]:
     seat_hint = None
     for token in _SEAT_HINTS:
         if token in prompt:
@@ -274,7 +383,14 @@ def _parse_price_hints(prompt: str) -> tuple[Optional[str], Optional[str], Optio
     return None, None, None
 
 
-def parse_prompt(prompt: str) -> PromptIntent:
+def parse_prompt(prompt: str) -> "ParseResult":
+    """解析自然语言提示词。
+
+    返回 ``ParseResult``。为保持向后兼容，``ParseResult`` 通过 ``__getattr__``
+    把字段访问转发到 ``intent``——历史上以 ``parse_prompt(...).attendee_names``
+    形式读取的代码无需改动。``confidence`` 与 ``diagnostics`` 由解析阶段产出，
+    用于 ``apply`` 模式下的「拒绝写残缺 config」判定。
+    """
     if not isinstance(prompt, str) or len(prompt.strip()) == 0:
         raise ValueError("prompt 不能为空")
 
@@ -282,7 +398,9 @@ def parse_prompt(prompt: str) -> PromptIntent:
     parsed_date = _parse_date(normalized_prompt)
     parsed_city = _parse_city(normalized_prompt)
     attendee_names = _parse_attendee_names(normalized_prompt)
-    parsed_quantity, quantity_explicit = _parse_quantity_with_explicit(normalized_prompt)
+    parsed_quantity, quantity_explicit = _parse_quantity_with_explicit(
+        normalized_prompt
+    )
     if attendee_names and not quantity_explicit:
         parsed_quantity = len(attendee_names)
     price_hint, seat_hint, numeric_price = _parse_price_hints(normalized_prompt)
@@ -334,7 +452,42 @@ def parse_prompt(prompt: str) -> PromptIntent:
     if not intent.price_hint:
         intent.notes.append("提示词中未识别到明确票档偏好，后续会使用查询结果确认票档")
 
-    return intent
+    diagnostics: list[str] = []
+    confidence = 0.0
+    if intent.search_keyword:
+        confidence += 0.4
+        diagnostics.append(f"识别搜索关键词：{intent.search_keyword}（+0.40）")
+    if intent.attendee_names:
+        confidence += 0.30
+        diagnostics.append(
+            f"识别 {len(intent.attendee_names)} 位观演人：{'、'.join(intent.attendee_names)}（+0.30）"
+        )
+    else:
+        diagnostics.append("未识别到观演人，apply 模式必须补充姓名")
+    if intent.date:
+        confidence += 0.15
+        diagnostics.append(f"识别目标日期：{intent.date}（+0.15）")
+    else:
+        diagnostics.append("未识别到具体日期，将依赖页面候选场次")
+    if intent.numeric_price_hint or intent.price_hint:
+        confidence += 0.10
+        diagnostics.append(
+            f"识别票档偏好：{intent.price_hint or intent.numeric_price_hint}（+0.10）"
+        )
+    else:
+        diagnostics.append("未识别到票档偏好，将依赖页面默认推荐")
+    if intent.city:
+        confidence += 0.05
+        diagnostics.append(f"识别目标城市：{intent.city}（+0.05）")
+
+    return ParseResult(
+        intent=intent,
+        matched_item=None,
+        matched_session=intent.date,
+        matched_price=intent.price_hint,
+        diagnostics=diagnostics,
+        confidence=round(confidence, 3),
+    )
 
 
 def _extract_digits(text: str) -> Optional[int]:
@@ -377,7 +530,9 @@ def score_price_option(intent: PromptIntent, option: dict) -> int:
     return score
 
 
-def choose_price_option(intent: PromptIntent, options: Iterable[dict]) -> Optional[dict]:
+def choose_price_option(
+    intent: PromptIntent, options: Iterable[dict]
+) -> Optional[dict]:
     ranked = []
     for option in options:
         scored = dict(option)

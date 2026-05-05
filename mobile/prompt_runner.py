@@ -619,6 +619,34 @@ def build_updated_config(
     return config_data
 
 
+def _update_parse_result_post_discovery(parse_result, discovery: dict, chosen_price):
+    """在 discover_target_event 之后回填 ParseResult 的匹配状态与诊断。"""
+    summary = discovery.get("summary") or {}
+    parse_result.matched_item = summary or None
+    if not summary:
+        return
+
+    intent = parse_result.intent
+    visible_dates = summary.get("dates") or []
+    if intent.date and intent.date in visible_dates:
+        parse_result.matched_session = intent.date
+    elif len(visible_dates) == 1:
+        parse_result.matched_session = visible_dates[0]
+    else:
+        parse_result.matched_session = None
+        parse_result.diagnostics.append(
+            f"日期 {intent.date or '<未指定>'} 在页面候选场次 {visible_dates or '[]'} 中未找到唯一匹配"
+        )
+
+    if chosen_price:
+        parse_result.matched_price = chosen_price.get("text")
+        parse_result.confidence = min(1.0, parse_result.confidence + 0.05)
+    else:
+        parse_result.diagnostics.append(
+            "无法从页面票档中匹配出唯一推荐票档（可能是票档偏好不明确或票档全部售罄）"
+        )
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="自然语言提示词驱动的大麦 mobile 流程")
     parser.add_argument(
@@ -647,7 +675,8 @@ def main(argv=None):
     try:
         base_config_dict = _load_base_config_dict(config_path)
         try:
-            intent = parse_prompt(args.prompt)
+            parse_result = parse_prompt(args.prompt)
+            intent = parse_result.intent
         except ValueError as exc:
             if str(exc) == "无法从提示词中提取搜索关键词":
                 logger.error(_build_missing_keyword_error(base_config_dict, args.mode))
@@ -703,6 +732,8 @@ def main(argv=None):
         chosen_price = choose_price_option(
             intent, discovery["summary"].get("price_options") or []
         )
+        # discover 成功后回填 matched_*，让 is_actionable() 在 apply/probe 模式有依据
+        _update_parse_result_post_discovery(parse_result, discovery, chosen_price)
         print(_format_summary(intent, discovery, chosen_price))
 
         if args.mode == "summary":
