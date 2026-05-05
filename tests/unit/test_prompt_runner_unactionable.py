@@ -153,3 +153,124 @@ class TestIsStdinTty:
 
         monkeypatch.setattr("mobile.prompt_runner.sys.stdin", NoIsattyStdin())
         assert _is_stdin_tty() is False
+
+
+class TestMainActionableCheck:
+    """覆盖 main() 中 apply 模式下 is_actionable=False 走 UNACTIONABLE_EXIT_CODE 的分支。
+
+    用 monkeypatch 替换核心依赖，避免触碰 ``with \\`` 风格的现有 main 测试。
+    """
+
+    def test_apply_mode_returns_unactionable_exit_code(self, monkeypatch):
+        from mobile import prompt_runner
+
+        # 准备 base_config_dict 与 Config 对象（最小可用）
+        base_config_dict = {
+            "serial": "ABC",
+            "users": ["张志涛"],
+            "city": "北京",
+            "date": "04.06",
+            "price": "580元",
+            "price_index": 0,
+            "keyword": "X",
+            "if_commit_order": False,
+            "probe_only": True,
+            "auto_navigate": True,
+        }
+
+        from mobile.config import Config
+
+        class FakeConfig:
+            def __init__(self):
+                self.city = "北京"
+                self.date = "04.06"
+                self.price = "580元"
+                self.price_index = 0
+
+            def to_dict(self):
+                return {**base_config_dict}
+
+        # 让 parse_prompt 返回置信度低 + 无 matched_item 的 ParseResult
+        from mobile.prompt_parser import ParseResult
+
+        class FakeIntent:
+            raw_prompt = "x"
+            quantity = 1
+            quantity_explicit = False
+            attendee_names = ["张志涛"]
+            date = None
+            city = None
+            artist = None
+            search_keyword = "x"
+            candidate_keywords = ["x"]
+            price_hint = None
+            seat_hint = None
+            numeric_price_hint = None
+            numeric_price_min = None
+            numeric_price_max = None
+            notes = []
+
+        fake_pr = ParseResult(
+            intent=FakeIntent(),
+            matched_item=None,
+            diagnostics=["test diag"],
+            confidence=0.4,
+        )
+
+        class FakeBot:
+            driver = None
+
+            def __init__(self, *_a, **_kw):
+                pass
+
+            def dismiss_startup_popups(self):
+                pass
+
+            def probe_current_page(self):
+                return {"state": "detail_page"}
+
+            def discover_target_event(self, *_a, **_kw):
+                return {
+                    "used_keyword": "x",
+                    "search_results": [],
+                    "page_probe": {"state": "detail_page"},
+                }
+
+            def inspect_current_target_event(self, _probe):
+                return {
+                    "title": "X",
+                    "venue": "Y",
+                    "state": "detail_page",
+                    "reservation_mode": False,
+                    "dates": ["04.04", "04.05"],
+                    "price_options": [],
+                }
+
+        monkeypatch.setattr(
+            prompt_runner, "_load_base_config_dict", lambda _p: base_config_dict
+        )
+        monkeypatch.setattr(prompt_runner, "parse_prompt", lambda _p: fake_pr)
+        monkeypatch.setattr(
+            prompt_runner, "_validate_prompt_requirements", lambda *_a, **_kw: None
+        )
+        monkeypatch.setattr(
+            prompt_runner, "_auto_sync_device_config", lambda c, _m: (c, None)
+        )
+        monkeypatch.setattr(
+            Config, "load_config", classmethod(lambda cls, _p: FakeConfig())
+        )
+        monkeypatch.setattr(prompt_runner, "DamaiBot", FakeBot)
+        monkeypatch.setattr(
+            prompt_runner, "choose_price_option", lambda *_a, **_kw: None
+        )
+        monkeypatch.setattr(prompt_runner, "_format_summary", lambda *_a, **_kw: "")
+
+        # 让 stdin 非 TTY → fallback 直接 exit 5
+        class FakeStdin:
+            def isatty(self):
+                return False
+
+        monkeypatch.setattr(prompt_runner.sys, "stdin", FakeStdin())
+
+        result = prompt_runner.main(["x", "--mode", "apply", "--non-interactive"])
+        assert result == UNACTIONABLE_EXIT_CODE
