@@ -1,6 +1,6 @@
 """Unit tests for PriceSelector."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -11,6 +11,20 @@ from mobile.price_selector import (
     SoldOutError,
     select_price_by_index,
 )
+
+
+@pytest.fixture(autouse=True)
+def _force_price_panel_ready():
+    """Most legacy PriceSelector tests do not care about page_probe state.
+
+    Default to ``"ready"`` so the new pre-flight check does not turn passive
+    MagicMock device probes into accidental ``loading`` / ``sold_out``.
+    Individual state tests patch this themselves.
+    """
+    with patch(
+        "mobile.page_probe.detect_price_panel_state", return_value="ready"
+    ) as mocked:
+        yield mocked
 
 
 # ---------------------------------------------------------------------------
@@ -356,3 +370,65 @@ class TestGetPriceCoordsFromXml:
             xml_root=xml_small
         )
         assert result is not None  # retry succeeded
+
+
+# ---------------------------------------------------------------------------
+# Page-probe integration (P1 #31, Step 3)
+# ---------------------------------------------------------------------------
+
+
+class TestSelectByIndexPanelStateIntegration:
+    def _make_selector(self, *, coords=(10, 20)):
+        bot = MagicMock()
+        bot._get_price_option_coordinates_by_config_index.return_value = coords
+        selector = PriceSelector(
+            device=MagicMock(),
+            config=MagicMock(price_index=0),
+            probe=MagicMock(),
+        )
+        selector.set_bot(bot)
+        return selector
+
+    def test_sold_out_raises_sold_out_error(self, _force_price_panel_ready):
+        _force_price_panel_ready.return_value = "sold_out"
+        selector = self._make_selector()
+        with pytest.raises(SoldOutError):
+            selector.select_by_index()
+
+    def test_loading_then_ready_succeeds(self, _force_price_panel_ready):
+        _force_price_panel_ready.side_effect = ["loading", "ready"]
+        selector = self._make_selector()
+        with patch("time.sleep") as mock_sleep:
+            with patch(
+                "time.monotonic",
+                side_effect=[0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3],
+            ):
+                assert selector.select_by_index() is True
+        assert mock_sleep.called
+
+    def test_loading_timeout_raises_price_selector_error(
+        self, _force_price_panel_ready
+    ):
+        _force_price_panel_ready.return_value = "loading"
+        selector = self._make_selector()
+        # monotonic: first start = 0.0, deadline = 2.0; subsequent values jump past
+        with patch("time.sleep"):
+            with patch("time.monotonic", side_effect=[0.0, 0.5, 1.0, 1.5, 2.5]):
+                with pytest.raises(PriceSelectorError, match="加载超时"):
+                    selector.select_by_index()
+
+    def test_unknown_logs_warning_and_continues(self, _force_price_panel_ready):
+        _force_price_panel_ready.return_value = "unknown"
+        selector = self._make_selector()
+        with patch("mobile.price_selector.logger") as mock_logger:
+            assert selector.select_by_index() is True
+        warning_calls = [c for c in mock_logger.warning.call_args_list]
+        assert any("state=unknown" in str(c) for c in warning_calls)
+
+    def test_ready_proceeds_without_warning(self, _force_price_panel_ready):
+        _force_price_panel_ready.return_value = "ready"
+        selector = self._make_selector()
+        with patch("mobile.price_selector.logger") as mock_logger:
+            assert selector.select_by_index() is True
+        warning_calls = [c for c in mock_logger.warning.call_args_list]
+        assert not any("state=unknown" in str(c) for c in warning_calls)

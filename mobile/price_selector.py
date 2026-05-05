@@ -165,7 +165,16 @@ class PriceSelector:
     # ------------------------------------------------------------------
 
     def select_by_index(self, xml_root=None) -> bool:
-        """Select price option by config.price_index. Returns True on success."""
+        """Select price option by config.price_index. Returns True on success.
+
+        Before attempting to click, the price panel state is sampled via
+        ``page_probe.detect_price_panel_state`` (P1 #31). On ``loading`` the
+        method waits up to 2s for the panel to appear; on ``sold_out`` it
+        raises ``SoldOutError``; on ``ready`` / ``unknown`` it proceeds with
+        the existing coordinate-based click path.
+        """
+        self._await_price_panel_or_raise()
+
         coords = self.get_price_coords_by_index(xml_root=xml_root)
         if coords is None:
             logger.warning(f"无法定位 price_index={self._config.price_index} 的坐标")
@@ -173,6 +182,46 @@ class PriceSelector:
         self._click_coordinates(*coords)
         logger.info(f"通过配置索引选择票价: price_index={self._config.price_index}")
         return True
+
+    def _await_price_panel_or_raise(self, *, max_wait_s: float = 2.0) -> str:
+        """Sample the price panel state, blocking up to ``max_wait_s`` on loading.
+
+        Returns the final state. Raises ``SoldOutError`` when the panel
+        reports sold-out, and ``PriceSelectorError("加载超时")`` if it stays
+        in ``loading`` past the timeout.
+        """
+        # Lazy import to avoid hard dependency on page_probe in unit tests
+        # that exercise PriceSelector in isolation (the import below is
+        # cheap; we only delay it to keep top-of-file import order minimal).
+        try:
+            from mobile.page_probe import detect_price_panel_state
+        except ImportError:  # pragma: no cover - fallback for non-package runs
+            from page_probe import detect_price_panel_state  # type: ignore
+
+        state = detect_price_panel_state(self._d)
+        if state == "loading":
+            import time as _time
+
+            deadline = _time.monotonic() + max_wait_s
+            while _time.monotonic() < deadline:
+                _time.sleep(0.1)
+                state = detect_price_panel_state(self._d)
+                if state != "loading":
+                    break
+            if state == "loading":
+                raise PriceSelectorError(
+                    f"价格面板加载超时（>{max_wait_s:.1f}s），疑似设备/网络异常"
+                )
+
+        if state == "sold_out":
+            raise SoldOutError("价格面板检测到全部票档售罄")
+
+        if state == "unknown":
+            logger.warning(
+                "price panel state=unknown — 选择器/UI 可能已变更，继续尝试索引点击"
+            )
+
+        return state
 
     def get_price_coords_by_index(self, xml_root=None) -> Optional[Tuple[int, int]]:
         """Get coordinates for price option at config.price_index."""
