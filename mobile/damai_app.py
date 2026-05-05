@@ -11,7 +11,14 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 
-from selenium.webdriver.common.by import By
+try:
+    from selenium.webdriver.common.by import By
+except ModuleNotFoundError as e:
+    raise SystemExit(
+        "依赖缺失：selenium 未安装。\n"
+        "→ 请在项目根目录运行：poetry install\n"
+        "→ 然后通过 mobile/scripts/start_ticket_grabbing.sh 启动而非直接运行 .py"
+    ) from e
 
 try:
     from mobile.config import Config
@@ -1739,9 +1746,7 @@ class DamaiBot(UIPrimitives):
                                     duration=25,
                                 )
                             except Exception:
-                                self.ultra_fast_click(
-                                    By.ID, "cn.damai:id/btn_buy_view"
-                                )
+                                self.ultra_fast_click(By.ID, "cn.damai:id/btn_buy_view")
                 else:
                     if not self.ultra_fast_click(By.ID, "cn.damai:id/btn_buy_view"):
                         self.ultra_fast_click(
