@@ -10,6 +10,7 @@ Results are cached with a configurable TTL to avoid redundant device queries.
 """
 
 import time
+from enum import Enum
 from typing import Any, Dict, Optional
 
 try:
@@ -18,6 +19,33 @@ except ImportError:
     from logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Page state enum (P1 #25, Step 1)
+# ---------------------------------------------------------------------------
+# Inherits ``str`` so existing string-based comparisons (``state == "sku_page"``)
+# keep working without churn while new code can use ``PageState.SESSION_PICKER``.
+class PageState(str, Enum):
+    HOMEPAGE = "homepage"
+    SEARCH_PAGE = "search_page"
+    DETAIL_PAGE = "detail_page"
+    SKU_PAGE = "sku_page"
+    SESSION_PICKER = "session_picker"
+    ORDER_CONFIRM_PAGE = "order_confirm_page"
+    CONSENT_DIALOG = "consent_dialog"
+    PENDING_ORDER_DIALOG = "pending_order_dialog"
+    UNKNOWN = "unknown"
+
+
+# Markers used to recognise the multi-session date picker on the SKU page.
+_SESSION_PICKER_RESOURCE_IDS = ("cn.damai:id/sku_panel_dates",)
+_SESSION_PICKER_TEXTS = (
+    "请选择场次",
+    "选择日期",
+    "请选择日期",
+    "请选择演出日期",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +189,14 @@ class PageProbe:
         self._cached_at = time.time()
         return result
 
+    def classify(self, fast: bool = False) -> Dict[str, Any]:
+        """Public alias of :meth:`probe_current_page`.
+
+        Existing call sites use ``probe_current_page``; new code (P1 #25
+        multi-session flow) reads more naturally as ``probe.classify()``.
+        """
+        return self.probe_current_page(fast=fast)
+
     def get_current_activity(self) -> str:
         """Return the current foreground Activity name."""
         try:
@@ -216,6 +252,11 @@ class PageProbe:
             return _make_result(state="detail_page", purchase_button=purchase_bar)
 
         if "NcovSku" in activity:
+            if self._has_session_picker_markers():
+                return _make_result(
+                    state=PageState.SESSION_PICKER.value,
+                    price_container=False,
+                )
             reservation = self._check_reservation_mode()
             return _make_result(
                 state="sku_page",
@@ -256,6 +297,11 @@ class PageProbe:
         sku_layout = self._exists_by_resource_id("cn.damai:id/layout_sku")
         sku_container = self._exists_by_resource_id("cn.damai:id/sku_contanier")
         if sku_layout or sku_container:
+            if self._has_session_picker_markers():
+                return _make_result(
+                    state=PageState.SESSION_PICKER.value,
+                    pending_order_dialog=pending,
+                )
             reservation = self._check_reservation_mode()
             return _make_result(
                 state="sku_page",
@@ -325,6 +371,23 @@ class PageProbe:
             return el.exists
         except Exception:
             return False
+
+    def _has_session_picker_markers(self) -> bool:
+        """Return True when the multi-session date picker UI is visible.
+
+        Detects the SKU panel state where the user must pick a session/date
+        before the price flow-layout becomes interactive. Markers checked:
+
+        - resource-id ``cn.damai:id/sku_panel_dates``
+        - text "请选择场次" / "选择日期" (and minor wording variants)
+        """
+        for resource_id in _SESSION_PICKER_RESOURCE_IDS:
+            if self._exists_by_resource_id(resource_id):
+                return True
+        for text in _SESSION_PICKER_TEXTS:
+            if self._exists_by_text(text) or self._exists_by_text_contains(text):
+                return True
+        return False
 
     def _check_reservation_mode(self) -> bool:
         """Check if the SKU page is in reservation (not purchase) mode."""
