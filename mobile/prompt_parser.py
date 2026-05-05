@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
 try:
+    from mobile.date_utils import normalize_date as _normalize_date_external
     from mobile.item_resolver import normalize_text
 except ImportError:
     from item_resolver import normalize_text
@@ -29,16 +30,73 @@ _CHINESE_DIGITS = {
 }
 
 _KNOWN_CITY_TOKENS = (
-    "北京", "上海", "深圳", "广州", "杭州", "成都", "重庆", "武汉", "南京", "西安",
-    "苏州", "天津", "长沙", "郑州", "青岛", "宁波", "福州", "厦门", "南昌", "沈阳",
-    "大连", "合肥", "无锡", "佛山", "东莞", "珠海", "昆明", "贵阳", "南宁", "长春",
-    "哈尔滨", "太原", "石家庄", "济南", "兰州", "海口", "三亚", "乌鲁木齐", "呼和浩特",
+    "北京",
+    "上海",
+    "深圳",
+    "广州",
+    "杭州",
+    "成都",
+    "重庆",
+    "武汉",
+    "南京",
+    "西安",
+    "苏州",
+    "天津",
+    "长沙",
+    "郑州",
+    "青岛",
+    "宁波",
+    "福州",
+    "厦门",
+    "南昌",
+    "沈阳",
+    "大连",
+    "合肥",
+    "无锡",
+    "佛山",
+    "东莞",
+    "珠海",
+    "昆明",
+    "贵阳",
+    "南宁",
+    "长春",
+    "哈尔滨",
+    "太原",
+    "石家庄",
+    "济南",
+    "兰州",
+    "海口",
+    "三亚",
+    "乌鲁木齐",
+    "呼和浩特",
 )
 
 _REQUEST_STOPWORDS = (
-    "帮我", "帮忙", "抢票", "抢一张", "抢两张", "抢", "买", "订", "门票", "票", "演出票",
-    "给我", "给", "一下", "尽快", "尽量", "麻烦", "我要", "想要", "请", "能不能", "可以", "帮",
-    "票价", "价位",
+    "帮我",
+    "帮忙",
+    "抢票",
+    "抢一张",
+    "抢两张",
+    "抢",
+    "买",
+    "订",
+    "门票",
+    "票",
+    "演出票",
+    "给我",
+    "给",
+    "一下",
+    "尽快",
+    "尽量",
+    "麻烦",
+    "我要",
+    "想要",
+    "请",
+    "能不能",
+    "可以",
+    "帮",
+    "票价",
+    "价位",
 )
 
 _LOW_SIGNAL_KEYWORD_TOKENS = {"演唱会", "音乐会", "演出", "巡演", "live", "门票"}
@@ -75,7 +133,42 @@ class PromptIntent:
     price_hint: Optional[str] = None
     seat_hint: Optional[str] = None
     numeric_price_hint: Optional[int] = None
+    numeric_price_min: Optional[int] = None
+    numeric_price_max: Optional[int] = None
     notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ParseResult:
+    """诊断框架：parse_prompt 的可观测返回值。
+
+    保留向后兼容：调用方通过属性转发仍可直接读取 intent 字段
+    （如 result.attendee_names 等同 result.intent.attendee_names）。
+    """
+
+    intent: "PromptIntent"
+    matched_item: object = None
+    matched_session: Optional[str] = None
+    matched_price: Optional[str] = None
+    diagnostics: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+
+    _ACTIONABLE_THRESHOLD: ClassVar[float] = 0.6
+
+    def is_actionable(self) -> bool:
+        return (
+            self.confidence >= self._ACTIONABLE_THRESHOLD
+            and self.matched_item is not None
+        )
+
+    def __getattr__(self, name: str):
+        # 仅当常规属性查找失败时才转发到 intent；避免无穷递归
+        if name.startswith("_") or name in {"intent"}:
+            raise AttributeError(name)
+        intent = self.__dict__.get("intent")
+        if intent is None:
+            raise AttributeError(name)
+        return getattr(intent, name)
 
 
 def _normalize_whitespace(text: str) -> str:
@@ -94,7 +187,12 @@ def _parse_chinese_int(token: str) -> Optional[int]:
         return 10 + _CHINESE_DIGITS[token[1]]
     if len(token) == 2 and token[1] == "十" and token[0] in _CHINESE_DIGITS:
         return _CHINESE_DIGITS[token[0]] * 10
-    if len(token) == 3 and token[1] == "十" and token[0] in _CHINESE_DIGITS and token[2] in _CHINESE_DIGITS:
+    if (
+        len(token) == 3
+        and token[1] == "十"
+        and token[0] in _CHINESE_DIGITS
+        and token[2] in _CHINESE_DIGITS
+    ):
         return _CHINESE_DIGITS[token[0]] * 10 + _CHINESE_DIGITS[token[2]]
     return None
 
@@ -123,19 +221,8 @@ def _parse_quantity_with_explicit(prompt: str) -> tuple[int, bool]:
 
 
 def _parse_date(prompt: str) -> Optional[str]:
-    patterns = (
-        r"(\d{1,2})\s*月\s*(\d{1,2})\s*[号日好]?",
-        r"(\d{1,2})[./-](\d{1,2})",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, prompt)
-        if not match:
-            continue
-        month = int(match.group(1))
-        day = int(match.group(2))
-        if 1 <= month <= 12 and 1 <= day <= 31:
-            return f"{month:02d}.{day:02d}"
-    return None
+    """委托给 ``mobile.date_utils.normalize_date``，统一为 ``MM.DD``。"""
+    return _normalize_date_external(prompt)
 
 
 def _parse_city(prompt: str) -> Optional[str]:
@@ -172,7 +259,9 @@ def _parse_attendee_names(prompt: str) -> list[str]:
     return []
 
 
-def _clean_prompt_for_keyword(prompt: str, removable_tokens: Optional[Iterable[str]] = None) -> str:
+def _clean_prompt_for_keyword(
+    prompt: str, removable_tokens: Optional[Iterable[str]] = None
+) -> str:
     cleaned = prompt
     cleaned = re.sub(r"https?://\S+", " ", cleaned)
     cleaned = re.sub(r"\d{1,2}\s*月\s*\d{1,2}\s*[号日好]?", " ", cleaned)
@@ -221,11 +310,16 @@ def _compact_keyword_phrase(value: str) -> str:
     return _normalize_whitespace(" ".join(compact_tokens))
 
 
-def _parse_artist_and_keyword(prompt: str, removable_tokens: Optional[Iterable[str]] = None) -> tuple[Optional[str], Optional[str], list[str]]:
+def _parse_artist_and_keyword(
+    prompt: str, removable_tokens: Optional[Iterable[str]] = None
+) -> tuple[Optional[str], Optional[str], list[str]]:
     cleaned = _clean_prompt_for_keyword(prompt, removable_tokens=removable_tokens)
 
     artist = None
-    artist_match = re.search(r"([\u4e00-\u9fffA-Za-z0-9·•]+?)(?:的)?(?:演唱会|音乐会|演出|live|LIVE|巡演)", cleaned)
+    artist_match = re.search(
+        r"([\u4e00-\u9fffA-Za-z0-9·•]+?)(?:的)?(?:演唱会|音乐会|演出|live|LIVE|巡演)",
+        cleaned,
+    )
     if artist_match:
         artist = artist_match.group(1).strip(" ，,。！？")
     else:
@@ -245,7 +339,12 @@ def _parse_artist_and_keyword(prompt: str, removable_tokens: Optional[Iterable[s
     for candidate in candidates:
         value = _compact_keyword_phrase(candidate)
         normalized = normalize_text(value)
-        if not value or not normalized or normalized in seen or _is_low_signal_candidate(value):
+        if (
+            not value
+            or not normalized
+            or normalized in seen
+            or _is_low_signal_candidate(value)
+        ):
             continue
         deduped.append(value)
         seen.add(normalized)
@@ -253,7 +352,9 @@ def _parse_artist_and_keyword(prompt: str, removable_tokens: Optional[Iterable[s
     return artist, (deduped[0] if deduped else None), deduped
 
 
-def _parse_price_hints(prompt: str) -> tuple[Optional[str], Optional[str], Optional[int]]:
+def _parse_price_hints(
+    prompt: str,
+) -> tuple[Optional[str], Optional[str], Optional[int]]:
     seat_hint = None
     for token in _SEAT_HINTS:
         if token in prompt:
@@ -274,7 +375,29 @@ def _parse_price_hints(prompt: str) -> tuple[Optional[str], Optional[str], Optio
     return None, None, None
 
 
-def parse_prompt(prompt: str) -> PromptIntent:
+def _parse_price_range(prompt: str) -> tuple[Optional[int], Optional[int]]:
+    """从 ``500-800元`` / ``500到800`` 等区间表达中识别 (min, max)。"""
+    match = re.search(
+        r"([1-9]\d{1,4})\s*[-~到至]\s*([1-9]\d{1,4})\s*元?",
+        prompt or "",
+    )
+    if not match:
+        return None, None
+    low = int(match.group(1))
+    high = int(match.group(2))
+    if low > high:
+        low, high = high, low
+    return low, high
+
+
+def parse_prompt(prompt: str) -> "ParseResult":
+    """解析自然语言提示词。
+
+    返回 ``ParseResult``。为保持向后兼容，``ParseResult`` 通过 ``__getattr__``
+    把字段访问转发到 ``intent``——历史上以 ``parse_prompt(...).attendee_names``
+    形式读取的代码无需改动。``confidence`` 与 ``diagnostics`` 由解析阶段产出，
+    用于 ``apply`` 模式下的「拒绝写残缺 config」判定。
+    """
     if not isinstance(prompt, str) or len(prompt.strip()) == 0:
         raise ValueError("prompt 不能为空")
 
@@ -282,10 +405,21 @@ def parse_prompt(prompt: str) -> PromptIntent:
     parsed_date = _parse_date(normalized_prompt)
     parsed_city = _parse_city(normalized_prompt)
     attendee_names = _parse_attendee_names(normalized_prompt)
-    parsed_quantity, quantity_explicit = _parse_quantity_with_explicit(normalized_prompt)
+    parsed_quantity, quantity_explicit = _parse_quantity_with_explicit(
+        normalized_prompt
+    )
     if attendee_names and not quantity_explicit:
         parsed_quantity = len(attendee_names)
     price_hint, seat_hint, numeric_price = _parse_price_hints(normalized_prompt)
+    price_min, price_max = _parse_price_range(normalized_prompt)
+    if price_min is not None and price_max is not None:
+        # 区间优先：避免「500-800元」被识别为「500元」单值 hint
+        numeric_price = None
+        price_hint = (
+            f"{seat_hint}{price_min}-{price_max}元"
+            if seat_hint
+            else f"{price_min}-{price_max}元"
+        )
     removable_tokens = []
     removable_tokens.extend(attendee_names)
     if parsed_city:
@@ -315,6 +449,8 @@ def parse_prompt(prompt: str) -> PromptIntent:
         price_hint=price_hint,
         seat_hint=seat_hint,
         numeric_price_hint=numeric_price,
+        numeric_price_min=price_min,
+        numeric_price_max=price_max,
     )
 
     if not intent.search_keyword:
@@ -334,7 +470,42 @@ def parse_prompt(prompt: str) -> PromptIntent:
     if not intent.price_hint:
         intent.notes.append("提示词中未识别到明确票档偏好，后续会使用查询结果确认票档")
 
-    return intent
+    diagnostics: list[str] = []
+    confidence = 0.0
+    if intent.search_keyword:
+        confidence += 0.4
+        diagnostics.append(f"识别搜索关键词：{intent.search_keyword}（+0.40）")
+    if intent.attendee_names:
+        confidence += 0.30
+        diagnostics.append(
+            f"识别 {len(intent.attendee_names)} 位观演人：{'、'.join(intent.attendee_names)}（+0.30）"
+        )
+    else:
+        diagnostics.append("未识别到观演人，apply 模式必须补充姓名")
+    if intent.date:
+        confidence += 0.15
+        diagnostics.append(f"识别目标日期：{intent.date}（+0.15）")
+    else:
+        diagnostics.append("未识别到具体日期，将依赖页面候选场次")
+    if intent.numeric_price_hint or intent.price_hint:
+        confidence += 0.10
+        diagnostics.append(
+            f"识别票档偏好：{intent.price_hint or intent.numeric_price_hint}（+0.10）"
+        )
+    else:
+        diagnostics.append("未识别到票档偏好，将依赖页面默认推荐")
+    if intent.city:
+        confidence += 0.05
+        diagnostics.append(f"识别目标城市：{intent.city}（+0.05）")
+
+    return ParseResult(
+        intent=intent,
+        matched_item=None,
+        matched_session=intent.date,
+        matched_price=intent.price_hint,
+        diagnostics=diagnostics,
+        confidence=round(confidence, 3),
+    )
 
 
 def _extract_digits(text: str) -> Optional[int]:
@@ -349,7 +520,37 @@ def is_price_option_available(option: dict) -> bool:
     return tag not in _UNAVAILABLE_TAGS
 
 
+def _score_numeric_match(target: int, option_digits: int) -> tuple[int, str]:
+    """对单值数字 hint 进行宽容打分，返回 (分数, 说明)。"""
+    if option_digits == target:
+        return 100, f"{option_digits} 元 = {target} 元 精确命中（+100）"
+    ratio = abs(option_digits - target) / target
+    if ratio <= 0.10:
+        # ±10%：精确点 80 分，到容忍边界 60 分（线性递减）
+        tolerance_score = round(80 - (ratio / 0.10) * 20)
+        return tolerance_score, (
+            f"{option_digits} 元 ≈ {target} 元（差 {ratio * 100:.1f}%，±10% 容忍 +{tolerance_score}）"
+        )
+    return 0, f"{option_digits} 元 与 {target} 元 偏差 {ratio * 100:.1f}% 超出容忍区间"
+
+
+def _score_range_match(low: int, high: int, option_digits: int) -> tuple[int, str]:
+    """区间 hint 命中评分。命中区间 +50；其它情况 0。"""
+    if low <= option_digits <= high:
+        return 50, f"{option_digits} 元 落在区间 [{low}, {high}] 内（+50）"
+    return 0, f"{option_digits} 元 不在区间 [{low}, {high}] 内"
+
+
 def score_price_option(intent: PromptIntent, option: dict) -> int:
+    """对单个 UI 票档进行打分。
+
+    评分构成（与 ``ParseResult.diagnostics`` 同步）：
+    - 文字 hint 包含：+120
+    - seat_hint 包含：+80
+    - 数字 hint 精确：+100；±10% 容忍：60-80 线性递减；超过：0
+    - 区间 hint 命中：+50
+    - 不可用 tag：-1000；常规可预约/预售：+10
+    """
     text = option.get("text") or ""
     tag = option.get("tag") or ""
     normalized_text = normalize_text(text)
@@ -364,12 +565,19 @@ def score_price_option(intent: PromptIntent, option: dict) -> int:
     if intent.seat_hint and normalize_text(intent.seat_hint) in normalized_text:
         score += 80
 
-    if intent.numeric_price_hint is not None:
-        digits = _extract_digits(text)
-        if digits == intent.numeric_price_hint:
-            score += 150
-        elif digits is not None:
-            score -= abs(digits - intent.numeric_price_hint)
+    digits = _extract_digits(text)
+    if digits is not None:
+        if (
+            intent.numeric_price_min is not None
+            and intent.numeric_price_max is not None
+        ):
+            range_score, _ = _score_range_match(
+                intent.numeric_price_min, intent.numeric_price_max, digits
+            )
+            score += range_score
+        elif intent.numeric_price_hint is not None:
+            single_score, _ = _score_numeric_match(intent.numeric_price_hint, digits)
+            score += single_score
 
     if tag in {"可预约", "预售", "可选"}:
         score += 10
@@ -377,20 +585,70 @@ def score_price_option(intent: PromptIntent, option: dict) -> int:
     return score
 
 
-def choose_price_option(intent: PromptIntent, options: Iterable[dict]) -> Optional[dict]:
-    ranked = []
+_NEAREST_NEIGHBOR_MAX_RATIO = 0.50
+
+
+def _nearest_numeric_option(target: int, options: Iterable[dict]) -> Optional[dict]:
+    """返回价格数字与 ``target`` 距离最近且可用的票档。
+
+    距离超过 ``±50%`` 不接受（避免 999 元 hint 错配到 380 元这类离谱情况）。
+    """
+    nearest = None
+    nearest_distance = None
     for option in options:
+        if not is_price_option_available(option):
+            continue
+        digits = _extract_digits(option.get("text") or "")
+        if digits is None:
+            continue
+        distance = abs(digits - target)
+        if nearest_distance is None or distance < nearest_distance:
+            nearest = option
+            nearest_distance = distance
+    if nearest is None or nearest_distance is None:
+        return None
+    if nearest_distance / max(target, 1) > _NEAREST_NEIGHBOR_MAX_RATIO:
+        return None
+    return nearest
+
+
+def choose_price_option(
+    intent: PromptIntent, options: Iterable[dict]
+) -> Optional[dict]:
+    options_list = list(options)
+    if not options_list:
+        return None
+
+    ranked = []
+    for option in options_list:
         scored = dict(option)
         scored["score"] = score_price_option(intent, option)
         ranked.append(scored)
 
-    if not ranked:
-        return None
-
     ranked.sort(key=lambda item: item["score"], reverse=True)
     best = ranked[0]
 
-    if intent.price_hint and best["score"] < 100:
+    has_numeric = (
+        intent.numeric_price_hint is not None or intent.numeric_price_max is not None
+    )
+
+    # 数字 hint：可以接受最近邻 fallback（30 分）
+    if has_numeric and best["score"] < 60:
+        target = intent.numeric_price_hint
+        if target is None and intent.numeric_price_max is not None:
+            mid = (intent.numeric_price_min + intent.numeric_price_max) // 2
+            target = mid
+        if target is not None:
+            nearest = _nearest_numeric_option(target, options_list)
+            if nearest is not None:
+                fallback = dict(nearest)
+                fallback["score"] = 30
+                fallback["match_reason"] = "nearest_neighbor"
+                return fallback
+        return None
+
+    # 仅文字 hint（如「内场」无具体价格）：保留严格阈值，避免错配看似无关的票档
+    if intent.price_hint and not has_numeric and best["score"] < 100:
         return None
 
     if not intent.price_hint and not is_price_option_available(best):

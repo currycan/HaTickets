@@ -619,6 +619,69 @@ def build_updated_config(
     return config_data
 
 
+UNACTIONABLE_EXIT_CODE = 5
+
+
+def _is_stdin_tty() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _print_unactionable_diagnostics(parse_result, stream=None):
+    stream = stream or sys.stderr
+    print(
+        f"NLP 解析置信度 {parse_result.confidence:.2f}（阈值 0.60），存在以下不确定项：",
+        file=stream,
+    )
+    for line in parse_result.diagnostics:
+        print(f"  - {line}", file=stream)
+
+
+def _handle_unactionable_apply(parse_result, force_non_interactive: bool) -> bool:
+    """is_actionable=False 时的 fallback。
+
+    非交互模式（强制 ``--non-interactive`` 或 stdin 非 TTY）→ 把诊断写到 stderr，
+    返回 ``False`` 表示调用方应 ``exit 5``。
+
+    TTY 模式 → 把诊断写到 stderr，让用户决定是否继续走交互式补缺流程
+    （现有 ``_resolve_confirmed_date`` / ``_resolve_confirmed_price`` 已能交互补缺）。
+    """
+    _print_unactionable_diagnostics(parse_result)
+    if force_non_interactive or not _is_stdin_tty():
+        return False
+    return _prompt_yes_no("解析置信度不足，是否仍然进入交互模式补充缺失项？")
+
+
+def _update_parse_result_post_discovery(parse_result, discovery: dict, chosen_price):
+    """在 discover_target_event 之后回填 ParseResult 的匹配状态与诊断。"""
+    summary = discovery.get("summary") or {}
+    parse_result.matched_item = summary or None
+    if not summary:
+        return
+
+    intent = parse_result.intent
+    visible_dates = summary.get("dates") or []
+    if intent.date and intent.date in visible_dates:
+        parse_result.matched_session = intent.date
+    elif len(visible_dates) == 1:
+        parse_result.matched_session = visible_dates[0]
+    else:
+        parse_result.matched_session = None
+        parse_result.diagnostics.append(
+            f"日期 {intent.date or '<未指定>'} 在页面候选场次 {visible_dates or '[]'} 中未找到唯一匹配"
+        )
+
+    if chosen_price:
+        parse_result.matched_price = chosen_price.get("text")
+        parse_result.confidence = min(1.0, parse_result.confidence + 0.05)
+    else:
+        parse_result.diagnostics.append(
+            "无法从页面票档中匹配出唯一推荐票档（可能是票档偏好不明确或票档全部售罄）"
+        )
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="自然语言提示词驱动的大麦 mobile 流程")
     parser.add_argument(
@@ -637,6 +700,11 @@ def parse_args(argv=None):
         "--config",
         help="显式指定配置文件路径；默认写入 mobile/config.jsonc。开发者本地覆盖可配合 HATICKETS_CONFIG_PATH 或 mobile/config.local.jsonc 使用。",
     )
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="强制非交互行为：is_actionable=False 时直接 exit 5 并把诊断写到 stderr，CI 用",
+    )
     return parser.parse_args(argv)
 
 
@@ -647,7 +715,8 @@ def main(argv=None):
     try:
         base_config_dict = _load_base_config_dict(config_path)
         try:
-            intent = parse_prompt(args.prompt)
+            parse_result = parse_prompt(args.prompt)
+            intent = parse_result.intent
         except ValueError as exc:
             if str(exc) == "无法从提示词中提取搜索关键词":
                 logger.error(_build_missing_keyword_error(base_config_dict, args.mode))
@@ -703,11 +772,24 @@ def main(argv=None):
         chosen_price = choose_price_option(
             intent, discovery["summary"].get("price_options") or []
         )
+        # discover 成功后回填 matched_*，让 is_actionable() 在 apply/probe 模式有依据
+        _update_parse_result_post_discovery(parse_result, discovery, chosen_price)
         print(_format_summary(intent, discovery, chosen_price))
 
         if args.mode == "summary":
             _print_result(True, _success_detail_for_mode(args.mode))
             return 0
+
+        # apply / probe 模式：is_actionable=False 时拒绝写残缺 config
+        if not parse_result.is_actionable():
+            if not _handle_unactionable_apply(
+                parse_result, force_non_interactive=args.non_interactive
+            ):
+                _print_result(
+                    False,
+                    "解析置信度不足，已停止写入配置；请补充提示词后重试或在 TTY 中重新运行进行交互补缺。",
+                )
+                return UNACTIONABLE_EXIT_CODE
 
         date_text = _resolve_confirmed_date(intent, discovery["summary"], args.yes)
         if not date_text:
