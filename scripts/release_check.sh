@@ -10,10 +10,11 @@
 #   C3. `poetry run test` 通过（覆盖率 ≥80% 由 pyproject.toml 强制）
 #   C4. `bash mobile/scripts/benchmark_hot_path.sh --runs 3` 跑通并打印平均耗时
 #   C5. reference/10-changelog.md 含本次发布条目（与 --tag 比对，或要求 7 天内有更新）
+#   C6. docs/releases/<tag>.md 与 docs/releases/<tag>-user.md 同时存在（仅当传 --tag）
 #
 # 用法：
-#   scripts/release_check.sh                # 通用检查
-#   scripts/release_check.sh --tag v0.3.5   # 指定版本号，强校验 changelog
+#   scripts/release_check.sh                # 通用检查（C1-C5；C6 跳过）
+#   scripts/release_check.sh --tag v0.4.5   # 指定版本号，强校验 changelog + docs/releases
 #   scripts/release_check.sh --skip-bench   # 离机环境跳过 benchmark（仅供 CI 调试）
 #
 # 退出码：
@@ -180,6 +181,32 @@ else
             fail "changelog 近 7 天无更新条目；发布前请追加本次变更说明"
             record_fail
         fi
+    fi
+fi
+
+# ── C6：docs/releases/<tag>.md + <tag>-user.md 校验 ───────────────────────
+# 强制 v0.4.0 发布风格：每次正式 tag 必须配套技术版与用户版 release notes
+header "C6. docs/releases/<tag>.md + <tag>-user.md 存在（仅 --tag 时强校验）"
+if [[ -z "$TAG" ]]; then
+    info "未传 --tag，跳过 docs/releases 强校验（通用检查模式）"
+else
+    DOCS_TECH="docs/releases/${TAG}.md"
+    DOCS_USER="docs/releases/${TAG}-user.md"
+    C6_FAIL=0
+    if [[ -f "$DOCS_TECH" ]]; then
+        ok "存在：$DOCS_TECH"
+    else
+        fail "缺失：$DOCS_TECH（技术版 release notes，仿 docs/releases/v0.4.0.md 体例）"
+        C6_FAIL=1
+    fi
+    if [[ -f "$DOCS_USER" ]]; then
+        ok "存在：$DOCS_USER"
+    else
+        fail "缺失：$DOCS_USER（用户版 release notes，仿 docs/releases/v0.4.0-user.md 体例）"
+        C6_FAIL=1
+    fi
+    if [[ $C6_FAIL -ne 0 ]]; then
+        record_fail
     fi
 fi
 
