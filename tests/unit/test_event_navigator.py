@@ -7,9 +7,11 @@ import pytest
 
 from mobile.event_navigator import (
     EventNavigator,
+    HomeNotReadyError,
     SessionNotFoundError,
     _enumerate_sessions_from_xml,
     select_session,
+    wait_for_home_ready,
 )
 
 
@@ -343,3 +345,56 @@ class TestSelectSession:
         driver = self._make_driver(xml)
         idx = select_session(driver, date="04.13", city="北京", fallback_index=0)
         assert idx == 1  # date+city wins, fallback_index ignored
+
+
+# ---------------------------------------------------------------------------
+# wait_for_home_ready (P2 #28)
+# ---------------------------------------------------------------------------
+
+
+class TestWaitForHomeReady:
+    def test_returns_immediately_when_homepage(self):
+        driver = MagicMock()
+        probe = MagicMock()
+        probe.classify.return_value = {"state": "homepage"}
+        result = wait_for_home_ready(driver, probe, timeout=0.5, poll_interval=0.05)
+        assert result["state"] == "homepage"
+        probe.invalidate_cache.assert_called()
+
+    def test_polls_until_homepage_appears(self):
+        driver = MagicMock()
+        probe = MagicMock()
+        probe.classify.side_effect = [
+            {"state": "unknown"},
+            {"state": "unknown"},
+            {"state": "homepage"},
+        ]
+        result = wait_for_home_ready(driver, probe, timeout=2.0, poll_interval=0.01)
+        assert result["state"] == "homepage"
+        assert probe.classify.call_count == 3
+
+    def test_home_page_probe_timeout(self, tmp_path):
+        driver = MagicMock()
+        driver.dump_hierarchy.return_value = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            "<hierarchy>"
+            '<node text="登录" resource-id="cn.damai:id/login_btn"/>'
+            "</hierarchy>"
+        )
+        probe = MagicMock()
+        probe.classify.return_value = {"state": "unknown"}
+
+        with pytest.raises(HomeNotReadyError, match="首页未就绪"):
+            wait_for_home_ready(
+                driver,
+                probe,
+                timeout=0.1,
+                poll_interval=0.02,
+                dump_dir=str(tmp_path),
+            )
+
+        dumps = list(tmp_path.glob("home_probe_*.xml"))
+        assert len(dumps) == 1, f"expected single dump, got {dumps}"
+        content = dumps[0].read_text(encoding="utf-8")
+        assert "登录" in content
+        assert "cn.damai:id/login_btn" in content
