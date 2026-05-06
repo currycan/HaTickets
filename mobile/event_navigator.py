@@ -35,6 +35,21 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+# Re-export the page-recovery helpers so callers and tests can keep importing
+# from ``mobile.event_navigator``.  Implementations live in
+# :mod:`mobile.page_helpers` to keep this module under the 800-line ceiling.
+from mobile.page_helpers import (  # noqa: E402, F401
+    HomeNotReadyError,
+    SearchAmbiguousError,
+    SearchEmptyError,
+    _build_parent_map,
+    _find_clickable_ancestor,
+    _parse_bounds_center,
+    select_search_result,
+    wait_for_home_ready,
+)
+
+
 # ---------------------------------------------------------------------------
 # Multi-session selection (P1 #25, Step 2)
 # ---------------------------------------------------------------------------
@@ -46,32 +61,6 @@ class SessionNotFoundError(RuntimeError):
 
 _SESSION_PANEL_RESOURCE_ID = "cn.damai:id/sku_panel_dates"
 _SESSION_DATE_RESOURCE_ID = "cn.damai:id/tv_date"
-_BOUNDS_RE = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
-
-
-def _parse_bounds_center(bounds_str: Optional[str]) -> Optional[tuple]:
-    if not bounds_str:
-        return None
-    match = _BOUNDS_RE.match(bounds_str)
-    if not match:
-        return None
-    x1, y1, x2, y2 = (int(v) for v in match.groups())
-    return ((x1 + x2) // 2, (y1 + y2) // 2)
-
-
-def _build_parent_map(root: ET.Element) -> Dict[ET.Element, ET.Element]:
-    return {child: parent for parent in root.iter() for child in parent}
-
-
-def _find_clickable_ancestor(
-    parent_map: Dict[ET.Element, ET.Element], node: ET.Element
-) -> Optional[ET.Element]:
-    cur = parent_map.get(node)
-    while cur is not None:
-        if cur.get("clickable") == "true":
-            return cur
-        cur = parent_map.get(cur)
-    return None
 
 
 def _enumerate_sessions_from_xml(xml_str: str) -> List[Dict[str, Any]]:

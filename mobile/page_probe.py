@@ -9,9 +9,10 @@ Provides two probe modes:
 Results are cached with a configurable TTL to avoid redundant device queries.
 """
 
+import os
 import time
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 try:
     from mobile.logger import get_logger
@@ -143,7 +144,13 @@ class PageProbe:
     """
 
     def __init__(
-        self, device: Any, config: Any = None, cache_ttl_s: float = 0.5
+        self,
+        device: Any,
+        config: Any = None,
+        cache_ttl_s: float = 0.5,
+        *,
+        unknown_threshold: int = 3,
+        dump_dir: str = "tmp",
     ) -> None:
         self._device = device
         self._config = config
@@ -151,6 +158,13 @@ class PageProbe:
         self._cache_ttl_s = cache_ttl_s
         self._cached_result: Optional[Dict[str, Any]] = None
         self._cached_at: float = 0.0
+        # P2 #24 — consecutive-unknown alerting
+        self._unknown_threshold = max(1, int(unknown_threshold))
+        self._consecutive_unknown_count = 0
+        self._dump_dir = dump_dir
+        self.dumped_xml_path: Optional[str] = None
+        # P2 #24 — recovery override
+        self._forced_state: Optional[str] = None
 
     def set_bot(self, bot) -> None:
         """Set DamaiBot reference for delegation (e.g. reservation_mode check)."""
@@ -170,6 +184,14 @@ class PageProbe:
         Returns:
             A dict describing the page state and key element presence.
         """
+        # P2 #24 — recovery short-circuit: if a known state has been forced,
+        # return it without touching the device.
+        if self._forced_state is not None:
+            result = _make_result(state=self._forced_state)
+            self._cached_result = result
+            self._cached_at = time.time()
+            return result
+
         now = time.time()
         if (
             self._cached_result is not None
@@ -187,7 +209,67 @@ class PageProbe:
 
         self._cached_result = result
         self._cached_at = time.time()
+        self._track_unknown(result)
         return result
+
+    def force_state(self, state: Optional[Union["PageState", str]]) -> None:
+        """Force the probe to return a known state on subsequent calls.
+
+        Used by recovery modules that have external knowledge of the current
+        page (e.g. just dismissed a dialog and know we are back on detail_page)
+        to bypass the slower element-based classification.
+
+        Pass ``None`` to clear the override and resume normal probing.
+        """
+        if state is None:
+            self._forced_state = None
+            self.invalidate_cache()
+            logger.info("PageProbe.force_state: cleared override")
+            return
+        state_value = state.value if isinstance(state, PageState) else str(state)
+        self._forced_state = state_value
+        self._consecutive_unknown_count = 0
+        self.invalidate_cache()
+        logger.info("PageProbe.force_state: %s", state_value)
+
+    def _track_unknown(self, result: Dict[str, Any]) -> None:
+        """Count consecutive unknown classifications and dump UI on threshold."""
+        if (result or {}).get("state") != PageState.UNKNOWN.value:
+            self._consecutive_unknown_count = 0
+            return
+        self._consecutive_unknown_count += 1
+        if self._consecutive_unknown_count == self._unknown_threshold:
+            logger.warning(
+                "UNKNOWN_THRESHOLD reached after %d classifications",
+                self._consecutive_unknown_count,
+            )
+            self.dumped_xml_path = self._dump_unknown_xml()
+
+    def _dump_unknown_xml(self) -> Optional[str]:
+        """Persist the current UI hierarchy to ``<dump_dir>/page_probe_unknown_<ts>.xml``.
+
+        Returns the file path on success, or ``None`` if dumping failed.
+        Failures never raise — alerting is best-effort.
+        """
+        try:
+            os.makedirs(self._dump_dir, exist_ok=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("page probe dump dir create failed: %s", exc)
+            return None
+        try:
+            xml = self._device.dump_hierarchy() or ""
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("page probe dump_hierarchy failed: %s", exc)
+            xml = ""
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(self._dump_dir, f"page_probe_unknown_{ts}.xml")
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(xml)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("page probe dump write failed: %s", exc)
+            return None
+        return path
 
     def classify(self, fast: bool = False) -> Dict[str, Any]:
         """Public alias of :meth:`probe_current_page`.

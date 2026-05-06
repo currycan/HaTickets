@@ -7,9 +7,14 @@ import pytest
 
 from mobile.event_navigator import (
     EventNavigator,
+    HomeNotReadyError,
+    SearchAmbiguousError,
+    SearchEmptyError,
     SessionNotFoundError,
     _enumerate_sessions_from_xml,
+    select_search_result,
     select_session,
+    wait_for_home_ready,
 )
 
 
@@ -343,3 +348,171 @@ class TestSelectSession:
         driver = self._make_driver(xml)
         idx = select_session(driver, date="04.13", city="北京", fallback_index=0)
         assert idx == 1  # date+city wins, fallback_index ignored
+
+
+# ---------------------------------------------------------------------------
+# wait_for_home_ready (P2 #28)
+# ---------------------------------------------------------------------------
+
+
+class TestWaitForHomeReady:
+    def test_returns_immediately_when_homepage(self):
+        driver = MagicMock()
+        probe = MagicMock()
+        probe.classify.return_value = {"state": "homepage"}
+        result = wait_for_home_ready(driver, probe, timeout=0.5, poll_interval=0.05)
+        assert result["state"] == "homepage"
+        probe.invalidate_cache.assert_called()
+
+    def test_polls_until_homepage_appears(self):
+        driver = MagicMock()
+        probe = MagicMock()
+        probe.classify.side_effect = [
+            {"state": "unknown"},
+            {"state": "unknown"},
+            {"state": "homepage"},
+        ]
+        result = wait_for_home_ready(driver, probe, timeout=2.0, poll_interval=0.01)
+        assert result["state"] == "homepage"
+        assert probe.classify.call_count == 3
+
+    def test_home_page_probe_timeout(self, tmp_path):
+        driver = MagicMock()
+        driver.dump_hierarchy.return_value = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            "<hierarchy>"
+            '<node text="登录" resource-id="cn.damai:id/login_btn"/>'
+            "</hierarchy>"
+        )
+        probe = MagicMock()
+        probe.classify.return_value = {"state": "unknown"}
+
+        with pytest.raises(HomeNotReadyError, match="首页未就绪"):
+            wait_for_home_ready(
+                driver,
+                probe,
+                timeout=0.1,
+                poll_interval=0.02,
+                dump_dir=str(tmp_path),
+            )
+
+        dumps = list(tmp_path.glob("home_probe_*.xml"))
+        assert len(dumps) == 1, f"expected single dump, got {dumps}"
+        content = dumps[0].read_text(encoding="utf-8")
+        assert "登录" in content
+        assert "cn.damai:id/login_btn" in content
+
+
+# ---------------------------------------------------------------------------
+# select_search_result (P2 #23)
+# ---------------------------------------------------------------------------
+
+
+def _search_result_xml(*items):
+    """Build a hierarchy with N ``ll_search_item`` cards.
+
+    Each ``items`` entry is a tuple ``(title, bounds)``.
+    """
+    cards = ""
+    for title, bounds in items:
+        cards += (
+            f'<node resource-id="cn.damai:id/ll_search_item" '
+            f'clickable="true" bounds="{bounds}">'
+            f'<node resource-id="cn.damai:id/tv_project_name" text="{title}"/>'
+            f"</node>"
+        )
+    return f'<?xml version="1.0" encoding="UTF-8"?><hierarchy>{cards}</hierarchy>'
+
+
+class TestSelectSearchResult:
+    def _make_driver(self, xml):
+        driver = MagicMock()
+        driver.dump_hierarchy.return_value = xml
+        return driver
+
+    def test_search_result_zero_results_logs_keyword(self, tmp_path):
+        driver = self._make_driver('<?xml version="1.0" encoding="UTF-8"?><hierarchy/>')
+        with pytest.raises(SearchEmptyError) as exc_info:
+            select_search_result(
+                driver,
+                keyword="周杰伦演唱会",
+                timeout=0.1,
+                poll_interval=0.02,
+                dump_dir=str(tmp_path),
+            )
+        # keyword surfaced in exception message for debugging
+        assert "周杰伦演唱会" in str(exc_info.value)
+        assert "搜索结果为空" in str(exc_info.value)
+        # dump persisted
+        dumps = list(tmp_path.glob("search_probe_*.xml"))
+        assert len(dumps) == 1
+
+    def test_search_result_single_auto_select(self, tmp_path):
+        xml = _search_result_xml(("周杰伦演唱会上海站", "[0,0][1080,400]"))
+        driver = self._make_driver(xml)
+        chosen = select_search_result(
+            driver,
+            keyword="周杰伦",
+            timeout=0.5,
+            poll_interval=0.02,
+            dump_dir=str(tmp_path),
+        )
+        assert chosen["title"] == "周杰伦演唱会上海站"
+        # Center of [0,0][1080,400] = (540, 200)
+        driver.click.assert_called_once_with(540, 200)
+
+    def test_search_result_ambiguous_falls_back(self, tmp_path):
+        xml = _search_result_xml(
+            ("无关演出A", "[0,0][1080,200]"),
+            ("无关演出B", "[0,200][1080,400]"),
+        )
+        driver = self._make_driver(xml)
+        chosen = select_search_result(
+            driver,
+            keyword="周杰伦",
+            target_title="周杰伦",
+            timeout=0.2,
+            poll_interval=0.02,
+            dump_dir=str(tmp_path),
+        )
+        # Fuzzy match fails → fallback to first card (non-strict default)
+        assert chosen["title"] == "无关演出A"
+        assert chosen["index"] == 0
+        # Center of [0,0][1080,200] = (540, 100)
+        driver.click.assert_called_once_with(540, 100)
+
+    def test_search_result_strict_ambiguous_raises(self, tmp_path):
+        xml = _search_result_xml(
+            ("无关A", "[0,0][1080,200]"),
+            ("无关B", "[0,200][1080,400]"),
+        )
+        driver = self._make_driver(xml)
+        with pytest.raises(SearchAmbiguousError, match="歧义"):
+            select_search_result(
+                driver,
+                keyword="周杰伦",
+                target_title="周杰伦",
+                strict=True,
+                timeout=0.2,
+                poll_interval=0.02,
+                dump_dir=str(tmp_path),
+            )
+        dumps = list(tmp_path.glob("search_probe_*.xml"))
+        assert len(dumps) == 1
+
+    def test_search_result_target_title_fuzzy_matches_second(self, tmp_path):
+        xml = _search_result_xml(
+            ("无关演出", "[0,0][1080,200]"),
+            ("周杰伦2026演唱会", "[0,200][1080,400]"),
+        )
+        driver = self._make_driver(xml)
+        chosen = select_search_result(
+            driver,
+            keyword="周杰伦",
+            target_title="周杰伦",
+            timeout=0.2,
+            poll_interval=0.02,
+            dump_dir=str(tmp_path),
+        )
+        assert chosen["title"] == "周杰伦2026演唱会"
+        driver.click.assert_called_once_with(540, 300)
