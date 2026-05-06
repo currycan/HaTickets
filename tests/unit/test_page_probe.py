@@ -454,3 +454,139 @@ class TestPageStateEnum:
         # Existing string-based equality must keep working.
         assert PageState.SKU_PAGE == "sku_page"
         assert PageState.SESSION_PICKER == "session_picker"
+
+
+# ---------------------------------------------------------------------------
+# Unknown threshold + force_state (P2 #24)
+# ---------------------------------------------------------------------------
+
+
+import os  # noqa: E402
+
+
+class TestUnknownThreshold:
+    def test_unknown_state_threshold_alerts(self, tmp_path):
+        # Empty activity + no element matches → state="unknown"
+        device = _make_device(activity="")
+        device.dump_hierarchy.return_value = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<hierarchy><node text="无法识别页面"/></hierarchy>'
+        )
+        probe = PageProbe(
+            device,
+            cache_ttl_s=0,
+            unknown_threshold=2,
+            dump_dir=str(tmp_path),
+        )
+
+        # First unknown — counter only, no dump yet.
+        r1 = probe.probe_current_page()
+        assert r1["state"] == "unknown"
+        assert probe.dumped_xml_path is None
+
+        # Second unknown — threshold reached.
+        r2 = probe.probe_current_page()
+        assert r2["state"] == "unknown"
+        assert probe.dumped_xml_path is not None
+        assert os.path.exists(probe.dumped_xml_path)
+        # Dump filename matches the agreed-upon convention.
+        assert os.path.basename(probe.dumped_xml_path).startswith("page_probe_unknown_")
+        # Hierarchy content was written.
+        with open(probe.dumped_xml_path, encoding="utf-8") as fh:
+            assert "无法识别页面" in fh.read()
+
+    def test_unknown_counter_resets_on_known_state(self, tmp_path):
+        device = _make_device(activity="")
+        device.dump_hierarchy.return_value = "<hierarchy/>"
+        probe = PageProbe(
+            device,
+            cache_ttl_s=0,
+            unknown_threshold=2,
+            dump_dir=str(tmp_path),
+        )
+
+        # First unknown.
+        assert probe.probe_current_page()["state"] == "unknown"
+        assert probe.dumped_xml_path is None
+
+        # Switch device to a known activity (homepage) to reset the counter.
+        device.app_current.return_value = {"activity": "cn.damai.homepage.MainActivity"}
+        assert probe.probe_current_page()["state"] == "homepage"
+        assert probe.dumped_xml_path is None
+
+        # Back to unknown — only one consecutive, still no dump.
+        device.app_current.return_value = {"activity": ""}
+        assert probe.probe_current_page()["state"] == "unknown"
+        assert probe.dumped_xml_path is None
+
+        # Second consecutive unknown — threshold (2) reached.
+        assert probe.probe_current_page()["state"] == "unknown"
+        assert probe.dumped_xml_path is not None
+        assert os.path.exists(probe.dumped_xml_path)
+
+    def test_unknown_threshold_clamps_to_min_one(self, tmp_path):
+        device = _make_device(activity="")
+        device.dump_hierarchy.return_value = "<hierarchy/>"
+        probe = PageProbe(
+            device,
+            cache_ttl_s=0,
+            unknown_threshold=0,
+            dump_dir=str(tmp_path),
+        )
+        # threshold=0 is clamped to 1 → first unknown triggers immediately.
+        probe.probe_current_page()
+        assert probe.dumped_xml_path is not None
+
+
+class TestForceState:
+    def test_force_state_overrides(self):
+        # Device would normally classify as unknown.
+        device = _make_device(activity="")
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        probe.force_state(PageState.HOMEPAGE)
+
+        result = probe.probe_current_page()
+        assert result["state"] == "homepage"
+        # Forced state must not touch the device.
+        device.app_current.assert_not_called()
+
+    def test_force_state_accepts_string(self):
+        device = _make_device(activity="")
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        probe.force_state("sku_page")
+        assert probe.probe_current_page()["state"] == "sku_page"
+
+    def test_force_state_clear_returns_to_probe(self):
+        device = _make_device(activity="cn.damai.homepage.MainActivity")
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        probe.force_state(PageState.SKU_PAGE)
+        assert probe.probe_current_page()["state"] == "sku_page"
+
+        probe.force_state(None)
+        # Real probing resumes after override is cleared.
+        assert probe.probe_current_page()["state"] == "homepage"
+
+    def test_force_state_resets_unknown_counter(self, tmp_path):
+        device = _make_device(activity="")
+        device.dump_hierarchy.return_value = "<hierarchy/>"
+        probe = PageProbe(
+            device,
+            cache_ttl_s=0,
+            unknown_threshold=2,
+            dump_dir=str(tmp_path),
+        )
+        # Trip one unknown.
+        probe.probe_current_page()
+        assert probe.dumped_xml_path is None
+
+        # Force a known state — counter resets.
+        probe.force_state(PageState.HOMEPAGE)
+        probe.probe_current_page()
+        probe.force_state(None)
+
+        # One more unknown — only 1 consecutive after reset, no dump.
+        probe.probe_current_page()
+        assert probe.dumped_xml_path is None
