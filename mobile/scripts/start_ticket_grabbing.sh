@@ -295,9 +295,9 @@ echo ""
 
 # 运行抢票脚本（优先使用项目 .venv，其次使用 Poetry）
 if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
-    HATICKETS_CONFIG_PATH="$CONFIG_FILE" "$ROOT_DIR/.venv/bin/python" damai_app.py
+    HATICKETS_CONFIG_PATH="$CONFIG_FILE" "$ROOT_DIR/.venv/bin/python" -m damai_app
 elif command -v poetry &> /dev/null; then
-    HATICKETS_CONFIG_PATH="$CONFIG_FILE" poetry run python damai_app.py
+    HATICKETS_CONFIG_PATH="$CONFIG_FILE" poetry run python -m damai_app
 else
     echo "❌ 未找到可用的 Python 环境"
     echo "   请先安装依赖："
