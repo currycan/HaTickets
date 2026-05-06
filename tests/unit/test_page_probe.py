@@ -590,3 +590,46 @@ class TestForceState:
         # One more unknown — only 1 consecutive after reset, no dump.
         probe.probe_current_page()
         assert probe.dumped_xml_path is None
+
+
+# ---------------------------------------------------------------------------
+# unknown_threshold=0 — qa W3-03 边界 (Task C2)
+# ---------------------------------------------------------------------------
+
+
+import pytest  # noqa: E402
+
+
+class TestUnknownThresholdZeroBoundary:
+    """W3-03 qa-added 边界用例：把 unknown_threshold=0 的语义 lock-in。"""
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "qa intent: unknown_threshold=0 应禁用告警 (never dump)。"
+            "当前实现在 mobile/page_probe.py PageProbe.__init__ 内做 max(1, ...) "
+            "夹紧，第一次 unknown 即触发 dump — 行为与名字相反。"
+            "本测试 xfail 等待源码语义澄清/修复后转为 pass；"
+            "见 tests/manual/W3_regression_summary.md 'New issues' 区。"
+        ),
+    )
+    def test_unknown_threshold_zero_disables_alert(self, tmp_path):
+        """传 unknown_threshold=0 时，无论多少次 unknown 都不应触发告警/dump。
+
+        当前实现：clamp 到 1 → 第一次 unknown 即 dump，本测试 xfail。
+        """
+        device = _make_device(activity="")
+        device.dump_hierarchy.return_value = "<hierarchy/>"
+        probe = PageProbe(
+            device,
+            cache_ttl_s=0,
+            unknown_threshold=0,
+            dump_dir=str(tmp_path),
+        )
+        # 即便连续 5 次 unknown，也不应触发任何 dump（按"0=disabled"语义）。
+        for _ in range(5):
+            assert probe.probe_current_page()["state"] == "unknown"
+        assert probe.dumped_xml_path is None, (
+            "expected no dump when unknown_threshold=0 (disabled), "
+            "but probe.dumped_xml_path is set"
+        )

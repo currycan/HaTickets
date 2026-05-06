@@ -516,3 +516,54 @@ class TestSelectSearchResult:
         )
         assert chosen["title"] == "周杰伦2026演唱会"
         driver.click.assert_called_once_with(540, 300)
+
+
+# ---------------------------------------------------------------------------
+# select_session — qa W3-03 边界增补 (Task C1)
+# ---------------------------------------------------------------------------
+
+
+class TestSelectSessionBoundaryCases:
+    """W3-03 qa-added 边界用例：补 fix-plan p1-25 未显式覆盖的路径。"""
+
+    def _make_driver(self, xml):
+        driver = MagicMock()
+        driver.dump_hierarchy.return_value = xml
+        return driver
+
+    def test_select_session_returns_first_match_when_city_omitted(self):
+        """提供 date 且 city 显式为 None：date 唯一命中应返回该卡片 idx，
+        即使该卡片不是面板第 0 项。
+
+        与 ``test_unique_date_match_clicks_card`` 区别：这里 city=None 显式传入，
+        且匹配命中第 1 项（非 0 项），保证 ``date-only`` 单匹配路径独立可达。
+        """
+        xml = _hierarchy_xml(
+            ("04.01", "北京", "[0,0][540,200]"),
+            ("04.13", "上海", "[540,0][1080,200]"),
+            ("04.27", "广州", "[0,200][540,400]"),
+        )
+        driver = self._make_driver(xml)
+        idx = select_session(driver, date="04.13", city=None)
+        assert idx == 1
+        # Center of [540,0][1080,200] = (810, 100)
+        driver.click.assert_called_once_with(810, 100)
+
+    def test_select_session_falls_back_to_index_when_no_match(self):
+        """提供 date + city 都未命中任何卡片，但同时提供了 fallback_index：
+        应进入 fallback_index 路径选中对应卡片，而不是抛 SessionNotFoundError。
+
+        与 ``test_fallback_index_when_no_date`` 区别：这里 date 是有提供的，
+        但 cards 中根本没有该 date — 验证 date+city → date-only → fallback_index
+        三段优先级链中第三段真的兜底。
+        """
+        xml = _hierarchy_xml(
+            ("04.05", "北京", "[0,0][540,200]"),
+            ("04.13", "上海", "[540,0][1080,200]"),
+        )
+        driver = self._make_driver(xml)
+        # date "12.31" 未在卡片中；city "深圳" 也未匹配；fallback_index=1 兜底
+        idx = select_session(driver, date="12.31", city="深圳", fallback_index=1)
+        assert idx == 1
+        # Center of [540,0][1080,200] = (810, 100)
+        driver.click.assert_called_once_with(810, 100)
