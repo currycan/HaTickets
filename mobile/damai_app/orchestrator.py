@@ -12,12 +12,20 @@ sibling submodules: ``sale_waiter``, ``purchase_flow``,
 from __future__ import annotations
 
 import re
+import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 from selenium.webdriver.common.by import By
+
+try:
+    from mobile.env_snapshot import detect_damai_app_version
+    from mobile.logger import log_event
+except ImportError:  # pragma: no cover
+    from env_snapshot import detect_damai_app_version  # type: ignore[no-redef]
+    from logger import log_event  # type: ignore[no-redef]
 
 from . import (
     ANDROID_UIAUTOMATOR,
@@ -97,6 +105,27 @@ class DamaiBot(
             self._navigator._probe = self._page_probe
             self._recovery = RecoveryHelper(self.d, self._page_probe, self._navigator)
             self._price_sel._probe = self._page_probe
+
+        if setup_driver:
+            self._emit_boot_snapshot()
+
+    def _emit_boot_snapshot(self) -> None:
+        """Emit a one-shot ``event=boot`` log line with environment metadata."""
+        try:
+            serial = getattr(self.config, "serial", None) or getattr(
+                self.config, "device_serial", None
+            )
+            damai_version = detect_damai_app_version(serial=serial) or "unknown"
+            log_event(
+                logger,
+                "boot",
+                py_version=f"{sys.version_info.major}.{sys.version_info.minor}",
+                damai_version=damai_version,
+                device=serial or "unknown",
+                rush_mode=bool(getattr(self.config, "rush_mode", False)),
+            )
+        except Exception:  # pragma: no cover — boot logging must never crash startup
+            logger.debug("boot snapshot failed (suppressed)", exc_info=True)
 
     def _ensure_pipeline(self):
         """Lazily create the FastPipeline if not yet initialised (e.g. in tests)."""
@@ -1018,6 +1047,12 @@ class DamaiBot(
 
         except Exception as e:
             logger.error(f"抢票过程发生错误: {e}")
+            try:
+                from .recovery_strategies import capture_failure_artifacts
+
+                capture_failure_artifacts(self, "run_ticket_grabbing", error=e)
+            except Exception:  # pragma: no cover — failure capture must not crash
+                logger.debug("failure artifact capture failed", exc_info=True)
             return False
         finally:
             time.sleep(0.05)

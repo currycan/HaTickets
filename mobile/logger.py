@@ -3,10 +3,12 @@
 Unified logging framework for HaTickets mobile module.
 
 Usage:
-    from logger import get_logger
+    from logger import get_logger, log_event
     logger = get_logger(__name__)
     logger.info("消息内容")
+    log_event(logger, "sale_ready", cta_text="立即购票", polls=12, duration_ms=480)
 """
+
 import logging
 import os
 from datetime import datetime, timezone, timedelta
@@ -15,7 +17,9 @@ from typing import Optional, Set
 # Asia/Shanghai timezone (UTC+8)
 _TZ_SHANGHAI = timezone(timedelta(hours=8))
 
-_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hatickets_mobile.log")
+_LOG_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "hatickets_mobile.log"
+)
 
 _CONSOLE_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 _FILE_FORMAT = "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d - %(message)s"
@@ -34,7 +38,9 @@ _ANSI_COLORS = {
 class _ShanghaiFormatter(logging.Formatter):
     """Logging formatter that uses Asia/Shanghai timezone for timestamps."""
 
-    def formatTime(self, record: logging.LogRecord, datefmt: Optional[str] = None) -> str:
+    def formatTime(
+        self, record: logging.LogRecord, datefmt: Optional[str] = None
+    ) -> str:
         dt = datetime.fromtimestamp(record.created, tz=_TZ_SHANGHAI)
         if datefmt:
             return dt.strftime(datefmt)
@@ -115,3 +121,47 @@ def get_logger(name: str) -> logging.Logger:
         _configured_loggers.add(name)
 
     return logger
+
+
+def _format_event_value(value) -> str:
+    """Render a field value for structured event logs (no whitespace, quote-safe)."""
+    if value is None:
+        return "none"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    text = str(value)
+    # Collapse whitespace so a single line stays parseable as `key=value` pairs.
+    text = " ".join(text.split())
+    if not text:
+        return '""'
+    if any(c in text for c in (" ", "\t", "=", '"')):
+        text = text.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{text}"'
+    return text
+
+
+def log_event(
+    logger: logging.Logger,
+    event: str,
+    *,
+    level: int = logging.INFO,
+    **fields,
+) -> None:
+    """Emit a structured event log line.
+
+    Output shape: ``event=<name> key1=value1 key2=value2``.  Values containing
+    whitespace, ``=`` or quotes are quoted/escaped so the line stays grep-able
+    and downstream-parseable.
+
+    Args:
+        logger: Target logger (typically obtained via :func:`get_logger`).
+        event: Short snake_case event name (e.g. ``sale_ready``).
+        level: Logging level (default :data:`logging.INFO`).
+        **fields: Arbitrary key/value pairs serialized to the log line.
+    """
+    parts = [f"event={_format_event_value(event)}"]
+    for key, value in fields.items():
+        parts.append(f"{key}={_format_event_value(value)}")
+    logger.log(level, " ".join(parts))

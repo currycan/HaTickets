@@ -10,10 +10,12 @@ from mobile.logger import (
     _ShanghaiFormatter,
     _supports_color,
     get_logger,
+    log_event,
     _ANSI_COLORS,
     _ANSI_RESET,
     _DATE_FORMAT,
     _configured_loggers,
+    _format_event_value,
 )
 
 
@@ -207,3 +209,105 @@ class TestGetLogger:
         finally:
             lgr1.handlers.clear()
             _configured_loggers.discard(name)
+
+
+# ---------------------------------------------------------------------------
+# _format_event_value
+# ---------------------------------------------------------------------------
+
+
+class TestFormatEventValue:
+    def test_none_renders_none(self):
+        assert _format_event_value(None) == "none"
+
+    def test_bool_renders_lowercase(self):
+        assert _format_event_value(True) == "true"
+        assert _format_event_value(False) == "false"
+
+    def test_int_renders_plain(self):
+        assert _format_event_value(42) == "42"
+
+    def test_float_renders_plain(self):
+        assert _format_event_value(1.25) == "1.25"
+
+    def test_simple_string_unquoted(self):
+        assert _format_event_value("ready") == "ready"
+
+    def test_empty_string_quoted(self):
+        assert _format_event_value("") == '""'
+
+    def test_string_with_space_is_quoted(self):
+        assert _format_event_value("立即 购票") == '"立即 购票"'
+
+    def test_string_with_equals_is_quoted(self):
+        assert _format_event_value("a=b") == '"a=b"'
+
+    def test_string_with_double_quote_is_escaped(self):
+        assert _format_event_value('say "hi"') == '"say \\"hi\\""'
+
+    def test_multiline_collapsed(self):
+        assert _format_event_value("line1\nline2") == '"line1 line2"'
+
+
+# ---------------------------------------------------------------------------
+# log_event
+# ---------------------------------------------------------------------------
+
+
+class TestLogEvent:
+    def _make_capturing_logger(self, name: str):
+        lgr = logging.getLogger(name)
+        lgr.handlers.clear()
+        lgr.setLevel(logging.DEBUG)
+        lgr.propagate = False
+        captured = []
+
+        class CaptureHandler(logging.Handler):
+            def emit(self, record):
+                captured.append((record.levelno, record.getMessage()))
+
+        lgr.addHandler(CaptureHandler())
+        return lgr, captured
+
+    def test_emits_event_at_info_by_default(self):
+        lgr, captured = self._make_capturing_logger("test_log_event_default")
+        log_event(lgr, "sale_ready", cta_text="立即购票", polls=12, duration_ms=480)
+        assert len(captured) == 1
+        level, msg = captured[0]
+        assert level == logging.INFO
+        assert msg.startswith("event=sale_ready ")
+        # Plain CJK without whitespace stays unquoted (single-token field).
+        assert "cta_text=立即购票" in msg
+        assert "polls=12" in msg
+        assert "duration_ms=480" in msg
+
+    def test_explicit_level_respected(self):
+        lgr, captured = self._make_capturing_logger("test_log_event_error")
+        log_event(
+            lgr,
+            "error",
+            level=logging.ERROR,
+            type="SoldOutError",
+            scene="price_select",
+        )
+        assert captured[0][0] == logging.ERROR
+        assert "event=error" in captured[0][1]
+        assert "type=SoldOutError" in captured[0][1]
+        assert "scene=price_select" in captured[0][1]
+
+    def test_no_fields_renders_event_only(self):
+        lgr, captured = self._make_capturing_logger("test_log_event_bare")
+        log_event(lgr, "boot")
+        assert captured[0][1] == "event=boot"
+
+    def test_none_field_renders_none_token(self):
+        lgr, captured = self._make_capturing_logger("test_log_event_none")
+        log_event(lgr, "boot", damai_version=None)
+        assert "damai_version=none" in captured[0][1]
+
+    def test_field_order_preserved(self):
+        lgr, captured = self._make_capturing_logger("test_log_event_order")
+        log_event(lgr, "session_selected", date="2026-05-30", city="北京", index=2)
+        msg = captured[0][1]
+        # Order: event → date → city → index
+        assert msg.index("date=") < msg.index("city=") < msg.index("index=")

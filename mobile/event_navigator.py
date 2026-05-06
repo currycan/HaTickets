@@ -7,6 +7,7 @@ while the actual implementation lives here.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -17,7 +18,7 @@ from selenium.webdriver.common.by import By
 from mobile.ui_primitives import ANDROID_UIAUTOMATOR
 from selenium.common.exceptions import TimeoutException
 
-from mobile.logger import get_logger
+from mobile.logger import get_logger, log_event
 
 try:
     from mobile.item_resolver import normalize_text, city_keyword
@@ -150,13 +151,28 @@ def select_session(
     Raises:
         SessionNotFoundError: When no unique candidate can be picked.
     """
+
+    def _emit_err(scene: str, type_name: str = "SessionNotFoundError", **extra):
+        log_event(
+            logger,
+            "error",
+            level=logging.ERROR,
+            type=type_name,
+            scene=scene,
+            date=date,
+            city=city,
+            **extra,
+        )
+
     try:
         xml_str = driver.dump_hierarchy()
     except Exception as exc:  # noqa: BLE001
+        _emit_err("select_session.dump_hierarchy", type_name=type(exc).__name__)
         raise SessionNotFoundError(f"dump_hierarchy 失败: {exc}") from exc
 
     cards = _enumerate_sessions_from_xml(xml_str)
     if not cards:
+        _emit_err("select_session.no_cards")
         raise SessionNotFoundError(
             "未发现可选场次（sku_panel_dates 内未找到 tv_date 节点）"
         )
@@ -169,14 +185,17 @@ def select_session(
         ]
         if len(matches) == 1:
             chosen = matches[0]
-            logger.info(
-                "select_session: date=%s + city=%s 命中 idx=%d/%d",
-                date,
-                city,
-                chosen["index"],
-                len(cards),
+            log_event(
+                logger,
+                "session_selected",
+                match="date+city",
+                date=date,
+                city=city,
+                index=chosen["index"],
+                total=len(cards),
             )
         elif len(matches) > 1:
+            _emit_err("select_session.ambiguous_date_city", matches=len(matches))
             raise SessionNotFoundError(
                 f"date={date} + city={city} 命中 {len(matches)} 条场次，无法唯一确定"
             )
@@ -185,13 +204,17 @@ def select_session(
         matches = [c for c in cards if _date_equals(c["date"], date)]
         if len(matches) == 1:
             chosen = matches[0]
-            logger.info(
-                "select_session: date=%s 唯一命中 idx=%d/%d",
-                date,
-                chosen["index"],
-                len(cards),
+            log_event(
+                logger,
+                "session_selected",
+                match="date",
+                date=date,
+                city=None,
+                index=chosen["index"],
+                total=len(cards),
             )
         elif len(matches) > 1:
+            _emit_err("select_session.ambiguous_date_only", matches=len(matches))
             raise SessionNotFoundError(
                 f"date={date} 命中 {len(matches)} 条场次，需配合 city 才能确定"
             )
@@ -199,17 +222,26 @@ def select_session(
     if chosen is None and fallback_index is not None:
         if 0 <= fallback_index < len(cards):
             chosen = cards[fallback_index]
-            logger.warning(
-                "select_session: 回退到 fallback_index=%d (共 %d 条)",
-                fallback_index,
-                len(cards),
+            log_event(
+                logger,
+                "session_selected",
+                level=logging.WARNING,
+                match="fallback_index",
+                index=fallback_index,
+                total=len(cards),
             )
         else:
+            _emit_err(
+                "select_session.fallback_out_of_range",
+                fallback_index=fallback_index,
+                total=len(cards),
+            )
             raise SessionNotFoundError(
                 f"fallback_index={fallback_index} 越界（共 {len(cards)} 条场次）"
             )
 
     if chosen is None:
+        _emit_err("select_session.no_criteria", total=len(cards))
         raise SessionNotFoundError(
             f"未提供 date/city/fallback_index，无法选择场次（共 {len(cards)} 条候选）"
         )
