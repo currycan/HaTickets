@@ -40,9 +40,12 @@ logger = get_logger(__name__)
 # :mod:`mobile.page_helpers` to keep this module under the 800-line ceiling.
 from mobile.page_helpers import (  # noqa: E402, F401
     HomeNotReadyError,
+    SearchAmbiguousError,
+    SearchEmptyError,
     _build_parent_map,
     _find_clickable_ancestor,
     _parse_bounds_center,
+    select_search_result,
     wait_for_home_ready,
 )
 
