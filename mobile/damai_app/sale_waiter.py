@@ -9,6 +9,7 @@ patches still take effect via the package's mirror hook.
 
 from __future__ import annotations
 
+import logging
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -18,6 +19,11 @@ from . import (
     _CTA_READY_KEYWORDS,
     logger,
 )
+
+try:
+    from mobile.logger import log_event
+except ImportError:  # pragma: no cover
+    from logger import log_event  # type: ignore[no-redef]
 
 try:
     from mobile.item_resolver import normalize_text
@@ -124,21 +130,43 @@ class SaleWaiterMixin:
             time.sleep(sleep_seconds)
 
         # Use BuyButtonGuard for precise button-text monitoring
+        guard_t0 = time.monotonic()
         if hasattr(self, "_guard") and self._guard.wait_until_safe(
             timeout_s=8.0, poll_ms=50
         ):
-            logger.info("BuyButtonGuard 检测到可购买按钮")
+            log_event(
+                logger,
+                "sale_ready",
+                source="buy_button_guard",
+                cta_text=None,
+                polls=None,
+                duration_ms=int((time.monotonic() - guard_t0) * 1000),
+            )
             return
 
         # Tight polling loop with multiple purchase signals until the page becomes actionable.
         deadline = sell_time + timedelta(seconds=8)
         polls = 0
+        loop_t0 = time.monotonic()
         while datetime.now(tz=_tz_shanghai) < deadline:
             polls += 1
             if self._is_sale_ready():
                 cta_text = getattr(self, "_last_sale_ready_text", None) or "?"
-                logger.info(f"CTA_MATCH: text={cta_text!r} polls={polls} (开售已开始)")
+                log_event(
+                    logger,
+                    "sale_ready",
+                    source="poll_loop",
+                    cta_text=cta_text,
+                    polls=polls,
+                    duration_ms=int((time.monotonic() - loop_t0) * 1000),
+                )
                 return
             time.sleep(0.08)
 
-        logger.warning(f"等待开售超时（轮询 {polls} 次），继续执行")
+        log_event(
+            logger,
+            "sale_wait_timeout",
+            level=logging.WARNING,
+            polls=polls,
+            duration_ms=int((time.monotonic() - loop_t0) * 1000),
+        )

@@ -7,10 +7,18 @@ change).  Hosts the detail→purchase entry path and the fast submit retry loop.
 
 from __future__ import annotations
 
+import logging
+import time
+
 from . import (
     _SALE_READY_TEXT_REGEX_OR,
     logger,
 )
+
+try:
+    from mobile.logger import log_event
+except ImportError:  # pragma: no cover
+    from logger import log_event  # type: ignore[no-redef]
 
 try:
     from mobile.ui_primitives import ANDROID_UIAUTOMATOR
@@ -138,6 +146,7 @@ class PurchaseFlowMixin:
         """Attempt submit quickly and retry within the confirm page before falling back."""
         attempt_count = 3
         has_submitted_once = False
+        t0 = time.monotonic()
         for attempt in range(attempt_count):
             submit_success = False
             if self.ultra_fast_click(*submit_selectors[0], timeout=0.35):
@@ -154,16 +163,50 @@ class PurchaseFlowMixin:
                 if has_submitted_once:
                     followup_result = self.verify_order_result(timeout=2)
                     if followup_result != "timeout":
+                        log_event(
+                            logger,
+                            "order_submitted",
+                            success=followup_result not in ("timeout", "failed"),
+                            result=followup_result,
+                            attempts=attempt + 1,
+                            duration_ms=int((time.monotonic() - t0) * 1000),
+                        )
                         return followup_result
+                log_event(
+                    logger,
+                    "order_submitted",
+                    level=logging.WARNING,
+                    success=False,
+                    result="button_not_found",
+                    attempts=attempt + 1,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                )
                 return "timeout"
 
             has_submitted_once = True
             verify_timeout = 1.2 if attempt < attempt_count - 1 else 3
             result = self.verify_order_result(timeout=verify_timeout)
             if result != "timeout":
+                log_event(
+                    logger,
+                    "order_submitted",
+                    success=result not in ("timeout", "failed"),
+                    result=result,
+                    attempts=attempt + 1,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                )
                 return result
             logger.warning(
                 f"提交后暂未确认结果，快速重试提交 {attempt + 2}/{attempt_count}"
             )
 
+        log_event(
+            logger,
+            "order_submitted",
+            level=logging.WARNING,
+            success=False,
+            result="timeout",
+            attempts=attempt_count,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+        )
         return "timeout"

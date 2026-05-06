@@ -8,9 +8,23 @@ recovery loops shared between the cold-path and warm-path retries.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
+import os
 import time
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 from . import logger
+
+try:
+    from mobile.env_snapshot import detect_damai_app_version
+    from mobile.logger import log_event
+except ImportError:  # pragma: no cover
+    from env_snapshot import detect_damai_app_version  # type: ignore[no-redef]
+    from logger import log_event  # type: ignore[no-redef]
 
 try:
     from mobile.ui_primitives import ANDROID_UIAUTOMATOR
@@ -21,6 +35,168 @@ try:
     from selenium.webdriver.common.by import By
 except ModuleNotFoundError:  # pragma: no cover
     raise
+
+
+# Failure artifacts root.  Tests override via the ``root`` argument so we
+# can lazy-resolve here without binding to a CWD at import time.
+def _default_failure_root() -> Path:
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / "tmp" / "failures"
+
+
+_FAILURE_TS_TZ = timezone(timedelta(hours=8))
+
+
+def _slugify_scene(scene: str) -> str:
+    """Compress ``scene`` into a filesystem-safe slug ([a-z0-9_-]+)."""
+    cleaned = "".join(
+        c if c.isalnum() or c in ("-", "_") else "_" for c in scene.lower()
+    )
+    cleaned = cleaned.strip("_-") or "scene"
+    return cleaned[:48]
+
+
+def _config_hash(cfg: Any) -> str:
+    """Stable short hash of a config object's public attributes."""
+    if cfg is None:
+        return "none"
+    try:
+        if hasattr(cfg, "__dict__"):
+            payload = {
+                k: repr(v) for k, v in vars(cfg).items() if not k.startswith("_")
+            }
+        else:
+            payload = {"repr": repr(cfg)}
+        encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    except Exception:
+        encoded = repr(cfg)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:12]
+
+
+def capture_failure_artifacts(
+    bot,
+    scene: str,
+    *,
+    error: Optional[BaseException] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Persist UI XML, screenshot, and metadata for a failed run.
+
+    Output: ``tmp/failures/<YYYYmmdd-HHMMSS-mmm>_<scene>.{xml,png,json}``.
+    Best-effort — every step is wrapped so logging failures never crash the
+    caller (already inside an ``except`` block).
+
+    Args:
+        bot: A ``DamaiBot`` (or stand-in) exposing ``d`` (uiautomator2 device)
+            and ``config``.
+        scene: Short tag identifying the failure context (e.g. ``run_ticket``).
+        error: Optional exception that triggered the dump.
+        extra: Optional metadata fields merged into the JSON payload.
+        root: Override directory.  Defaults to ``<repo>/tmp/failures``.
+
+    Returns:
+        A dict describing which artifacts were written: keys ``xml``, ``png``,
+        ``json`` map to the absolute path (str) or ``None`` when that artifact
+        could not be produced.
+    """
+    out_root = root or _default_failure_root()
+    try:
+        out_root.mkdir(parents=True, exist_ok=True)
+    except Exception:  # pragma: no cover — directory creation is best-effort
+        log_event(
+            logger,
+            "failure_capture_skipped",
+            level=logging.WARNING,
+            scene=scene,
+            reason="mkdir_failed",
+            root=str(out_root),
+        )
+        return {"xml": None, "png": None, "json": None}
+
+    ts = datetime.now(tz=_FAILURE_TS_TZ).strftime("%Y%m%d-%H%M%S-%f")[:-3]
+    base = out_root / f"{ts}_{_slugify_scene(scene)}"
+    xml_path = base.with_suffix(".xml")
+    png_path = base.with_suffix(".png")
+    json_path = base.with_suffix(".json")
+
+    written: Dict[str, Any] = {"xml": None, "png": None, "json": None}
+    screenshot_failed = False
+
+    device = getattr(bot, "d", None)
+
+    try:
+        if device is not None and hasattr(device, "dump_hierarchy"):
+            xml_str = device.dump_hierarchy()
+            if isinstance(xml_str, bytes):
+                xml_path.write_bytes(xml_str)
+            else:
+                xml_path.write_text(xml_str or "", encoding="utf-8")
+            written["xml"] = str(xml_path)
+    except Exception as exc:
+        logger.debug(f"dump_hierarchy failed during artifact capture: {exc}")
+
+    try:
+        if device is not None and hasattr(device, "screenshot"):
+            shot = device.screenshot()
+            if shot is None:
+                screenshot_failed = True
+            elif hasattr(shot, "save"):
+                shot.save(str(png_path))
+                written["png"] = str(png_path)
+            elif isinstance(shot, (bytes, bytearray)):
+                png_path.write_bytes(bytes(shot))
+                written["png"] = str(png_path)
+            else:
+                screenshot_failed = True
+        else:
+            screenshot_failed = True
+    except Exception as exc:
+        screenshot_failed = True
+        logger.debug(f"screenshot failed during artifact capture: {exc}")
+
+    cfg = getattr(bot, "config", None)
+    serial = (
+        getattr(cfg, "serial", None)
+        or getattr(cfg, "device_serial", None)
+        or os.environ.get("ANDROID_SERIAL")
+    )
+    metadata: Dict[str, Any] = {
+        "timestamp": ts,
+        "scene": scene,
+        "device": serial or "unknown",
+        "damai_version": detect_damai_app_version(serial=serial) or "unknown",
+        "config_hash": _config_hash(cfg),
+        "screenshot_failed": screenshot_failed,
+        "xml_path": written["xml"],
+        "png_path": written["png"],
+    }
+    if error is not None:
+        metadata["error_type"] = type(error).__name__
+        metadata["error_message"] = str(error)
+    if extra:
+        metadata.update(extra)
+
+    try:
+        json_path.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        written["json"] = str(json_path)
+    except Exception as exc:  # pragma: no cover
+        logger.debug(f"failure metadata write failed: {exc}")
+
+    log_event(
+        logger,
+        "failure_captured",
+        level=logging.WARNING,
+        scene=scene,
+        xml=written["xml"] is not None,
+        png=written["png"] is not None,
+        json=written["json"] is not None,
+        screenshot_failed=screenshot_failed,
+    )
+    return written
 
 
 class RecoveryStrategiesMixin:
