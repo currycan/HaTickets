@@ -1,0 +1,55 @@
+name: E2E (dry-run, manual only)
+
+# 实验性 self-hosted runner 真机 E2E 框架。
+# 决策档案：reference/decisions/D-003-self-hosted-runner.md（status=postponed）
+# 启用条件：D-003 升级为 accepted 后，把 jobs.e2e.if 改成 true 并配置 self-hosted runner。
+# 当前默认不执行，仅保留 workflow_dispatch 入口供未来手动触发使用。
+
+on:
+  workflow_dispatch:
+    inputs:
+      android_device:
+        description: "目标设备（与 self-hosted runner label 对应）"
+        required: true
+        default: "pixel-7"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: e2e-dryrun-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: E2E probe (${{ inputs.android_device }})
+    if: false # D-003 = postponed；启用前请阅读 reference/decisions/D-003-self-hosted-runner.md
+    runs-on: [self-hosted, linux, android]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Probe run (read-only)
+        run: bash mobile/scripts/start_ticket_grabbing.sh --probe --yes
+
+      - name: Hot-path benchmark
+        run: bash mobile/scripts/benchmark_hot_path.sh --runs 3
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts-${{ github.run_id }}
+          path: tmp/
+          retention-days: 7
+          if-no-files-found: ignore
