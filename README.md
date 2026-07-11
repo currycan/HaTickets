@@ -2,6 +2,36 @@
 
 这个仓库不是票务展示站，而是一个“大麦抢票自动化工具箱”。
 
+> ✅ **适合你**：有一台安卓真机、能用命令行（会敲 `adb` / `poetry`）、想给自己或家人抢票。
+> ⛔ **不适合你**：没有安卓真机（iOS / 纯 PC / Mac 无真机都跑不了）、完全没碰过命令行、或期待“装个 App 点一下就抢”。这是一套需要动手配置的自动化工具，不是开箱即用的成品软件。
+
+## 目录
+
+- [适用人群与准入门槛](#适用人群与准入门槛)
+- [风险与合规提示](#风险与合规提示)
+- [推荐环境](#推荐环境) · [当前状态](#当前状态) · [方案状态](#方案状态) · [三个旗标的语义](#三个旗标的语义)
+- [五分钟跑通 Mobile](#五分钟跑通-mobile)（新用户从这里开始）
+- [退出码与运行摘要](#退出码与运行摘要)（无人值守 / 多设备编排）
+- [常见问题](#常见问题)
+- [其他方案](#其他方案) · [项目结构](#项目结构) · [开发与测试](#开发与测试)
+
+## 适用人群与准入门槛
+
+开始前请确认你**同时**满足下面的硬性条件，任一不满足都跑不通，不必往下折腾：
+
+| 门槛 | 说明 |
+| --- | --- |
+| 安卓真机 | Android 12~14 真机（模拟器易被风控）。**iOS、纯 PC / Mac 无真机均不可用** |
+| 命令行基础 | 会在终端敲命令、能看懂报错；本工具没有图形界面 |
+| adb 可用 | 电脑已装 `adb` 且 `adb devices` 能看到手机（不会装见[常见问题](#常见问题)第 1 条） |
+| 大麦已就绪 | 真机上大麦 App 已登录，且**观演人已提前在 App 内添加成功**（怎么加见[常见问题](#常见问题)第 4 条） |
+
+## 风险与合规提示
+
+- **账号风险**：自动化操作可能触发大麦风控，存在**限流甚至封号**的可能；模拟器比真机更容易触发。请自行评估后再用。
+- **仅限个人正当使用**：请勿用于黄牛倒票，或任何违反平台规则与法律法规的用途。
+- **风险自负**：一旦使用即代表你已知悉并自行承担全部后果，完整说明见 [DISCLAIMER.md](./DISCLAIMER.md)。
+
 ## 推荐环境
 
 | 组件      | 推荐版本                                  |
@@ -111,7 +141,7 @@ adb devices
 开始前先确认这两件事：
 
 - 真机里已经安装并登录大麦 App
-- 你要用到的观演人已经在大麦 App 里添加成功
+- 你要用到的观演人已经在大麦 App 里添加成功（不会加见[常见问题](#常见问题)第 4 条）
 
 #### 3.1 自动配置
 
@@ -360,7 +390,7 @@ flowchart TD
 
 | 退出码 | 含义 | 编排器建议动作 |
 |-------|------|--------------|
-| `0` | 成功（探测就绪 / 验证就绪 / 已提交订单 / 检测到待支付订单） | 结束 |
+| `0` | 成功（探测就绪 / 验证就绪 / 已提交订单 / 检测到待支付订单 / 探测发现账号既有未支付订单） | 结束 |
 | `10` | 所有重试失败（可重试型失败） | 可安全自动重启重试 |
 | `11` | 不可重试失败（`sold_out` / `session_invalid` / `session_not_found` / `reservation_only` / `attendee_unselected` / `submit_unverified`） | **绝不自动重启**——`submit_unverified` 场景重启可能重复下单 |
 | `12` | 配置或设备错误（配置解析/校验失败、设备连接失败、运行期设备异常） | 修复环境后再试；不建议盲目自动重启 |
@@ -376,7 +406,7 @@ flowchart TD
 | 字段 | 含义 |
 |------|------|
 | `schema_version` | 摘要 schema 版本，当前 `1` |
-| `outcome` | `probe_ready` / `validation_ready` / `order_submitted` / `order_pending_payment` / `success`（兜底）/ `retries_exhausted` / `terminal_failure` / `config_or_device_error` / `interrupted` |
+| `outcome` | `probe_ready` / `validation_ready` / `order_submitted` / `order_pending_payment` / `preexisting_pending_order`（探测到账号既有未支付订单，非本次提交）/ `success`（兜底）/ `retries_exhausted` / `terminal_failure` / `config_or_device_error` / `interrupted` |
 | `exit_code` | 与进程退出码一致 |
 | `serial` | 本次生效的设备序列号（含 `--serial` 覆盖后的值），未配置为 `null` |
 | `mode` | `probe` / `validation` / `submit`；初始化失败时为 `null` |
@@ -482,6 +512,8 @@ export PATH="$ANDROID_HOME/platform-tools:$PATH"
 - `mobile/config.jsonc` 里的 `users` 写的是占位符，不是真实名字
 - 你的大麦账号里还没有配置对应观演人
 
+**如何在大麦 App 里添加观演人**：打开大麦 App →「我的」→「观演人 / 常用观演人」→「添加」，填写真实姓名与证件信息并保存。配置里的 `users` 必须与这里保存的姓名**逐字一致**（含中英文、空格），`users` 的人数就是购票张数。
+
 ### 5. 脚本没有进入确认页
 
 通常先查这几项：
@@ -529,13 +561,18 @@ export PATH="$ANDROID_HOME/platform-tools:$PATH"
 - 当前官方渠道限制和风控已经让这条方案失去稳定可用性
 - 继续折腾 `desktop` 的投入产出很差
 
-如果你只是想真正跑通抢票流程，请回到上面的 `五分钟跑通 Mobile`。
+如果你只是想真正跑通抢票流程，请回到上面的 [五分钟跑通 Mobile](#五分钟跑通-mobile)。
+
+<details>
+<summary>仅存档：Desktop 历史启动命令（已不可用，不建议执行）</summary>
 
 ```bash
 cd desktop
 yarn install
 yarn tauri dev
 ```
+
+</details>
 
 ## 项目结构
 
