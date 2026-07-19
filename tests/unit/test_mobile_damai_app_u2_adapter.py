@@ -15,7 +15,7 @@ from mobile.damai_app import DamaiBot
 from mobile.hot_path_benchmark import _fast_check_detail_page
 
 
-def _u2_config():
+def _u2_config(*, probe_only=True):
     return Config(
         server_url=None,
         device_name="Android",
@@ -30,7 +30,7 @@ def _u2_config():
         price="799元",
         price_index=1,
         if_commit_order=False,
-        probe_only=True,
+        probe_only=probe_only,
         driver_backend="u2",
     )
 
@@ -40,6 +40,7 @@ class TestU2SetupAndCoreAdapters:
         mock_d = Mock()
         mock_d.settings = {}
         mock_d.app_start = Mock()
+        mock_d.app_current.return_value = {"package": "cn.damai"}
         with patch("uiautomator2.connect", return_value=mock_d) as connect:
             bot = DamaiBot(config=_u2_config())
 
@@ -49,6 +50,7 @@ class TestU2SetupAndCoreAdapters:
         assert bot.wait is None
         assert mock_d.settings["wait_timeout"] == 0
         assert mock_d.settings["operation_delay"] == (0, 0)
+        mock_d.app_start.assert_not_called()
 
     def test_setup_u2_driver_tolerates_non_mapping_settings(self):
         class _DummySettings:
@@ -57,11 +59,12 @@ class TestU2SetupAndCoreAdapters:
         mock_d = Mock()
         mock_d.settings = _DummySettings()
         mock_d.app_start = Mock()
+        mock_d.app_current.return_value = {"package": "cn.damai"}
         with patch("uiautomator2.connect", return_value=mock_d):
             bot = DamaiBot(config=_u2_config())
 
         assert bot.driver is mock_d
-        mock_d.app_start.assert_called_once()
+        mock_d.app_start.assert_not_called()
 
     def test_find_all_u2_id_uses_xpath_matches(self):
         bot = DamaiBot(config=_u2_config(), setup_driver=False)
@@ -260,7 +263,7 @@ class TestU2SearchHotPath:
              patch.object(bot, "_press_keycode_safe", return_value=True), \
              patch.object(bot, "_has_element", return_value=False), \
              patch.object(bot, "_find_all", return_value=[Mock()]), \
-             patch("mobile.damai_app.time.sleep"):
+             patch("mobile.event_navigator.time.sleep"):
             assert bot._submit_search_keyword() is True
 
         search_input.set_text.assert_called_once_with(bot.config.keyword)
@@ -276,9 +279,32 @@ class TestU2SearchHotPath:
              patch.object(bot, "_press_keycode_safe", return_value=True), \
              patch.object(bot, "_has_element", return_value=False), \
              patch.object(bot, "_find_all", return_value=[]), \
-             patch("mobile.damai_app.time.sleep"), \
-             patch("mobile.damai_app.time.time", side_effect=[0.0, 4.0] + [99.0] * 20):
+             patch("mobile.event_navigator.time.sleep"), \
+             patch("mobile.event_navigator._monotonic", side_effect=[0.0, 4.0]):
             assert bot._submit_search_keyword() is False
+
+    def test_search_poll_ignores_wall_clock_jump(self):
+        bot = DamaiBot(config=_u2_config(), setup_driver=False)
+        search_input = Mock()
+        search_input.text = ""
+        search_input.set_text = Mock()
+        wall_time = Mock()
+        wall_time.time.side_effect = [0.0, 10**12]
+
+        with patch.object(bot, "_wait_for_element", return_value=search_input), \
+             patch.object(bot, "_click_element_center"), \
+             patch.object(bot, "_read_element_text", side_effect=["", ""]), \
+             patch.object(bot, "_press_keycode_safe", return_value=True), \
+             patch.object(bot, "_has_element", return_value=False), \
+             patch.object(bot, "_find_all", side_effect=[[], [Mock()]]), \
+             patch("mobile.event_navigator.time", wall_time), \
+             patch(
+                 "mobile.event_navigator._monotonic",
+                 side_effect=[10.0, 10.0, 10.1],
+             ):
+            assert bot._submit_search_keyword() is True
+
+        wall_time.time.assert_not_called()
 
     def test_open_target_from_search_results_returns_details_when_opened(self):
         bot = DamaiBot(config=_u2_config(), setup_driver=False)
@@ -341,7 +367,10 @@ class TestDiscoverKeywordRetryNavigation:
 
     def test_retry_on_search_page_dismisses_popup_and_submits(self):
         """Happy path: still on search_page after first keyword, dismiss popup and retry."""
-        bot = DamaiBot(config=_u2_config(), setup_driver=False)
+        bot = DamaiBot(
+            config=_u2_config(probe_only=False),
+            setup_driver=False,
+        )
         bot.config.keyword = "陈慧娴 演唱会"
         call_order = []
 
@@ -375,7 +404,10 @@ class TestDiscoverKeywordRetryNavigation:
 
     def test_retry_exits_detail_page_then_submits(self):
         """After first keyword, landed on detail_page → exit context → search_page → retry."""
-        bot = DamaiBot(config=_u2_config(), setup_driver=False)
+        bot = DamaiBot(
+            config=_u2_config(probe_only=False),
+            setup_driver=False,
+        )
         bot.config.keyword = "陈慧娴 演唱会"
 
         probe_states = iter([
@@ -408,7 +440,10 @@ class TestDiscoverKeywordRetryNavigation:
 
     def test_retry_from_homepage_opens_search_then_submits(self):
         """After first keyword, landed on homepage → open search → retry."""
-        bot = DamaiBot(config=_u2_config(), setup_driver=False)
+        bot = DamaiBot(
+            config=_u2_config(probe_only=False),
+            setup_driver=False,
+        )
         bot.config.keyword = "陈慧娴 演唱会"
 
         probe_states = iter([
@@ -441,7 +476,10 @@ class TestDiscoverKeywordRetryNavigation:
 
     def test_retry_skips_keyword_but_tries_remaining_on_unknown_state(self):
         """Unknown state after retry → skip that keyword with continue, try next."""
-        bot = DamaiBot(config=_u2_config(), setup_driver=False)
+        bot = DamaiBot(
+            config=_u2_config(probe_only=False),
+            setup_driver=False,
+        )
         bot.config.keyword = "陈慧娴 演唱会"
 
         probe_states = iter([
@@ -473,7 +511,10 @@ class TestDiscoverKeywordRetryNavigation:
 
     def test_retry_homepage_open_search_fails_continues_to_next(self):
         """homepage but _open_search_from_homepage fails → skip keyword, try next."""
-        bot = DamaiBot(config=_u2_config(), setup_driver=False)
+        bot = DamaiBot(
+            config=_u2_config(probe_only=False),
+            setup_driver=False,
+        )
         bot.config.keyword = "陈慧娴 演唱会"
 
         probe_states = iter([
@@ -506,7 +547,10 @@ class TestDiscoverKeywordRetryNavigation:
 
     def test_retry_exits_sku_page_then_submits(self):
         """After first keyword, landed on sku_page → exit context → search_page → retry."""
-        bot = DamaiBot(config=_u2_config(), setup_driver=False)
+        bot = DamaiBot(
+            config=_u2_config(probe_only=False),
+            setup_driver=False,
+        )
         bot.config.keyword = "陈慧娴 演唱会"
 
         probe_states = iter([
@@ -539,7 +583,10 @@ class TestDiscoverKeywordRetryNavigation:
 
     def test_retry_shortcircuits_when_exit_lands_on_target(self):
         """_exit_non_target_event_context returns target-matching detail_page → return success."""
-        bot = DamaiBot(config=_u2_config(), setup_driver=False)
+        bot = DamaiBot(
+            config=_u2_config(probe_only=False),
+            setup_driver=False,
+        )
         bot.config.keyword = "陈慧娴 演唱会"
 
         probe_states = iter([

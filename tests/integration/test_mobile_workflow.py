@@ -1,11 +1,27 @@
 """Integration tests for mobile module workflow."""
 
 import json
+import time
 from unittest.mock import Mock, patch
 
+import pytest
 
 from mobile.config import Config
 from mobile.damai_app import DamaiBot
+from mobile.damai_app.submit_journal import (
+    bind_process_device_identity,
+    reset_process_device_identity,
+)
+
+
+@pytest.fixture(autouse=True)
+def _bind_test_physical_device_identity():
+    """Give mocked formal workflows an explicit canonical device identity."""
+    token = bind_process_device_identity(None, "TEST-PHYSICAL-DEVICE")
+    try:
+        yield
+    finally:
+        reset_process_device_identity(token)
 
 
 def _make_mock_element(x=100, y=200, width=50, height=40):
@@ -18,9 +34,19 @@ def _make_mock_element(x=100, y=200, width=50, height=40):
 def _make_mock_u2_device():
     """Create a mock u2 device with the attributes DamaiBot._setup_driver expects."""
     device = Mock()
+    device.serial = "TESTSERIAL"
     device.app_current = Mock(return_value={"package": "cn.damai"})
     device.settings = {}
     device.shell = Mock(return_value="")
+    device.dump_hierarchy = Mock(return_value="<hierarchy/>")
+
+    def absent_selector(**_kwargs):
+        selector = Mock()
+        selector.exists = False
+        selector.wait = Mock(return_value=False)
+        return selector
+
+    device.side_effect = absent_selector
     return device
 
 
@@ -82,9 +108,63 @@ class TestFullTicketGrabbingFlow:
             mock_device.execute_script = Mock()
 
             bot = DamaiBot()
+
+            def formal_submit_boundary():
+                proof = {
+                    "resource_id": "cn.damai:id/btn_submit",
+                    "package": "cn.damai",
+                    "activity": "OrderConfirmActivity",
+                    "layout_digest": "integration-confirm-layout",
+                    "token": ("integration-submit-boundary",),
+                    "fields": (("target_title", "test", ("test",)),),
+                    "selected_names": ("A",),
+                    "selected_row_count": 1,
+                    "quantity": 1,
+                    "observed_at": time.monotonic(),
+                    "run_generation": bot._run_generation,
+                }
+                bot._last_formal_submit_boundary = proof
+                return proof
+
+            def verified_payment_result(timeout=5):
+                context = bot._active_submit_verification_context(
+                    observed_at=time.monotonic(),
+                    timeout=timeout,
+                )
+                assert context is not None
+                assert bot._remember_bound_submit_result(
+                    "success",
+                    context,
+                    activity="integration.PaymentActivity",
+                )
+                return "success"
+
             with \
                 patch.object(bot, "dismiss_startup_popups"), \
                 patch.object(bot, "check_session_valid", return_value=True), \
+                patch.multiple(
+                    bot,
+                    _current_page_matches_target=Mock(return_value=True),
+                    _ensure_target_session=Mock(
+                        side_effect=lambda probe: probe
+                    ),
+                    _reverify_formal_session_after_sku_recovery=Mock(
+                        side_effect=lambda probe: probe
+                    ),
+                    _get_price_option_coordinates_by_config_index=Mock(
+                        return_value=(300, 1200)
+                    ),
+                    _get_buy_button_coordinates=Mock(
+                        return_value=(540, 2000)
+                    ),
+                    _ensure_formal_quantity_and_transition_snapshot=Mock(
+                        return_value={"buy_coords": (540, 2000)}
+                    ),
+                    _formal_order_context_is_verified=Mock(return_value=True),
+                    _formal_submit_boundary_snapshot=Mock(
+                        side_effect=formal_submit_boundary
+                    ),
+                ), \
                 patch.object(bot, "wait_for_sale_start"), \
                 patch.object(bot, "select_performance_date"), \
                 patch.object(
@@ -101,6 +181,8 @@ class TestFullTicketGrabbingFlow:
                 patch.object(bot, "_select_price_option", return_value=True), \
                 patch.object(bot, "_has_element", return_value=False), \
                 patch.object(bot, "ultra_fast_click", return_value=True), \
+                patch.object(bot, "_wait_for_element", return_value=mock_el), \
+                patch.object(bot, "_click_element_center"), \
                 patch.object(bot, "_wait_for_submit_ready", return_value=True), \
                 patch.object(
                     bot, "_ensure_attendees_selected_on_confirm_page", return_value=True
@@ -116,7 +198,11 @@ class TestFullTicketGrabbingFlow:
                         "submit_button": True,
                     },
                 ), \
-                patch.object(bot, "verify_order_result", return_value="success"), \
+                patch.object(
+                    bot,
+                    "verify_order_result",
+                    side_effect=verified_payment_result,
+                ), \
                 patch.object(
                     bot,
                     "probe_current_page",
@@ -162,6 +248,13 @@ class TestFullTicketGrabbingFlow:
             with \
                 patch.object(bot, "dismiss_startup_popups"), \
                 patch.object(bot, "check_session_valid", return_value=True), \
+                patch.multiple(
+                    bot,
+                    _current_page_matches_target=Mock(return_value=True),
+                    _ensure_target_session=Mock(
+                        side_effect=lambda probe: probe
+                    ),
+                ), \
                 patch.object(bot, "wait_for_sale_start"), \
                 patch.object(bot, "select_performance_date"), \
                 patch.object(

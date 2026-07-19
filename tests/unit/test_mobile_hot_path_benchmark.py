@@ -426,7 +426,10 @@ def test_run_one_returns_success_elapsed_and_timeline():
     bot.run_ticket_grabbing.return_value = True
     bot.probe_current_page.return_value = {"state": "order_confirm_page", "submit_button": True}
 
-    with patch("mobile.hot_path_benchmark.time.time", side_effect=[0.0, 3.5]):
+    with patch(
+        "mobile.hot_path_benchmark.time.monotonic",
+        side_effect=[0.0, 3.5],
+    ):
         success, elapsed, final_probe, timeline = _run_one(bot, {"state": "detail_page"}, "第 1 轮")
 
     assert success is True
@@ -458,7 +461,10 @@ def test_run_benchmark_collects_results_and_recovery():
     bot._get_current_activity.return_value = ".trade.newtradeorder.ui.projectdetail.ui.activity.ProjectDetailActivity"
 
     with patch("mobile.hot_path_benchmark._require_detail_start", return_value={"state": "detail_page"}), \
-         patch("mobile.hot_path_benchmark.time.time", side_effect=[0.0, 8.1, 9.0, 12.6, 13.0, 18.9]):
+         patch(
+             "mobile.hot_path_benchmark.time.monotonic",
+             side_effect=[0.0, 8.1, 9.0, 12.6, 13.0, 18.9],
+         ):
         payload = run_benchmark(bot, runs=2)
 
     assert payload["title"] == "【成都】顽童MJ116 OGS巡回演唱会-成都站"

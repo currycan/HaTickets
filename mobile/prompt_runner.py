@@ -29,6 +29,7 @@ try:
         validate_config_dict,
     )
     from mobile.damai_app import DamaiBot
+    from mobile.item_resolver import normalize_text
     from mobile.logger import get_logger
     from mobile.proc_utils import run_captured
     from mobile.prompt_parser import (
@@ -50,6 +51,7 @@ except ImportError:
         validate_config_dict,
     )
     from damai_app import DamaiBot
+    from item_resolver import normalize_text
     from logger import get_logger
     from proc_utils import run_captured
     from prompt_parser import (
@@ -521,13 +523,49 @@ def _format_summary(intent, discovery, chosen_price):
 def _success_detail_for_mode(mode: str, target_config: str | None = None) -> str:
     if mode == "summary":
         return (
-            "已识别目标演出并输出摘要。你现在可以根据推荐票档继续执行 apply / probe。"
+            "已识别目标演出并输出摘要。请先用 apply 写入并检查精确配置，"
+            "手动打开目标详情页后再执行只读 probe。"
         )
     if mode == "apply":
         return f"已更新配置文件：{target_config}。接下来可以执行 start_ticket_grabbing.sh 或继续用 prompt 的 probe 模式。"
     if mode == "probe":
-        return "安全探测完成：脚本已验证目标演出页和关键购票控件。"
+        return "安全探测完成：已只读验证现有配置对应的目标演出页和关键购票控件。"
     return "任务已成功完成。"
+
+
+def _prompt_matches_existing_probe_target(intent, config) -> bool:
+    """Require prompt probe to name the already-configured exact target.
+
+    Prompt ``probe`` is observation-only. It must not discover or navigate to
+    a different event, so the prompt may only select the exact target already
+    stored in the local config. ``apply`` remains the configuration workflow.
+    """
+    configured_title = normalize_text(getattr(config, "target_title", None))
+    if not configured_title:
+        return False
+
+    requested_candidates = [
+        getattr(intent, "search_keyword", None),
+        *(getattr(intent, "candidate_keywords", None) or []),
+    ]
+    configured_candidates = {
+        configured_title,
+        normalize_text(getattr(config, "keyword", None)),
+    }
+    requested = {
+        normalize_text(candidate)
+        for candidate in requested_candidates
+        if normalize_text(candidate)
+    }
+    if not requested.intersection(configured_candidates):
+        return False
+
+    for intent_attr, config_attr in (("city", "city"), ("date", "date")):
+        requested_value = normalize_text(getattr(intent, intent_attr, None))
+        configured_value = normalize_text(getattr(config, config_attr, None))
+        if requested_value and requested_value != configured_value:
+            return False
+    return True
 
 
 def _prompt_yes_no(message: str) -> bool:
@@ -724,7 +762,10 @@ def parse_args(argv=None):
         "--mode",
         choices=["summary", "apply", "probe"],
         default="summary",
-        help="summary=只查询摘要；apply=写配置不执行；probe=写配置并执行探测",
+        help=(
+            "summary=查询摘要；apply=写配置不执行；"
+            "probe=使用现有精确配置在当前详情页执行只读探测"
+        ),
     )
     parser.add_argument(
         "-y", "--yes", action="store_true", help="自动确认，不再交互提问"
@@ -816,6 +857,54 @@ def main(argv=None):
             }
         )
 
+        if args.mode == "probe":
+            if not _prompt_matches_existing_probe_target(intent, base_config):
+                _print_result(
+                    False,
+                    "提示词安全探测只允许读取配置中已有的精确 target_title，"
+                    "且提示词中的演出、城市和日期必须与现有配置一致。"
+                    "请先使用 --mode apply 更新配置，再手动打开目标演出详情页。",
+                )
+                return 1
+
+            target_title = base_config.target_title
+            probe_config = Config(
+                **{
+                    **base_config.to_dict(),
+                    "keyword": target_title,
+                    "if_commit_order": False,
+                    "probe_only": True,
+                    "auto_navigate": False,
+                }
+            )
+            bot = DamaiBot(config=probe_config)
+            page_probe = bot.probe_current_page()
+            observed_title = normalize_text(page_probe.get("observed_title"))
+            if (
+                page_probe.get("state") != "detail_page"
+                or observed_title != normalize_text(target_title)
+            ):
+                _print_result(
+                    False,
+                    "安全探测保持只读：当前不是配置中的精确目标详情页，"
+                    "未执行返回、搜索、输入、结果点击或购票入口点击。"
+                    "请手动打开目标演出详情页后重试。",
+                )
+                return 1
+
+            success = bot.run_with_retry(
+                max_retries=1,
+                initial_page_probe=page_probe,
+            )
+            if success:
+                _print_result(True, _success_detail_for_mode(args.mode))
+            else:
+                _print_result(
+                    False,
+                    "安全探测没有通过；本次未执行导航、购买或提交操作。",
+                )
+            return 0 if success else 1
+
         query_config = Config(
             **{
                 **base_config.to_dict(),
@@ -823,7 +912,10 @@ def main(argv=None):
                 "target_title": None,
                 "target_venue": None,
                 "if_commit_order": False,
-                "probe_only": True,
+                # Discovery is an explicit non-submitting navigation
+                # capability.  probe_only is reserved for observation-only
+                # runs and is guarded against Back/search/input/result taps.
+                "probe_only": False,
                 "city": intent.city or base_config.city,
                 "date": intent.date or base_config.date,
                 "price": intent.price_hint or base_config.price,
@@ -855,7 +947,7 @@ def main(argv=None):
             _print_result(True, _success_detail_for_mode(args.mode))
             return 0
 
-        # apply / probe 模式：is_actionable=False 时拒绝写残缺 config
+        # probe 已在上方只读返回；apply 模式拒绝写入残缺 config。
         if not parse_result.is_actionable():
             if not _handle_unactionable_apply(
                 parse_result, force_non_interactive=args.non_interactive
@@ -925,7 +1017,7 @@ def main(argv=None):
             _print_result(True, _success_detail_for_mode(args.mode, target_config))
             return 0
 
-        bot.config = next_config
+        bot._replace_config(next_config)
         bot.item_detail = None
         # Reuse the already-confirmed page probe to skip a redundant re-probe and
         # activate fast_validation_hot_path (skips dismiss_startup_popups + session check).

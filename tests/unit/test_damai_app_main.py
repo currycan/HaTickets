@@ -36,6 +36,7 @@ SUMMARY_KEYS = {
     "attempts",
     "duration_ms",
     "terminal_reason",
+    "submit_intent",
     "started_at",
     "finished_at",
 }

@@ -35,9 +35,9 @@ class TestExitCodeContract:
         assert EXIT_RETRIES_EXHAUSTED == 10
         assert EXIT_TERMINAL_FAILURE == 11
         assert EXIT_CONFIG_OR_DEVICE_ERROR == 12
-        assert EXIT_LOCK_CONFLICT == 13  # reserved（U-15），本轮任何路径不返回
+        assert EXIT_LOCK_CONFLICT == 13
         assert EXIT_INTERRUPTED == 130
-        assert RUN_SUMMARY_SCHEMA_VERSION == 1
+        assert RUN_SUMMARY_SCHEMA_VERSION == 2
         assert RESULT_JSON_ENV_VAR == "HATICKETS_RESULT_JSON"
         assert DEFAULT_RESULT_JSON == "tmp/run_summary.json"
 

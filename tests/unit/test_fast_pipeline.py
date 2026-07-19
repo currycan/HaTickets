@@ -23,22 +23,22 @@ class TestPollUntil:
     """Tests for the generic poll_until utility."""
 
     def test_returns_true_when_condition_met_immediately(self):
-        deadline = time.time() + 5.0
+        deadline = time.monotonic() + 5.0
         result = poll_until(lambda: True, deadline=deadline)
         assert result is True
 
     def test_returns_false_on_timeout(self):
-        deadline = time.time() + 0.1
+        deadline = time.monotonic() + 0.1
         result = poll_until(lambda: False, deadline=deadline, interval_s=0.02)
         assert result is False
 
     def test_respects_deadline_timing(self):
         """Elapsed time should be close to the deadline window, not much longer."""
         timeout = 0.2
-        start = time.time()
+        start = time.monotonic()
         deadline = start + timeout
         result = poll_until(lambda: False, deadline=deadline, interval_s=0.02)
-        elapsed = time.time() - start
+        elapsed = time.monotonic() - start
         assert result is False
         # Should finish within timeout + a small margin (one extra sleep cycle)
         assert elapsed < timeout + 0.1
@@ -50,10 +50,29 @@ class TestPollUntil:
             counter["n"] += 1
             return counter["n"] >= 3
 
-        deadline = time.time() + 5.0
+        deadline = time.monotonic() + 5.0
         result = poll_until(condition, deadline=deadline, interval_s=0.01)
         assert result is True
         assert counter["n"] >= 3
+
+    def test_wall_clock_jump_does_not_expire_monotonic_deadline(self):
+        counter = {"n": 0}
+        wall_time = Mock()
+        wall_time.time.side_effect = [0.0, 10**12]
+
+        def condition():
+            counter["n"] += 1
+            return counter["n"] == 2
+
+        with patch("mobile.fast_pipeline.time", wall_time), patch(
+            "mobile.fast_pipeline._monotonic",
+            side_effect=[100.0, 100.1],
+        ):
+            result = poll_until(condition, deadline=101.0, interval_s=0.01)
+
+        assert result is True
+        assert counter["n"] == 2
+        wall_time.time.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -130,11 +149,12 @@ class TestRunColdDeadline:
         device.return_value = mock_element
 
         config = Mock()
+        config.if_commit_order = False
         fp = FastPipeline(device, config, probe=False, guard=Mock())
 
-        start = time.time()
+        start = time.monotonic()
         result = fp.run_cold(start)
-        elapsed = time.time() - start
+        elapsed = time.monotonic() - start
 
         assert result is None
         # Must finish within the 5s deadline + a small margin
@@ -156,6 +176,7 @@ class TestRunWarmFast:
         device.return_value = mock_element
 
         config = Mock()
+        config.if_commit_order = False
         fp = FastPipeline(device, config, probe=False, guard=Mock())
         fp._cached_coords = {
             "detail_buy": (540, 1700),
@@ -165,9 +186,9 @@ class TestRunWarmFast:
             "city": (300, 400),
         }
 
-        start = time.time()
+        start = time.monotonic()
         result = fp.run_warm(start)
-        elapsed = time.time() - start
+        elapsed = time.monotonic() - start
 
         assert result is True
         # Should complete well under 1s
@@ -181,6 +202,7 @@ class TestRunWarmFast:
         device.return_value = mock_element
 
         config = Mock()
+        config.if_commit_order = False
         fp = FastPipeline(device, config, probe=False, guard=Mock())
         fp._cached_coords = {
             "detail_buy": (540, 1700),
@@ -190,9 +212,9 @@ class TestRunWarmFast:
         }
 
         # Use a very short deadline to keep the test fast
-        start = time.time()
+        start = time.monotonic()
         result = fp.run_warm(start - _PIPELINE_DEADLINE_S + 0.15)
-        elapsed = time.time() - start
+        elapsed = time.monotonic() - start
 
         assert result is None
         assert elapsed < 1.0
@@ -205,6 +227,7 @@ class TestRunWarmFast:
         device.return_value = mock_element
 
         config = Mock()
+        config.if_commit_order = False
         fp = FastPipeline(device, config, probe=False, guard=Mock())
         fp._cached_coords = {
             "detail_buy": (540, 1700),
@@ -214,7 +237,7 @@ class TestRunWarmFast:
             "city": (300, 400),
         }
 
-        result = fp.run_warm(time.time())
+        result = fp.run_warm(time.monotonic())
         assert result is True
 
         # The first shell call should be the city+detail_buy batch
@@ -255,7 +278,7 @@ class TestValidationHelpers:
     def test_wait_for_purchase_entry_uses_lightweight_timeout(self):
         fp, bot, _device = self._make_validation_pipeline()
 
-        result = fp._wait_for_purchase_entry(time.time() + 1.0)
+        result = fp._wait_for_purchase_entry(time.monotonic() + 1.0)
 
         assert result == {"state": "sku_page"}
         bot._wait_for_purchase_entry_result.assert_called_once()
@@ -276,7 +299,7 @@ class TestValidationHelpers:
             patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=True), \
             patch.object(fp, "_select_price_with_pipeline") as select_price, \
             patch.object(fp, "_finish_confirm", return_value=True) as finish_confirm:
-            result = fp.run_cold_validation(start_time=time.time())
+            result = fp.run_cold_validation(start_time=time.monotonic())
         # fmt: on
 
         assert result is True

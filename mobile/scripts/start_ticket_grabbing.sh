@@ -5,7 +5,7 @@
 #   正式抢票: ./start_ticket_grabbing.sh --commit [--yes] [--config mobile/config.local.jsonc]
 
 # ══ 参数解析与模式判定（U-02 / U-01）══
-# 必须先于一切副作用（poetry 预检、adb、配置改写）执行：
+# 必须先于一切副作用（poetry 预检、adb、启动子进程）执行：
 # - 未知参数一律 fail-fast，防止 --porbe 等 typo 静默直达真实下单
 # - --commit 是真实下单的唯一授权旗标；--yes 只跳过普通确认，不再能单独触发真下单
 
@@ -17,7 +17,7 @@ usage() {
 
 参数:
   --probe               安全探测模式，停在“立即购票”之前，绝不下单
-  --commit              正式抢票模式，唯一会把配置写为真实下单(if_commit_order=true)的旗标
+  --commit              正式抢票模式，唯一会给本次进程授予真实提交权限的旗标
   -y, --yes             跳过普通交互确认；不再能单独授权真实下单（真下单必须显式 --commit）
   --config <path>       显式指定配置文件（亦支持 --config=<path>）
   --serial <serial>     覆盖配置中的 serial（U-12，经 HATICKETS_SERIAL 环境变量透传，
@@ -26,7 +26,8 @@ usage() {
   -h, --help            显示本帮助
 
 退出码（U-12，供 cron/systemd 编排消费，详见 README「退出码与运行摘要」）:
-  0=成功  10=重试耗尽  11=不可重试失败(勿自动重启)  12=配置/设备错误  130=用户中断
+  0=成功  10=重试耗尽  11=不可重试失败(勿自动重启)  12=配置/设备错误
+  13=同一设备已有实例运行  130=用户中断
   （脚本自身 pre-flight 失败仍用 1-4，编排器按 >=10 判定 run 层结果）
 
 注意:
@@ -158,43 +159,48 @@ if [ "$COMMIT_MODE" = true ] && [ "$ASSUME_YES" = false ] && [ ! -t 0 ]; then
     exit 1
 fi
 
-# 依赖预检：Poetry + 关键 Python 包（issue #32）
-if ! command -v poetry >/dev/null 2>&1; then
-    echo "❌ Poetry 未安装。请先安装 Poetry: https://python-poetry.org/docs/#installation"
-    exit 2
-fi
+# 解析项目目录并选择本次运行唯一使用的 Python：
+# 1) 优先复用项目 .venv（无需 Poetry 命令仍可运行）；
+# 2) 其次复用 Poetry 已创建的环境；
+# 3) 两者都没有时只用系统 Python 做版本诊断，不直接作为运行环境。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PYTHON_BIN=""
+PYTHON_ENV_SOURCE=""
 
-if ! poetry run python -c "import selenium, uiautomator2, adbutils" >/dev/null 2>&1; then
-    echo "⚠ 检测到关键 Python 依赖缺失（selenium / uiautomator2 / adbutils）"
-    echo "→ 自动执行: poetry install"
-    if ! poetry install; then
-        echo "❌ poetry install 失败。请手动检查 pyproject.toml 与网络后重试。"
-        exit 3
+if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
+    PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+    PYTHON_ENV_SOURCE="project_venv"
+elif command -v poetry >/dev/null 2>&1; then
+    POETRY_PYTHON="$(
+        cd "$ROOT_DIR" &&
+        poetry env info --executable 2>/dev/null
+    )" || POETRY_PYTHON=""
+    if [ -n "$POETRY_PYTHON" ] && [ -x "$POETRY_PYTHON" ]; then
+        PYTHON_BIN="$POETRY_PYTHON"
+        PYTHON_ENV_SOURCE="poetry"
+    else
+        PYTHON_ENV_SOURCE="poetry_uninitialized"
     fi
 fi
 
-if [ "$PROBE_MODE" = true ]; then
-    echo "🛡️ 启动大麦安全探测脚本..."
-else
-    echo "🎫 启动大麦抢票脚本..."
+if [ -z "$PYTHON_BIN" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python3)"
+    elif command -v python >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python)"
+    else
+        echo "❌ 未找到可用的 Python 解释器（python3 / python / .venv/bin/python 均不存在）"
+        exit 4
+    fi
+    if [ -z "$PYTHON_ENV_SOURCE" ]; then
+        PYTHON_ENV_SOURCE="system"
+    fi
 fi
 
-# Python 版本检查（早期 fail-fast，避免后续 poetry/import 失败信息混乱）
+# Python 版本检查必须早于依赖 import，避免 3.14 等不支持版本先报出误导性的缺包信息。
 # 推荐 3.10~3.13；3.8/3.9 给警告（兼容老用户）；其他报错退出（含 3.14 — uiautomator2/selenium wheel 未就绪，issue #21）
-_HATICKETS_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_HATICKETS_ROOT_DIR="$(cd "$_HATICKETS_SCRIPT_DIR/../.." && pwd)"
-if [ -x "$_HATICKETS_ROOT_DIR/.venv/bin/python" ]; then
-    _HATICKETS_PYBIN="$_HATICKETS_ROOT_DIR/.venv/bin/python"
-elif command -v python3 >/dev/null 2>&1; then
-    _HATICKETS_PYBIN="$(command -v python3)"
-elif command -v python >/dev/null 2>&1; then
-    _HATICKETS_PYBIN="$(command -v python)"
-else
-    echo "❌ 未找到可用的 Python 解释器（python3 / python / .venv/bin/python 均不存在）"
-    exit 4
-fi
-
-PY_VERSION="$("$_HATICKETS_PYBIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)"
+PY_VERSION="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)"
 case "$PY_VERSION" in
     3.10|3.11|3.12|3.13)
         # 已在 CI 验证，静默通过
@@ -204,7 +210,7 @@ case "$PY_VERSION" in
         ;;
     "")
         # ${} 必须保留：macOS bash 3.2 下 $VAR 紧跟全角字符会吞掉变量值（真机实测）
-        echo "❌ 无法获取 Python 版本号（解释器：${_HATICKETS_PYBIN}）"
+        echo "❌ 无法获取 Python 版本号（解释器：${PYTHON_BIN}）"
         exit 4
         ;;
     *)
@@ -213,10 +219,36 @@ case "$PY_VERSION" in
         exit 4
         ;;
 esac
-unset _HATICKETS_SCRIPT_DIR _HATICKETS_ROOT_DIR _HATICKETS_PYBIN
 
-# 解析目录，确保从任意目录执行都能找到配置文件与虚拟环境
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 版本通过后再检查环境与依赖。启动脚本绝不在抢票前临场安装依赖：
+# 安装可能受网络影响并引入不可控延迟，必须由用户在准备阶段显式完成。
+if [ "$PYTHON_ENV_SOURCE" = "system" ]; then
+    echo "❌ 未找到项目 .venv，且 Poetry 未安装。"
+    echo "   请先安装 Poetry，再在仓库根目录运行: poetry install"
+    echo "   Poetry 安装说明: https://python-poetry.org/docs/#installation"
+    exit 2
+fi
+
+if [ "$PYTHON_ENV_SOURCE" = "poetry_uninitialized" ]; then
+    echo "❌ Poetry 环境尚未准备好。启动脚本不会自动安装依赖。"
+    echo "   请先在仓库根目录运行: poetry install"
+    exit 3
+fi
+
+if ! "$PYTHON_BIN" -c "import selenium, uiautomator2, adbutils" >/dev/null 2>&1; then
+    echo "❌ 当前 Python 环境缺少关键依赖（selenium / uiautomator2 / adbutils）。"
+    echo "   启动脚本不会自动安装依赖，以免在开抢前产生不可控延迟。"
+    echo "   请先在仓库根目录显式运行: poetry install"
+    exit 3
+fi
+
+unset POETRY_PYTHON
+
+if [ "$PROBE_MODE" = true ]; then
+    echo "🛡️ 启动大麦安全探测脚本..."
+else
+    echo "🎫 启动大麦抢票脚本..."
+fi
 
 # 启动预检（U-05）：与 run_from_prompt.sh 共享同一函数库。
 # ANDROID_HOME 软化：adb 已在 PATH（如 brew install android-platform-tools）
@@ -224,7 +256,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/preflight.sh"
 preflight_check_adb || exit 1
 MOBILE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DEFAULT_CONFIG_FILE="$MOBILE_DIR/config.jsonc"
 if [ -n "$CONFIG_OVERRIDE" ]; then
     CONFIG_FILE="$CONFIG_OVERRIDE"
@@ -246,24 +277,7 @@ if [ "$CONFIG_FILE" != "$DEFAULT_CONFIG_FILE" ]; then
     echo "🧑‍💻 当前使用显式指定的开发者配置覆盖文件"
 fi
 
-resolve_python_bin() {
-    if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
-        printf '%s\n' "$ROOT_DIR/.venv/bin/python"
-        return 0
-    fi
-    if command -v python3 >/dev/null 2>&1; then
-        command -v python3
-        return 0
-    fi
-    if command -v python >/dev/null 2>&1; then
-        command -v python
-        return 0
-    fi
-    return 1
-}
-
-# 占位符黑名单预检（U-05）：必须先于任何模式切换写盘（update_runtime_mode），
-# 防止把 probe_only/if_commit_order 写进一个注定失败的模板配置
+# 占位符黑名单预检（U-05）。运行模式只在本次子进程中覆盖，不再写配置文件。
 preflight_check_placeholders "$CONFIG_FILE" || exit 1
 
 # serial 精确预检（U-05 / U-12）：
@@ -287,53 +301,8 @@ else
     preflight_check_device "$CONFIG_FILE" || exit 1
 fi
 
-prompt_mode_switch() {
-    local message="$1"
-    if [ "$ASSUME_YES" = true ]; then
-        echo "🤖 已启用 --yes，自动确认并继续"
-        return 0
-    fi
-    read -p "$message (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        MODE_PROMPT_CONFIRMED=true
-        return 0
-    fi
-    return 1
-}
-
-PYTHON_BIN="$(resolve_python_bin)"
-if [ -z "$PYTHON_BIN" ]; then
-    echo "❌ 未找到可用的 Python 环境"
-    exit 1
-fi
-
-# 运行模式判定与 Python 实际执行同源（U-03）：
-# 不再用 grep 文本匹配 JSONC——grep 会命中被注释掉的键值行，导致
-# 「屏显安全探测、实际真实下单」。统一走 mobile.config 的剥注释 json.loads 解析器。
-# 契约：heredoc 只向 stdout 打印两行旗标，任何 stdout 污染都会破坏按行拆分。
-read_mode_flags() {
-    PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-    HATICKETS_CONFIG_PATH="$CONFIG_FILE" \
-    "$PYTHON_BIN" - <<'PY'
-from mobile.config import read_runtime_mode
-
-probe_only, if_commit_order = read_runtime_mode()
-print(probe_only)
-print(if_commit_order)
-PY
-}
-
-if ! MODE_FLAGS="$(read_mode_flags)"; then
-    echo "❌ 无法解析配置文件（JSONC 语法错误？）: $CONFIG_FILE"
-    echo "   请检查 JSON 格式，或对照模板: mobile/config.example.jsonc"
-    exit 1
-fi
-CURRENT_PROBE_ONLY="$(printf '%s\n' "$MODE_FLAGS" | sed -n '1p')"
-CURRENT_IF_COMMIT_ORDER="$(printf '%s\n' "$MODE_FLAGS" | sed -n '2p')"
-
 # 强确认闸门（U-01）：真实下单的最后一道人工闸门。
-# 必须在 update_runtime_mode 写配置之前调用——确认词输错时配置文件保证逐字节未变。
+# 授权只在本次子进程中生效；确认词输错时配置文件保证逐字节未变。
 require_commit_confirmation() {
     if [ "$ASSUME_YES" = true ] && [ "$FORCE_CONFIRM_WORD" = false ]; then
         return 0    # --commit --yes：跳过确认词，但摘要+倒数不可跳过
@@ -384,66 +353,27 @@ print("==================================")
 PY
 }
 
-# DESIRED_* 由旗标显式驱动（U-01）：不再有「非 probe 即真下单」的危险默认
+# EFFECTIVE_* 只由本次命令旗标驱动（P0）：不读取、不改写磁盘中的模式字段。
 if [ "$PROBE_MODE" = true ]; then
-    DESIRED_PROBE_ONLY="true"
-    DESIRED_IF_COMMIT_ORDER="false"
+    EFFECTIVE_PROBE_ONLY="true"
+    EFFECTIVE_IF_COMMIT_ORDER="false"
+    RUNTIME_MODE="probe"
 else
     # COMMIT_MODE=true（裸调用已在顶部转为 commit 或退出）
-    DESIRED_PROBE_ONLY="false"
-    DESIRED_IF_COMMIT_ORDER="true"
     require_commit_confirmation
+    EFFECTIVE_PROBE_ONLY="false"
+    EFFECTIVE_IF_COMMIT_ORDER="true"
+    RUNTIME_MODE="commit"
 fi
 
-if [ "$CURRENT_PROBE_ONLY" != "$DESIRED_PROBE_ONLY" ] || [ "$CURRENT_IF_COMMIT_ORDER" != "$DESIRED_IF_COMMIT_ORDER" ]; then
-    echo "========================================"
-    if [ "$PROBE_MODE" = true ]; then
-        echo "🛡️ 检测到当前配置不是安全探测模式"
-        echo "   当前配置: probe_only=$CURRENT_PROBE_ONLY, if_commit_order=$CURRENT_IF_COMMIT_ORDER"
-        echo "   即将改为: probe_only=true, if_commit_order=false"
-        echo "   这次运行会写回配置文件，然后开始安全探测"
-        if ! prompt_mode_switch "👉 是否立即切换到安全探测模式并继续？"; then
-            echo "❌ 已取消，配置文件未修改"
-            exit 1
-        fi
-    else
-        echo "🚨 检测到当前配置还不是正式抢票模式"
-        echo "   当前配置: probe_only=$CURRENT_PROBE_ONLY, if_commit_order=$CURRENT_IF_COMMIT_ORDER"
-        echo "   即将改为: probe_only=false, if_commit_order=true"
-        echo "   这次运行会写回配置文件，然后立即开始正式抢票"
-        # 强确认闸门已在前面通过（--commit --yes 或确认词），此处不再二次询问
-    fi
-
-    if ! PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" HATICKETS_CONFIG_PATH="$CONFIG_FILE" "$PYTHON_BIN" - "$DESIRED_PROBE_ONLY" "$DESIRED_IF_COMMIT_ORDER" <<'PY'
-import sys
-from mobile.config import update_runtime_mode
-
-probe_only = sys.argv[1].lower() == "true"
-if_commit_order = sys.argv[2].lower() == "true"
-update_runtime_mode(probe_only, if_commit_order)
-PY
-    then
-        echo "❌ 修改配置文件失败: $CONFIG_FILE"
-        exit 1
-    fi
-
-    echo "✅ 已写回配置文件: $CONFIG_FILE"
-    echo "   （已备份原配置到 ${CONFIG_FILE}.bak，注释与字段顺序原样保留）"
-    echo "   已更新为: probe_only=$DESIRED_PROBE_ONLY, if_commit_order=$DESIRED_IF_COMMIT_ORDER"
-    echo "========================================"
-    # 写回后状态确定为期望值（U-03：屏显与改写决策同源）
-    EFFECTIVE_PROBE_ONLY="$DESIRED_PROBE_ONLY"
-    EFFECTIVE_IF_COMMIT_ORDER="$DESIRED_IF_COMMIT_ORDER"
-else
-    EFFECTIVE_PROBE_ONLY="$CURRENT_PROBE_ONLY"
-    EFFECTIVE_IF_COMMIT_ORDER="$CURRENT_IF_COMMIT_ORDER"
-fi
+echo "🔐 本次运行模式仅对当前进程生效，不修改配置文件"
+echo "   生效值: probe_only=$EFFECTIVE_PROBE_ONLY, if_commit_order=$EFFECTIVE_IF_COMMIT_ORDER"
 
 # 显示当前配置
 echo "📋 当前配置:"
 echo "   $(cat "$CONFIG_FILE" | grep -E '"keyword"|"city"|"users"' | head -3)"
 
-# 模式横幅使用与改写决策同一解析结果（U-03），不再二次 grep 配置文件
+# 模式横幅使用本次命令的不可变进程模式，不再从磁盘配置二次推断
 if [ "$EFFECTIVE_PROBE_ONLY" = "true" ]; then
     echo "🛡️ 当前模式: 安全探测模式"
     echo "   本次运行只会定位目标演出页，不会点击“立即购票/立即预订”"
@@ -473,7 +403,7 @@ fi
 if [ "$COMMIT_MODE" = true ]; then
     print_commit_summary
     echo "⏳ 3 秒后启动正式抢票，Ctrl-C 可随时取消..."
-    echo "   （注意：配置已写为正式模式，中途取消后下次探测请用 --probe）"
+    echo "   （中途取消后授权立即失效；下次正式提交仍需重新传入 --commit）"
     for i in 3 2 1; do
         echo "   $i..."
         sleep 1
@@ -502,24 +432,20 @@ else
 fi
 echo ""
 
+# P0：运行模式/正式提交授权只透传给这一次 Python 子进程，不写回配置文件。
+export HATICKETS_RUN_MODE="$RUNTIME_MODE"
+if [ "$COMMIT_MODE" = true ]; then
+    export HATICKETS_COMMIT_AUTH="confirmed-by-start-script"
+else
+    unset HATICKETS_COMMIT_AUTH
+fi
+
 # U-12：serial 覆盖 / 摘要路径经环境变量透传（仅在非空时 export，不写回配置文件）
 [ -n "$SERIAL_OVERRIDE" ] && export HATICKETS_SERIAL="$SERIAL_OVERRIDE"
 [ -n "$RESULT_JSON" ] && export HATICKETS_RESULT_JSON="$RESULT_JSON"
 
-# 运行抢票脚本（优先使用项目 .venv，其次使用 Poetry）
+# 使用预检通过的同一个 Python 环境运行抢票脚本，避免“预检 A、实际执行 B”。
 # U-12：显式 exit $? 让 python 的语义化退出码（0/10/11/12/130）穿透脚本，
 # 供 cron/systemd 等外部编排消费。
-if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
-    HATICKETS_CONFIG_PATH="$CONFIG_FILE" "$ROOT_DIR/.venv/bin/python" -m damai_app
-    exit $?
-elif command -v poetry &> /dev/null; then
-    HATICKETS_CONFIG_PATH="$CONFIG_FILE" poetry run python -m damai_app
-    exit $?
-else
-    echo "❌ 未找到可用的 Python 环境"
-    echo "   请先安装依赖："
-    echo "   1) 使用 Poetry: python3 -m pip install --user poetry"
-    echo "      然后运行: poetry install"
-    echo "   2) 或在 .venv 中安装: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
-    exit 1
-fi
+HATICKETS_CONFIG_PATH="$CONFIG_FILE" "$PYTHON_BIN" -m damai_app
+exit $?
