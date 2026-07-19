@@ -126,6 +126,27 @@ class TestCurrentPageMatchesTarget:
         nav.set_bot(bot)
         assert nav._current_page_matches_target({"state": "sku_page"}) is True
 
+    def test_reuses_observed_title_from_page_snapshot(self):
+        bot = MagicMock()
+        bot.item_detail = None
+        bot._title_matches_target.return_value = True
+        config = MagicMock()
+        config.target_title = "张杰演唱会"
+        config.target_venue = None
+        config.keyword = None
+        config.if_commit_order = False
+        nav = EventNavigator(device=MagicMock(), config=config, probe=MagicMock())
+        nav.set_bot(bot)
+
+        assert nav._current_page_matches_target(
+            {
+                "state": "detail_page",
+                "observed_title": "张杰演唱会",
+                "observed_venue": "",
+            }
+        ) is True
+        bot._get_detail_title_text.assert_not_called()
+
 
 class TestNavigateToTarget:
     def test_already_on_detail_page_returns_true(self):
@@ -136,6 +157,20 @@ class TestNavigateToTarget:
         )
         assert nav.navigate_to_target_event() is True
 
+    def test_wrong_detail_page_delegates_to_bot_navigation(self):
+        probe = MagicMock()
+        current = {"state": "detail_page"}
+        bot = MagicMock()
+        bot._current_page_matches_target.return_value = False
+        bot._navigate_to_target_impl.return_value = True
+        nav = EventNavigator(
+            device=MagicMock(), config=MagicMock(auto_navigate=True), probe=probe
+        )
+        nav.set_bot(bot)
+
+        assert nav.navigate_to_target_event(initial_probe=current) is True
+        bot._navigate_to_target_impl.assert_called_once_with(initial_probe=current)
+
     def test_auto_navigate_disabled_returns_false(self):
         probe = MagicMock()
         probe.probe_current_page.return_value = {"state": "homepage"}
@@ -143,6 +178,37 @@ class TestNavigateToTarget:
             device=MagicMock(), config=MagicMock(auto_navigate=False), probe=probe
         )
         assert nav.navigate_to_target_event() is False
+
+    def test_probe_only_never_delegates_to_navigation(self):
+        probe = MagicMock()
+        bot = MagicMock()
+        nav = EventNavigator(
+            device=MagicMock(),
+            config=MagicMock(auto_navigate=True, probe_only=True),
+            probe=probe,
+        )
+        nav.set_bot(bot)
+
+        assert nav.navigate_to_target_event({"state": "homepage"}) is False
+        probe.probe_current_page.assert_not_called()
+        bot._navigate_to_target_impl.assert_not_called()
+
+    def test_probe_only_discovery_dispatches_no_navigation_actions(self):
+        probe = MagicMock()
+        bot = MagicMock()
+        nav = EventNavigator(
+            device=MagicMock(),
+            config=MagicMock(auto_navigate=True, probe_only=True),
+            probe=probe,
+        )
+        nav.set_bot(bot)
+
+        assert nav.discover_target_event(["目标演出"]) is None
+        bot.probe_current_page.assert_not_called()
+        bot._recover_to_navigation_start.assert_not_called()
+        bot._open_search_from_homepage.assert_not_called()
+        bot._submit_search_keyword.assert_not_called()
+        bot._open_target_from_search_results.assert_not_called()
 
     def test_delegates_to_bot(self):
         probe = MagicMock()
@@ -340,6 +406,34 @@ class TestSelectSession:
         idx = select_session(driver, date="04.06", city="北京")
         assert idx == 0  # date-only single match wins after city miss
 
+    def test_strict_date_city_mismatch_never_falls_back(self):
+        xml = _hierarchy_xml(
+            ("04.06", "上海", "[0,0][540,200]"),
+            ("04.13", "北京", "[540,0][1080,200]"),
+        )
+        driver = self._make_driver(xml)
+
+        with pytest.raises(SessionNotFoundError, match="正式模式无法唯一确认"):
+            select_session(
+                driver,
+                date="04.06",
+                city="北京",
+                fallback_index=0,
+                strict=True,
+            )
+
+        driver.click.assert_not_called()
+
+    def test_strict_mode_requires_configured_session_criteria(self):
+        driver = self._make_driver(
+            _hierarchy_xml(("04.06", "上海", "[0,0][540,200]"))
+        )
+
+        with pytest.raises(SessionNotFoundError, match="未配置 date/city"):
+            select_session(driver, fallback_index=0, strict=True)
+
+        driver.click.assert_not_called()
+
     def test_date_city_priority_over_fallback_index(self):
         xml = _hierarchy_xml(
             ("04.06", "上海", "[0,0][540,200]"),
@@ -375,6 +469,33 @@ class TestWaitForHomeReady:
         result = wait_for_home_ready(driver, probe, timeout=2.0, poll_interval=0.01)
         assert result["state"] == "homepage"
         assert probe.classify.call_count == 3
+
+    def test_wall_clock_jump_does_not_expire_home_poll(self):
+        driver = MagicMock()
+        probe = MagicMock()
+        probe.classify.side_effect = [
+            {"state": "unknown"},
+            {"state": "homepage"},
+        ]
+        wall_time = MagicMock()
+        wall_time.time.side_effect = [0.0, 10**12]
+
+        with patch(
+            "mobile.page_helpers._monotonic",
+            side_effect=[10.0, 10.0],
+        ), patch(
+            "mobile.page_helpers.time",
+            wall_time,
+        ):
+            result = wait_for_home_ready(
+                driver,
+                probe,
+                timeout=1.0,
+                poll_interval=0.01,
+            )
+
+        assert result["state"] == "homepage"
+        wall_time.time.assert_not_called()
 
     def test_home_page_probe_timeout(self, tmp_path):
         driver = MagicMock()
@@ -460,6 +581,32 @@ class TestSelectSearchResult:
         assert chosen["title"] == "周杰伦演唱会上海站"
         # Center of [0,0][1080,400] = (540, 200)
         driver.click.assert_called_once_with(540, 200)
+
+    def test_wall_clock_jump_does_not_expire_search_poll(self, tmp_path):
+        empty_xml = '<?xml version="1.0" encoding="UTF-8"?><hierarchy/>'
+        result_xml = _search_result_xml(("目标演出", "[0,0][1080,400]"))
+        driver = MagicMock()
+        driver.dump_hierarchy.side_effect = [empty_xml, result_xml]
+        wall_time = MagicMock()
+        wall_time.time.side_effect = [10**12, 0.0]
+
+        with patch(
+            "mobile.page_helpers._monotonic",
+            side_effect=[20.0, 20.0],
+        ), patch(
+            "mobile.page_helpers.time",
+            wall_time,
+        ):
+            chosen = select_search_result(
+                driver,
+                keyword="目标",
+                timeout=1.0,
+                poll_interval=0.01,
+                dump_dir=str(tmp_path),
+            )
+
+        assert chosen["title"] == "目标演出"
+        wall_time.time.assert_not_called()
 
     def test_search_result_ambiguous_falls_back(self, tmp_path):
         xml = _search_result_xml(
@@ -586,6 +733,8 @@ class _NavBotShim:
         self.item_detail = None
         self._detail_title = detail_title
         self._detail_venue = detail_venue
+        self._verified_price_selection = None
+        self.hot_cache_invalidations = []
 
     def _keyword_tokens(self):
         return self._nav._keyword_tokens()
@@ -599,15 +748,24 @@ class _NavBotShim:
     def _get_detail_venue_text(self):
         return self._detail_venue
 
+    def _invalidate_all_hot_cache(self, reason=None):
+        self.hot_cache_invalidations.append(reason)
+
 
 def _make_fuzzy_nav(
-    keyword=None, city=None, target_title=None, target_venue=None, detail_title=None
+    keyword=None,
+    city=None,
+    target_title=None,
+    target_venue=None,
+    detail_title=None,
+    if_commit_order=False,
 ):
     config = MagicMock()
     config.keyword = keyword
     config.city = city
     config.target_title = target_title
     config.target_venue = target_venue
+    config.if_commit_order = if_commit_order
     nav = EventNavigator(device=MagicMock(), config=config, probe=MagicMock())
     nav.set_bot(_NavBotShim(nav, detail_title=detail_title))
     return nav
@@ -737,7 +895,7 @@ class TestCurrentPageMatchesClickedTitle:
 
     def test_current_page_empty_title_unverified_accept(self):
         # 标题与场馆均不可读：「读不到」≠「不一致」，信任高分锚定卡片放行,
-        # 避免正确条目被加入 rejected_titles 黑名单造成死循环（真机实测）
+        # 非正式模式避免正确条目被加入 rejected_titles 黑名单造成死循环。
         nav = _make_fuzzy_nav(keyword="张杰 演唱会", detail_title="")
         calls = {"n": 0}
 
@@ -752,6 +910,155 @@ class TestCurrentPageMatchesClickedTitle:
             )
         assert result is True
         assert calls["n"] == 7  # 首读 + 6 次延长轮询全部读空
+
+    def test_formal_commit_rejects_empty_title_and_venue(self):
+        nav = _make_fuzzy_nav(
+            keyword="张杰 演唱会",
+            detail_title="",
+            if_commit_order=True,
+        )
+        with patch("mobile.event_navigator.time.sleep"):
+            result = nav._current_page_matches_target(
+                {"state": "detail_page"},
+                clicked_title="张杰2026巡回演唱会",
+            )
+        assert result is False
+
+    def test_formal_commit_rejects_venue_only_identity(self):
+        nav = _make_fuzzy_nav(
+            keyword="张杰 演唱会",
+            target_venue="国家体育场",
+            detail_title="",
+            if_commit_order=True,
+        )
+        nav._bot._detail_venue = "国家体育场-鸟巢"
+        with patch("mobile.event_navigator.time.sleep"):
+            result = nav._current_page_matches_target(
+                {"state": "detail_page"},
+                clicked_title="张杰2026巡回演唱会",
+            )
+        assert result is False
+
+    def test_formal_commit_rejects_configured_venue_mismatch(self):
+        nav = _make_fuzzy_nav(
+            keyword="张杰 演唱会",
+            target_title="张杰2026巡回演唱会",
+            target_venue="国家体育场",
+            detail_title="张杰2026巡回演唱会",
+            if_commit_order=True,
+        )
+        nav._bot._detail_venue = "工人体育场"
+        assert nav._current_page_matches_target(
+            {"state": "detail_page"}
+        ) is False
+
+    def test_formal_commit_rejects_partial_venue_match(self):
+        nav = _make_fuzzy_nav(
+            keyword="张杰 演唱会",
+            target_title="张杰2026巡回演唱会",
+            target_venue="国家体育场",
+            detail_title="张杰2026巡回演唱会",
+            if_commit_order=True,
+        )
+        nav._bot._detail_venue = "国家体育场-鸟巢"
+
+        assert nav._current_page_matches_target(
+            {"state": "detail_page"}
+        ) is False
+        assert nav._last_formal_event_identity is None
+
+    def test_formal_commit_accepts_matching_title_and_venue(self):
+        nav = _make_fuzzy_nav(
+            keyword="张杰 演唱会",
+            target_title="张杰2026巡回演唱会",
+            target_venue="国家体育场-鸟巢",
+            detail_title="张杰2026巡回演唱会",
+            if_commit_order=True,
+        )
+        # Punctuation variants normalize to the same exact identity; the proof
+        # retains the page strings observed in this snapshot.
+        nav._bot._detail_venue = "国家体育场—鸟巢"
+        assert nav._current_page_matches_target(
+            {"state": "detail_page"}
+        ) is True
+        assert nav._last_formal_event_identity == {
+            "target_title": "张杰2026巡回演唱会",
+            "observed_title": "张杰2026巡回演唱会",
+            "observed_title_normalized": "张杰2026巡回演唱会",
+            "target_venue": "国家体育场鸟巢",
+            "observed_venue": "国家体育场—鸟巢",
+            "observed_venue_normalized": "国家体育场鸟巢",
+        }
+
+    def test_formal_commit_rejects_original_show_vs_added_show(self):
+        nav = _make_fuzzy_nav(
+            keyword="周杰伦 演唱会",
+            target_title="周杰伦2026嘉年华巡回演唱会上海站",
+            detail_title="周杰伦2026嘉年华巡回演唱会上海站加场",
+            if_commit_order=True,
+        )
+
+        assert nav._current_page_matches_target(
+            {"state": "detail_page"}
+        ) is False
+        assert nav._last_formal_event_identity is None
+
+    def test_formal_commit_does_not_substitute_item_detail_title(self):
+        nav = _make_fuzzy_nav(
+            keyword="周杰伦 演唱会",
+            target_title="周杰伦2026嘉年华巡回演唱会上海站",
+            detail_title="周杰伦2026嘉年华巡回演唱会上海站加场",
+            if_commit_order=True,
+        )
+        nav._bot.item_detail = MagicMock(
+            item_name="周杰伦2026嘉年华巡回演唱会上海站加场",
+            item_name_display="周杰伦上海加场",
+        )
+
+        assert nav._current_page_matches_target(
+            {"state": "detail_page"}
+        ) is False
+        assert nav._last_formal_event_identity is None
+
+    def test_formal_failed_recheck_clears_prior_exact_identity(self):
+        nav = _make_fuzzy_nav(
+            keyword="周杰伦 演唱会",
+            target_title="周杰伦2026嘉年华巡回演唱会上海站",
+            detail_title="周杰伦2026嘉年华巡回演唱会上海站",
+            if_commit_order=True,
+        )
+        assert nav._current_page_matches_target(
+            {"state": "detail_page"}
+        ) is True
+        assert nav._last_formal_event_identity is not None
+
+        nav._bot._detail_title = "周杰伦2026嘉年华巡回演唱会上海站加场"
+        assert nav._current_page_matches_target(
+            {"state": "detail_page"}
+        ) is False
+        assert nav._last_formal_event_identity is None
+
+    def test_formal_commit_rejects_same_artist_different_tour(self):
+        nav = _make_fuzzy_nav(
+            keyword="张杰 演唱会",
+            target_title="张杰2026未·LIVE—开往1982演唱会",
+            detail_title="张杰2026曜北斗巡回演唱会",
+            if_commit_order=True,
+        )
+        assert nav._current_page_matches_target(
+            {"state": "detail_page"}
+        ) is False
+
+    def test_formal_commit_rejects_conflicting_year(self):
+        nav = _make_fuzzy_nav(
+            keyword="张杰 演唱会",
+            target_title="张杰2026未·LIVE巡回演唱会",
+            detail_title="张杰2025未·LIVE巡回演唱会",
+            if_commit_order=True,
+        )
+        assert nav._current_page_matches_target(
+            {"state": "detail_page"}
+        ) is False
 
     def test_current_page_no_clicked_title_keeps_old_path(self):
         # 向后兼容：不传 clicked_title 时走既有 keyword 校验路径
@@ -866,3 +1173,4 @@ class TestOpenTargetRejectedBlacklist:
         bot._current_page_matches_target.assert_called_once_with(
             {"state": "detail_page"}, clicked_title="张杰2026巡回演唱会北京站"
         )
+        assert bot.hot_cache_invalidations == ["search_result_opened"]

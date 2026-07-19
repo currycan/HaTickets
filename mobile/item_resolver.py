@@ -317,6 +317,8 @@ class DamaiItemResolver:
         data = json.dumps(data_obj, separators=(",", ":"), ensure_ascii=False)
 
         token = self._prime_token(resolved_item_id, referer, data)
+        # Damai's request signature expects Unix epoch milliseconds.  This is
+        # an absolute wall-clock timestamp, not a relative timeout deadline.
         current_ms = str(int(time.time() * 1000))
         sign_payload = f"{token}&{current_ms}&{DM_APP_KEY}&{data}"
         sign = hashlib.md5(sign_payload.encode("utf-8")).hexdigest()

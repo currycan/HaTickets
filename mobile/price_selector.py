@@ -43,6 +43,15 @@ _PRICE_UNAVAILABLE_TAGS = {
     "不可选",
     "暂不可售",
 }
+_PRICE_UNAVAILABLE_PATTERN = re.compile(
+    r"(无票|缺货|售罄|不可选|不可售|暂(?:时)?不可售|暂(?:时)?售罄)"
+)
+_PRICE_OPTION_INFO_TAGS = {
+    "可预约",
+    "预售",
+    "已预约",
+    "可选",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -362,12 +371,73 @@ class PriceSelector:
                             f"中的 {len(cards)} 个可点击卡片"
                         )
                         continue
+                    selected_card = cards[self._config.price_index]
+                    if self._is_formal_commit():
+                        texts = []
+                        seen = set()
+                        for descendant in selected_card.iter("node"):
+                            for attr in ("text", "content-desc"):
+                                value = (descendant.get(attr) or "").strip()
+                                if value and value not in seen:
+                                    texts.append(value)
+                                    seen.add(value)
+                        price_text = self._price_option_text_from_descendants(
+                            texts
+                        )
+                        tag = self._unavailable_price_tag(texts)
+                        if tag:
+                            bot._verified_price_selection = None
+                            bot._set_terminal_failure(
+                                "target_price_unavailable"
+                            )
+                            logger.warning(
+                                "配置票档当前不可选，正式模式停止: "
+                                "price_index=%s tag=%s",
+                                self._config.price_index,
+                                tag,
+                            )
+                            return None
+                        if not price_text or not self._price_text_matches_target(
+                            price_text
+                        ):
+                            bot._verified_price_selection = None
+                            bot._set_terminal_failure(
+                                "target_price_unconfirmed"
+                            )
+                            logger.error(
+                                "配置票档文案未确认，正式模式禁止按索引盲点: "
+                                "price_index=%s observed=%s",
+                                self._config.price_index,
+                                price_text or "(empty)",
+                            )
+                            return None
+
                     bounds = bot._parse_bounds(
-                        cards[self._config.price_index].get("bounds", "")
+                        selected_card.get("bounds", "")
                     )
                     if bounds:
                         left, top, right, bottom = bounds
-                        return ((left + right) // 2, (top + bottom) // 2)
+                        coords = (
+                            (left + right) // 2,
+                            (top + bottom) // 2,
+                        )
+                        if self._is_formal_commit():
+                            bot._verified_price_selection = {
+                                "coords": coords,
+                                "price_index": self._config.price_index,
+                                "target_price": normalize_text(
+                                    self._config.price
+                                ),
+                                "observed_price": normalize_text(price_text),
+                            }
+                            if self._formal_price_card_is_selected(selected_card):
+                                bot._verified_price_selection.update(
+                                    {
+                                        "selection_verified": True,
+                                        "selection_source": "same_snapshot",
+                                    }
+                                )
+                        return coords
         return None
 
     def _extract_price_digits(self, text):
@@ -378,25 +448,271 @@ class PriceSelector:
             return int(match.group(1))
         return None
 
+    def _price_label_without_amount(self, text):
+        """Return an optional SKU label after removing amount/currency noise."""
+        normalized = normalize_text(text)
+        normalized = re.sub(
+            r"[¥￥]?[1-9]\d{1,4}(?:\.\d{1,2})?(?:元|rmb|cny)?",
+            "",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        for generic in ("票价", "价格", "售价", "人民币", "rmb", "cny", "元", "起"):
+            normalized = normalized.replace(generic, "")
+        return normalized
+
     def _price_text_matches_target(self, text):
         """Check whether a visible price label matches the configured price."""
         normalized_target = normalize_text(self._config.price)
         normalized_text = normalize_text(text)
-        if normalized_target and normalized_text:
-            if (
-                normalized_target in normalized_text
-                or normalized_text in normalized_target
-            ):
-                return True
-
         target_digits = self._extract_price_digits(self._config.price)
         text_digits = self._extract_price_digits(text)
-        return target_digits is not None and target_digits == text_digits
+        if target_digits is not None or text_digits is not None:
+            if (
+                target_digits is None
+                or text_digits is None
+                or target_digits != text_digits
+            ):
+                return False
+            target_label = self._price_label_without_amount(
+                self._config.price
+            )
+            text_label = self._price_label_without_amount(text)
+            if target_label and text_label:
+                return (
+                    target_label in text_label
+                    or text_label in target_label
+                )
+            return True
+
+        return bool(
+            normalized_target
+            and normalized_text
+            and (
+                normalized_target in normalized_text
+                or normalized_text in normalized_target
+            )
+        )
+
+    def _is_formal_commit(self):
+        """Return True only for the explicitly authorised submit mode."""
+        return getattr(self._config, "if_commit_order", False) is True
+
+    @staticmethod
+    def _formal_price_card_is_selected(card) -> bool:
+        """Return whether one price card exposes an explicit selected state."""
+        for node in card.iter("node"):
+            if (node.get("selected") or "").strip().lower() == "true":
+                return True
+            if (node.get("checked") or "").strip().lower() == "true":
+                return True
+            visible_state = " ".join(
+                value.strip()
+                for value in (
+                    node.get("text") or "",
+                    node.get("content-desc") or "",
+                )
+                if value and value.strip()
+            )
+            if any(
+                marker in visible_state
+                for marker in ("已选中", "已选择", "当前选中")
+            ):
+                return True
+        return False
+
+    def _formal_price_card_snapshot(self, xml_root):
+        """Describe the configured card from one post-click hierarchy."""
+        if xml_root is None:
+            return None
+        bot = self._bot
+        for container_id in (
+            "cn.damai:id/project_detail_perform_price_flowlayout",
+            "cn.damai:id/layout_price",
+        ):
+            for node in xml_root.iter("node"):
+                if node.get("resource-id") != container_id:
+                    continue
+                cards = [
+                    child
+                    for child in node
+                    if child.get("class") == "android.widget.FrameLayout"
+                    and child.get("clickable") == "true"
+                ]
+                if not (0 <= self._config.price_index < len(cards)):
+                    continue
+                card = cards[self._config.price_index]
+                texts = []
+                seen = set()
+                for descendant in card.iter("node"):
+                    for attr in ("text", "content-desc"):
+                        value = (descendant.get(attr) or "").strip()
+                        if value and value not in seen:
+                            texts.append(value)
+                            seen.add(value)
+                price_text = self._price_option_text_from_descendants(texts)
+                bounds = bot._parse_bounds(card.get("bounds", ""))
+                coords = None
+                if bounds:
+                    left, top, right, bottom = bounds
+                    coords = ((left + right) // 2, (top + bottom) // 2)
+                return {
+                    "coords": coords,
+                    "observed_price": normalize_text(price_text),
+                    "target_matches": bool(
+                        price_text and self._price_text_matches_target(price_text)
+                    ),
+                    "unavailable": bool(self._unavailable_price_tag(texts)),
+                    "selected": self._formal_price_card_is_selected(card),
+                }
+        return None
+
+    def _formal_cached_price_is_verified(
+        self, cached_coords, *, require_selected=True
+    ):
+        """Validate same-snapshot evidence before a rush-mode price click."""
+        if not cached_coords:
+            return False
+        proof = getattr(self._bot, "_verified_price_selection", None)
+        if not isinstance(proof, dict):
+            return False
+        observed_price = proof.get("observed_price")
+        if not (
+            proof.get("coords") == cached_coords
+            and proof.get("price_index") == self._config.price_index
+            and proof.get("target_price")
+            == normalize_text(self._config.price)
+            and isinstance(observed_price, str)
+            and self._price_text_matches_target(observed_price)
+            and proof.get("run_generation")
+            == getattr(self._bot, "_run_generation", None)
+            and (
+                not require_selected
+                or proof.get("selection_verified") is True
+            )
+        ):
+            return False
+        stored_stamp = getattr(
+            self._bot, "_cached_hot_path_coord_meta", {}
+        ).get("price")
+        if proof.get("stamp") != stored_stamp or stored_stamp is None:
+            return False
+        cache_getter = getattr(self._bot, "_get_hot_coord", None)
+        if not callable(cache_getter):
+            return False
+        return (
+            cache_getter(
+                "price",
+                scope="sku",
+                page_state="sku_page",
+            )
+            == cached_coords
+        )
+
+    def _verify_formal_price_selection_after_click(self, cached_coords):
+        """Require a fresh hierarchy to prove the intended price is selected."""
+        bot = self._bot
+        xml_root = bot._dump_hierarchy_xml()
+        snapshot = self._formal_price_card_snapshot(xml_root)
+        if not (
+            isinstance(snapshot, dict)
+            and snapshot.get("coords") == cached_coords
+            and snapshot.get("target_matches") is True
+            and snapshot.get("unavailable") is False
+            and snapshot.get("selected") is True
+        ):
+            bot._verified_price_selection = None
+            bot._set_terminal_failure("target_price_selection_unconfirmed")
+            logger.error(
+                "票档点击后未观察到目标票档的明确选中状态，"
+                "已停止确定购买，避免按默认或错误票档继续"
+            )
+            return False
+
+        verify_session = getattr(
+            type(bot), "_verify_formal_session_filters_same_snapshot", None
+        )
+        if callable(verify_session) and not verify_session(bot, xml_root):
+            bot._verified_price_selection = None
+            bot._set_terminal_failure("session_filter_unconfirmed")
+            logger.error(
+                "票档点击后的同一快照未能继续证明目标日期和城市，"
+                "已停止确定购买"
+            )
+            return False
+
+        proof = getattr(bot, "_verified_price_selection", None)
+        if not isinstance(proof, dict):
+            bot._set_terminal_failure("target_price_selection_unconfirmed")
+            return False
+        proof["selection_verified"] = True
+        proof["selection_source"] = "post_click_hierarchy"
+        proof["selection_observed_price"] = snapshot["observed_price"]
+
+        # Refresh the SKU stamp and buy-button coordinate from the same
+        # post-click hierarchy.  Selecting a card changes layout state, so
+        # retaining the pre-click stamp would make the next tap stale.
+        has_real_cache_api = callable(
+            getattr(type(bot), "_hot_layout_digest_from_xml", None)
+        )
+        if has_real_cache_api:
+            layout_digest = bot._hot_layout_digest_from_xml(xml_root, "sku")
+            bot._set_hot_cache_context(
+                scope="sku",
+                page_state="sku_page",
+                layout_digest=layout_digest,
+            )
+            bot._put_hot_coord(
+                "price",
+                cached_coords,
+                scope="sku",
+                page_state="sku_page",
+                layout_digest=layout_digest,
+            )
+            buy_coords = bot._get_buy_button_coordinates(xml_root=xml_root)
+            if buy_coords is not None:
+                bot._put_hot_coord(
+                    "sku_buy",
+                    buy_coords,
+                    scope="sku",
+                    page_state="sku_page",
+                    layout_digest=layout_digest,
+                )
+            proof["stamp"] = bot._cached_hot_path_coord_meta.get("price")
+            proof["selection_layout_digest"] = layout_digest
+        return True
+
+    def _unavailable_price_tag(self, texts):
+        """Return the first unavailable marker, including sentence variants."""
+        for candidate in texts or ():
+            value = candidate.strip() if isinstance(candidate, str) else ""
+            if value in _PRICE_UNAVAILABLE_TAGS or _PRICE_UNAVAILABLE_PATTERN.search(
+                value
+            ):
+                return value
+        return ""
+
+    def _price_option_tag(self, texts):
+        unavailable = self._unavailable_price_tag(texts)
+        if unavailable:
+            return unavailable
+        return next(
+            (
+                candidate.strip()
+                for candidate in texts or ()
+                if isinstance(candidate, str)
+                and candidate.strip() in _PRICE_OPTION_INFO_TAGS
+            ),
+            "",
+        )
 
     def _is_price_option_available(self, option):
         """Return whether a visible price option is actually selectable."""
         tag = (option.get("tag") or "").strip()
-        return tag not in _PRICE_UNAVAILABLE_TAGS
+        return not (
+            tag in _PRICE_UNAVAILABLE_TAGS
+            or _PRICE_UNAVAILABLE_PATTERN.search(tag)
+        )
 
     def _click_visible_price_option(self, card_index):
         """Click a visible price card by its clickable-card index."""
@@ -424,6 +740,20 @@ class PriceSelector:
         ignore raw touch coordinates) and falls back to coordinate click.
         """
         bot = self._bot
+        if self._is_formal_commit():
+            # Formal mode may only click the coordinate proven by the same
+            # hierarchy snapshot.  Re-querying a live list by index creates a
+            # TOCTOU window if cards reorder while inventory updates.
+            if not coords:
+                return False
+            # One click only: a second blind coordinate tap can land on a
+            # reordered card while inventory is updating.
+            bot._click_coordinates(*coords, duration=30)
+            logger.info(
+                "通过同一票档快照坐标选择票价: price_index=%s",
+                self._config.price_index,
+            )
+            return True
         # Primary: element click — Damai price cards may not respond to coordinate taps
         if self._click_price_card_element(self._config.price_index):
             logger.info(
@@ -530,10 +860,33 @@ class PriceSelector:
     def _select_price_option_fast(self, cached_coords=None):
         """Use config-driven, low-latency ticket selection before OCR-heavy fallbacks."""
         bot = self._bot
+        if self._is_formal_commit():
+            if not self._formal_cached_price_is_verified(
+                cached_coords, require_selected=False
+            ):
+                bot._set_terminal_failure("target_price_unconfirmed")
+                logger.error(
+                    "正式模式缺少本轮同一 SKU 快照的票档文案证据，"
+                    "已禁止按坐标、索引或全页文本点击"
+                )
+                return False
+            proof = getattr(bot, "_verified_price_selection", None)
+            if isinstance(proof, dict) and proof.get("selection_verified") is True:
+                logger.info("同一票档快照已确认目标票档处于选中状态，跳过重复点击")
+                return True
+            clicked = bot._click_price_option_by_config_index(
+                burst=False,
+                coords=cached_coords,
+            )
+            if not clicked:
+                bot._verified_price_selection = None
+                bot._set_terminal_failure("target_price_selection_unconfirmed")
+                return False
+            return self._verify_formal_price_selection_after_click(cached_coords)
+
         if self._config.rush_mode:
-            _burst = self._config.if_commit_order
             if bot._click_price_option_by_config_index(
-                burst=_burst, coords=cached_coords
+                burst=False, coords=cached_coords
             ):
                 return True
 
@@ -555,8 +908,13 @@ class PriceSelector:
                         f"[{indexed_option.get('tag') or '不可售'}]"
                     )
                     return False
-                if not indexed_option.get("text") or bot._price_text_matches_target(
-                    indexed_option.get("text") or ""
+                indexed_text = indexed_option.get("text") or ""
+                if (
+                    bool(indexed_text)
+                    and bot._price_text_matches_target(indexed_text)
+                ) or (
+                    not self._is_formal_commit()
+                    and not indexed_text
                 ):
                     if bot._click_visible_price_option(indexed_option["index"]):
                         logger.info(
@@ -564,7 +922,10 @@ class PriceSelector:
                             f"(price_index={self._config.price_index})"
                         )
                         return True
-            elif bot._click_price_option_by_config_index():
+            elif (
+                not self._is_formal_commit()
+                and bot._click_price_option_by_config_index()
+            ):
                 return True
 
             matched_options = [
@@ -631,7 +992,19 @@ class PriceSelector:
                 ),
                 None,
             )
-            if indexed_option and bot._is_price_option_available(indexed_option):
+            if (
+                indexed_option
+                and bot._is_price_option_available(indexed_option)
+                and (
+                    not self._is_formal_commit()
+                    or (
+                        bool(indexed_option.get("text"))
+                        and bot._price_text_matches_target(
+                            indexed_option.get("text") or ""
+                        )
+                    )
+                )
+            ):
                 if bot._click_visible_price_option(indexed_option["index"]):
                     logger.info(
                         f"文本匹配未命中，使用当前可见票档索引选择: {indexed_option.get('text') or self._config.price} "
@@ -653,6 +1026,10 @@ class PriceSelector:
         logger.info(
             f"文本匹配失败，使用索引选择票价: price_index={self._config.price_index}"
         )
+        if self._is_formal_commit():
+            bot._set_terminal_failure("target_price_unconfirmed")
+            logger.error("目标票档文案仍未确认，正式模式停止")
+            return False
         logger.info(f"通过配置索引直接选择票价: price_index={self._config.price_index}")
         try:
             price_container = bot._find(
@@ -963,20 +1340,7 @@ class PriceSelector:
             texts = bot._collect_descendant_texts(card, xml_root=cached_xml_root)
             text = self._price_option_text_from_descendants(texts)
             source = "ui" if text else ""
-            tag = ""
-            for candidate in texts:
-                if candidate in {
-                    "可预约",
-                    "预售",
-                    "无票",
-                    "已预约",
-                    "缺货",
-                    "售罄",
-                    "已售罄",
-                    "可选",
-                }:
-                    tag = candidate
-                    break
+            tag = self._price_option_tag(texts)
             card_data.append(
                 {
                     "index": index,
@@ -1071,17 +1435,6 @@ class PriceSelector:
             except Exception:
                 screenshot_path = None
 
-        _UNAVAILABLE = {
-            "可预约",
-            "预售",
-            "无票",
-            "已预约",
-            "缺货",
-            "售罄",
-            "已售罄",
-            "可选",
-        }
-
         card_data = []
         ocr_tasks = []
         for index, card_node in enumerate(card_nodes):
@@ -1096,7 +1449,7 @@ class PriceSelector:
 
             price_text = self._price_option_text_from_descendants(texts)
             source = "ui" if price_text else ""
-            tag = next((c for c in texts if c in _UNAVAILABLE), "")
+            tag = self._price_option_tag(texts)
 
             card_bounds = bot._parse_bounds(card_node.get("bounds", ""))
             if not price_text and screenshot_path and card_bounds:

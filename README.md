@@ -79,7 +79,7 @@
 | 旗标 | 含义 |
 | --- | --- |
 | `--probe` | 安全探测：停在“立即购票/立即预订”之前，绝不点击、绝不下单 |
-| `--commit` | 正式抢票：**唯一**会把配置改写为真实下单（`if_commit_order=true`）并提交订单的旗标 |
+| `--commit` | 正式抢票：**唯一**会给本次进程授予真实提交权限并尝试提交订单的旗标；退出后授权自动失效 |
 | `--yes` / `-y` | 仅跳过普通 y/N 交互确认；**不再能单独触发真实下单**——漏敲 `--probe` 不会误付款，脚本会直接报错退出 |
 
 补充规则：
@@ -89,7 +89,7 @@
 - `--commit` 路径无论是否带 `--yes`，启动前都会打印下单摘要（演出/票档/观演人/场次）并倒数 3 秒，`Ctrl-C` 可随时取消
 - 两个旗标都不带时：交互终端会进入强确认闸门，非交互环境直接报错退出
 
-如果当前配置里的 `probe_only / if_commit_order` 和你执行的命令不一致，脚本会先用醒目的日志提醒你，再改写配置并继续执行。
+`--probe / --commit` 会在本次 Python 进程中覆盖 `probe_only / if_commit_order`，不会改写配置文件，也不会把正式提交权限残留到下一次运行。
 
 ## 推荐阅读顺序
 
@@ -114,9 +114,17 @@
 
 ### 1. 安装依赖
 
+先准备 Python 3.8 ~ 3.13（推荐 3.12 或 3.13）和
+[Poetry](https://python-poetry.org/docs/#installation)，再在仓库根目录执行：
+
 ```bash
+poetry env use python3.12  # 已经是受支持版本时可省略
 poetry install
 ```
+
+启动脚本会优先复用项目根目录现有的 `.venv`，否则使用 Poetry 已创建的环境。
+它只做版本和依赖预检，**不会自动安装依赖**；缺依赖时会立即退出并提示先运行
+`poetry install`，避免在开抢前受网络或安装耗时影响。
 
 如果你还没有 Android SDK，建议直接安装 Android Studio（需要 `adb` 命令可用）。
 
@@ -156,7 +164,7 @@ adb devices
 - 这种情况下不会继续搜索、连接设备，也不会写配置
 - 脚本会直接打印“可复制的正确命令”和“规范提示词”，你按输出替换后重试即可
 - 如果当前只连接了一台安卓设备，脚本会自动识别并临时修正 `serial`
-- 在 `apply / probe` 模式下，设备序列号也会一起写回 `mobile/config.jsonc`
+- 在 `apply` 模式下，设备序列号也会一起写回 `mobile/config.jsonc`
 - 推荐提示词格式：`给张三和李四抢4 月 6 号张杰的北京站演唱会内场门票，票价 1680 元`
 - 使用时请把 `张三`、`李四` 替换成你自己已经在大麦 App 中添加成功的真实观演人姓名
 
@@ -164,7 +172,7 @@ adb devices
 
 - `summary`：只预览，不写配置
 - `apply`：写入 `mobile/config.jsonc`，适合你想自己再检查一遍配置
-- `probe`：写入 `mobile/config.jsonc`，并直接执行一次安全探测
+- `probe`：不写配置、不自动导航；只读检查当前前台是否为现有配置中的精确目标详情页
 
 和后面章节的对应关系是：
 
@@ -190,14 +198,16 @@ adb devices
 
 执行完 `apply` 后，直接跳到 [4. 正式提交前再确认一次](#4-正式提交前再确认一次) 继续即可，不需要再回头看 3.2。
 
-如果你想“生成配置 + 直接做安全探测”，运行：
+如果你想“生成配置 + 做安全探测”，先运行 `apply`，检查配置后手动打开
+对应的大麦演出详情页，再运行：
 
 ```bash
 ./mobile/scripts/run_from_prompt.sh --mode probe --yes "给张三和李四抢4 月 6 号张杰的北京站演唱会内场门票，票价 1680 元"
 ```
 
-这就是普通用户最推荐的探测方式。
-也就是说，如果你已经在用自然语言入口，通常**不需要**再单独执行一次 `./mobile/scripts/start_ticket_grabbing.sh --probe`。
+`probe` 全程保持只读：不会为了提示词自动返回、搜索、输入、点击搜索结果或
+点击购票入口；提示词中的演出、城市和日期必须与现有精确配置一致。当前页面
+不匹配时会直接停止，并提示你手动导航。
 
 #### 3.2 手动配置
 
@@ -239,10 +249,10 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 - `city / date / price`：尽量按 App 页面上的原文填写
 - `price_index`：文本匹配失败时的兜底索引，从 `0` 开始
 - `probe_only=true`：脚本内部使用的探测标记；普通用户优先使用 `--probe`
-- `if_commit_order=false`：脚本会继续到确认页并执行观演人勾选校验，但会停在“立即提交”前；正式抢票时 `start_ticket_grabbing.sh --commit` 会自动改成 `true`
-- `auto_navigate=true`：允许脚本从首页/搜索页自动进入目标演出
+- `if_commit_order=false`：脚本会继续到确认页并执行观演人勾选校验，但会停在“立即提交”前；正式抢票时 `start_ticket_grabbing.sh --commit` 会仅在本次进程中覆盖为 `true`
+- `auto_navigate=true`：允许开发验证/正式模式从首页或搜索页进入目标演出；`--probe` 始终忽略它并保持只读
 
-如果你是手动配置用户，完成这一步后，可以直接用下面这条命令做一次安全探测：
+如果你是手动配置用户，先手动亮屏、解锁手机，在大麦里打开配置对应的目标演出详情页并处理完弹窗，再运行：
 
 ```bash
 ./mobile/scripts/start_ticket_grabbing.sh --probe
@@ -250,11 +260,11 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 
 探测通过的标志是：
 
-- 脚本能自动控制大麦 App
-- 能自动定位到目标演出页
+- 脚本确认当前前台就是大麦和配置对应的目标演出页
+- 能只读识别详情页关键控件
 - 在购票点击前停止
 
-如果你执行后看到脚本停在详情页，不代表脚本坏了；这正是 `--probe` 的预期行为。
+`--probe` 不会唤醒手机、启动 App、关闭弹窗、自动搜索或切换页面。看到脚本停在详情页不是故障；如果手机不在目标页，它会要求你手动导航后重试。
 
 开发者补充说明：
 
@@ -286,6 +296,7 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 ```jsonc
 "sell_start_time": "2026-04-06T12:00:00+08:00",
 "countdown_lead_ms": 3000,
+"presale_prewarm_enabled": true,
 "wait_cta_ready_timeout_ms": 0
 ```
 
@@ -293,7 +304,18 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 
 - 精确等到 `12:00`
 - 从 `11:59:57` 开始高频轮询
+- 在倒计时窗口开始时只读预热一次 CTA、页面和异常状态
 - 不走“最长等待 CTA 60 秒”的备用策略
+
+本地性能回归可以完全离线执行，不连接手机、不点击购票：
+
+```bash
+.venv/bin/python -m mobile.hot_path_benchmark \
+  --local --samples 1000 --warmup 100 --json
+```
+
+结果会给出各阶段 `p50`、`p95`、最大耗时和预算是否通过。它只代表
+Python 本地控制路径，不代表大麦网络或安卓 UI 响应时间。
 
 2. 你不知道精确开抢时间，但会手动停在倒计时详情页
    这时可以不填 `sell_start_time`，改用 CTA 等待模式。
@@ -353,7 +375,7 @@ cp mobile/config.example.jsonc mobile/config.jsonc
 
 ```mermaid
 flowchart TD
-    A["第 3 步：自动配置并探测<br/>run_from_prompt --mode probe"] --> D["第 4 步：正式抢票<br/>start_ticket_grabbing.sh --commit --yes<br/>probe_only=false<br/>if_commit_order=true"]
+    A["第 3 步：apply 配置 + 手动打开目标页<br/>再用 run_from_prompt --mode probe 只读探测"] --> D["第 4 步：正式抢票<br/>start_ticket_grabbing.sh --commit --yes<br/>probe_only=false<br/>if_commit_order=true"]
     A --> B["手动配置用户可选：start_ticket_grabbing.sh --probe<br/>安全探测"]
     B --> D
 
@@ -392,9 +414,9 @@ flowchart TD
 |-------|------|--------------|
 | `0` | 成功（探测就绪 / 验证就绪 / 已提交订单 / 检测到待支付订单 / 探测发现账号既有未支付订单） | 结束 |
 | `10` | 所有重试失败（可重试型失败） | 可安全自动重启重试 |
-| `11` | 不可重试失败（`sold_out` / `session_invalid` / `session_not_found` / `reservation_only` / `attendee_unselected` / `submit_unverified`） | **绝不自动重启**——`submit_unverified` 场景重启可能重复下单 |
+| `11` | 不可重试失败（含 `submit_unverified` / `submit_intent_pending_review` / `submit_journal_unavailable`） | **绝不自动重启**——先人工核实订单并处理 submit intent |
 | `12` | 配置或设备错误（配置解析/校验失败、设备连接失败、运行期设备异常） | 修复环境后再试；不建议盲目自动重启 |
-| `13` | reserved：实例互斥冲突（U-15 落地后启用，当前任何路径不会返回） | — |
+| `13` | 同一台设备已有 HaTickets 实例运行 | 保留已有实例，本次不要重启 |
 | `130` | 用户中断（Ctrl-C / SIGINT） | 人为取消，无需处理 |
 
 脚本自身的 pre-flight 失败仍使用退出码 `1-4`（`1`=参数/配置/取消、`2`=Poetry 缺失、`3`=依赖安装失败、`4`=Python 版本不符），与运行层的 `10+` 数值不冲突——编排器按 `>= 10` 判定为运行层结果。
@@ -405,7 +427,7 @@ flowchart TD
 
 | 字段 | 含义 |
 |------|------|
-| `schema_version` | 摘要 schema 版本，当前 `1` |
+| `schema_version` | 摘要 schema 版本，当前 `2` |
 | `outcome` | `probe_ready` / `validation_ready` / `order_submitted` / `order_pending_payment` / `preexisting_pending_order`（探测到账号既有未支付订单，非本次提交）/ `success`（兜底）/ `retries_exhausted` / `terminal_failure` / `config_or_device_error` / `interrupted` |
 | `exit_code` | 与进程退出码一致 |
 | `serial` | 本次生效的设备序列号（含 `--serial` 覆盖后的值），未配置为 `null` |
@@ -413,13 +435,14 @@ flowchart TD
 | `attempts` | 总执行轮次：外层尝试与快速重试各计 `1`（如外层 3 次 + 每次 8 轮快速重试全失败 = 27） |
 | `duration_ms` | 进程内运行总耗时（毫秒） |
 | `terminal_reason` | 不可重试原因或 `init_error: ...` / `run_error: ...` / `keyboard_interrupt`；无则 `null` |
+| `submit_intent` | 当前 durable submit intent 的 `intent_id/state`；没有则为 `null` |
 | `started_at` / `finished_at` | 本地时区 ISO 时间戳 |
 
 示例：
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "outcome": "probe_ready",
   "exit_code": 0,
   "serial": "emulator-5554",
@@ -427,12 +450,34 @@ flowchart TD
   "attempts": 1,
   "duration_ms": 8432,
   "terminal_reason": null,
+  "submit_intent": null,
   "started_at": "2026-07-10T11:55:01+08:00",
   "finished_at": "2026-07-10T11:55:09+08:00"
 }
 ```
 
 写摘要失败（目录不可写、磁盘满）只记 warning，绝不影响退出码。
+
+### 崩溃后的重复提交保护
+
+正式提交前会先把 durable submit intent 写入本机状态目录并完成 `fsync`，随后只点击一次“立即提交”。只要该 active intent 尚未人工归档，进程重启、刷新恢复和确认页快速重试都只能只读核验订单状态，不能再次自动提交。
+
+先查看当前状态（不会操作 App）：
+
+```bash
+.venv/bin/python -m mobile.damai_app.submit_journal status --serial <adb序列号>
+```
+
+确认已经在大麦订单列表核实为“已支付 / 已取消 / 确认没有订单”后，才能在交互终端归档。命令会再次要求输入完整 intent ID：
+
+```bash
+.venv/bin/python -m mobile.damai_app.submit_journal acknowledge \
+  --serial <adb序列号> \
+  --intent-id <status显示的完整UUID> \
+  --resolution confirmed-no-order
+```
+
+`--resolution` 只允许 `paid`、`cancelled`、`confirmed-no-order`。系统不会按超时、文件年龄、售罄文案或目标变化自动清除 intent。
 
 ### --serial：同一份 config 复用到多台设备
 

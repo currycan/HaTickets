@@ -232,7 +232,12 @@ class UIPrimitives:
         热路径（cache hit）:  _click_coordinates = 1 次 HTTP 调用，跳过所有元素查找。
         Returns True if tapped, False if element not found within timeout.
         """
-        cached = self._cached_hot_path_coords.get(cache_key)
+        cache_getter = getattr(self, "_get_hot_coord", None)
+        cached = (
+            cache_getter(cache_key)
+            if callable(cache_getter)
+            else self._cached_hot_path_coords.get(cache_key)
+        )
         if cached:
             self._click_coordinates(*cached)
             return True
@@ -247,7 +252,11 @@ class UIPrimitives:
             if isinstance(bounds, dict) and "left" in bounds:
                 x = (int(bounds["left"]) + int(bounds["right"])) // 2
                 y = (int(bounds["top"]) + int(bounds["bottom"])) // 2
-                self._cached_hot_path_coords[cache_key] = (x, y)
+                cache_putter = getattr(self, "_put_hot_coord", None)
+                if callable(cache_putter):
+                    cache_putter(cache_key, (x, y))
+                else:
+                    self._cached_hot_path_coords[cache_key] = (x, y)
                 self._click_coordinates(x, y)
                 return True
             # Fallback: couldn't extract bounds — click via element center (no caching).

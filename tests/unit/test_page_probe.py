@@ -2,10 +2,20 @@
 """Unit tests for mobile/page_probe.py — PageProbe class."""
 
 import time as _time_module
+from types import SimpleNamespace
 
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from mobile.page_probe import PageProbe, PageState, _DEFAULT_RESULT  # noqa: F401
+from mobile.page_probe import (  # noqa: F401
+    MANUAL_VERIFICATION_MARKERS,
+    PENDING_ORDER_MARKERS,
+    PageProbe,
+    PageState,
+    _DEFAULT_RESULT,
+    _MANUAL_VERIFICATION_TEXT_PATTERN,
+    _PENDING_ORDER_TEXT_PATTERN,
+    _TRANSIENT_ERROR_TEXT_PATTERN,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +66,23 @@ class TestFastProbe:
         result = probe.probe_current_page(fast=True)
 
         assert result["state"] == "homepage"
+
+    def test_same_activity_name_from_other_package_is_not_damai_homepage(self):
+        device = _make_device("com.example.MainActivity")
+        device.app_current.return_value = {
+            "package": "com.example.other",
+            "activity": "com.example.MainActivity",
+        }
+        probe = PageProbe(
+            device,
+            config=SimpleNamespace(app_package="cn.damai"),
+            cache_ttl_s=0,
+        )
+
+        result = probe.probe_current_page(fast=True)
+
+        assert result["state"] == "unknown"
+        assert device.app_current.call_count == 1
 
     def test_search_page_by_activity(self):
         device = _make_device("com.damai.SearchActivity")
@@ -144,6 +171,24 @@ class TestTTLCache:
         result2 = probe.probe_current_page(fast=True)
         assert result2["state"] == "sku_page"
 
+    def test_full_probe_does_not_reuse_fast_only_cache(self):
+        device = _make_device("com.damai.ProjectDetailActivity")
+        probe = PageProbe(device, cache_ttl_s=10.0)
+
+        assert probe.probe_current_page(fast=True)["state"] == "detail_page"
+
+        def element_factory(**kwargs):
+            el = Mock()
+            el.exists = (
+                kwargs.get("textMatches") == _PENDING_ORDER_TEXT_PATTERN
+            )
+            return el
+
+        device.side_effect = element_factory
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "pending_order_dialog"
+
 
 # ---------------------------------------------------------------------------
 # Full probe tests
@@ -154,6 +199,157 @@ class TestFullProbe:
     """Tests for the full probe mode (Activity + element detection)."""
 
     # --- Activity-based fast path within full probe ---
+
+    def test_detail_snapshot_reuses_title_venue_and_startup_state(self):
+        device = _make_device("com.damai.ProjectDetailActivity")
+        device.app_current.return_value = {
+            "package": "cn.damai",
+            "activity": "com.damai.ProjectDetailActivity",
+        }
+        device.dump_hierarchy.return_value = """
+        <hierarchy>
+          <node resource-id="cn.damai:id/title_tv" text="苏州演唱会" />
+          <node resource-id="cn.damai:id/venue_name_0" text="苏州奥体中心" />
+          <node resource-id="cn.damai:id/info_v2_price_layout" />
+          <node
+            resource-id="cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
+          />
+        </hierarchy>
+        """
+        probe = PageProbe(
+            device,
+            config=SimpleNamespace(app_package="cn.damai"),
+            cache_ttl_s=0,
+        )
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "detail_page"
+        assert result["observed_title"] == "苏州演唱会"
+        assert result["observed_venue"] == "苏州奥体中心"
+        assert result["login_prompt"] is False
+        assert result["startup_popup_resource_ids"] == ()
+        assert result["startup_popup_texts"] == ()
+        assert result["snapshot_observed_at"] > 0
+        device.assert_not_called()
+
+    def test_borrows_fresh_full_detail_snapshot_with_exact_generation(self):
+        device = _make_device("com.damai.ProjectDetailActivity")
+        device.app_current.return_value = {
+            "package": "cn.damai",
+            "activity": "com.damai.ProjectDetailActivity",
+        }
+        device.dump_hierarchy.return_value = (
+            "<hierarchy>"
+            '<node resource-id="cn.damai:id/title_tv" text="目标演出" />'
+            '<node resource-id="cn.damai:id/'
+            'trade_project_detail_purchase_status_bar_container_fl" '
+            'bounds="[100,1200][700,1400]" />'
+            '<node resource-id="cn.damai:id/info_v2_price_layout" />'
+            "</hierarchy>"
+        )
+        probe = PageProbe(
+            device,
+            config=SimpleNamespace(app_package="cn.damai"),
+            cache_ttl_s=0.5,
+        )
+
+        result = probe.probe_current_page(fast=False)
+        borrowed = probe.borrow_fresh_detail_snapshot(result)
+
+        assert borrowed is not None
+        assert borrowed["snapshot_generation"] == result["snapshot_generation"]
+        assert borrowed["foreground_package"] == "cn.damai"
+        assert borrowed["activity"] == "com.damai.ProjectDetailActivity"
+        assert borrowed["overlay"] is None
+        assert borrowed["cta_inspection"]["coords"] == (400, 1300)
+
+    def test_fresh_detail_snapshot_rejects_copy_expiry_and_invalidation(self):
+        device = _make_device("com.damai.ProjectDetailActivity")
+        device.app_current.return_value = {
+            "package": "cn.damai",
+            "activity": "com.damai.ProjectDetailActivity",
+        }
+        device.dump_hierarchy.return_value = (
+            "<hierarchy>"
+            '<node resource-id="cn.damai:id/'
+            'trade_project_detail_purchase_status_bar_container_fl" '
+            'bounds="[100,1200][700,1400]" />'
+            '<node resource-id="cn.damai:id/info_v2_price_layout" />'
+            "</hierarchy>"
+        )
+        probe = PageProbe(
+            device,
+            config=SimpleNamespace(app_package="cn.damai"),
+            cache_ttl_s=0.5,
+        )
+        result = probe.probe_current_page(fast=False)
+
+        assert probe.borrow_fresh_detail_snapshot(dict(result)) is None
+        with patch(
+            "mobile.page_probe.time.monotonic",
+            return_value=result["snapshot_observed_at"] + 0.251,
+        ):
+            assert probe.borrow_fresh_detail_snapshot(result) is None
+
+        probe.invalidate_cache()
+        assert probe.borrow_fresh_detail_snapshot(result) is None
+
+    def test_fresh_detail_snapshot_rejects_package_activity_and_cta_drift(self):
+        device = _make_device("com.damai.ProjectDetailActivity")
+        device.app_current.return_value = {
+            "package": "cn.damai",
+            "activity": "com.damai.ProjectDetailActivity",
+        }
+        device.dump_hierarchy.return_value = (
+            "<hierarchy>"
+            '<node resource-id="cn.damai:id/'
+            'trade_project_detail_purchase_status_bar_container_fl" '
+            'bounds="[100,1200][700,1400]" />'
+            '<node resource-id="cn.damai:id/info_v2_price_layout" />'
+            "</hierarchy>"
+        )
+        probe = PageProbe(
+            device,
+            config=SimpleNamespace(app_package="cn.damai"),
+            cache_ttl_s=0.5,
+        )
+        result = probe.probe_current_page(fast=False)
+
+        probe._last_foreground_package = "other.app"
+        assert probe.borrow_fresh_detail_snapshot(result) is None
+        probe._last_foreground_package = "cn.damai"
+        probe._last_activity = "com.damai.MainActivity"
+        assert probe.borrow_fresh_detail_snapshot(result) is None
+        probe._last_activity = result["activity"]
+        probe._last_snapshot_cta_inspection["resource_id"] = "other:id/button"
+        assert probe.borrow_fresh_detail_snapshot(result) is None
+
+    def test_new_hierarchy_generation_invalidates_prior_borrow_proof(self):
+        device = _make_device("com.damai.ProjectDetailActivity")
+        device.app_current.return_value = {
+            "package": "cn.damai",
+            "activity": "com.damai.ProjectDetailActivity",
+        }
+        device.dump_hierarchy.return_value = (
+            "<hierarchy>"
+            '<node resource-id="cn.damai:id/'
+            'trade_project_detail_purchase_status_bar_container_fl" '
+            'bounds="[100,1200][700,1400]" />'
+            '<node resource-id="cn.damai:id/info_v2_price_layout" />'
+            "</hierarchy>"
+        )
+        probe = PageProbe(
+            device,
+            config=SimpleNamespace(app_package="cn.damai"),
+            cache_ttl_s=0.5,
+        )
+        result = probe.probe_current_page(fast=False)
+        assert probe.borrow_fresh_detail_snapshot(result) is not None
+
+        assert probe.probe_blocking_overlay() is None
+
+        assert probe.borrow_fresh_detail_snapshot(result) is None
 
     def test_detail_page_by_activity_fast_path(self):
         """Full probe uses Activity shortcut for ProjectDetail, confirms with purchase bar."""
@@ -224,6 +420,36 @@ class TestFullProbe:
         assert result["state"] == "detail_page"
         assert result["price_container"] is True
 
+    def test_detail_page_reuses_hierarchy_snapshot_without_selector_rpcs(self):
+        device = _make_device("com.damai.ProjectDetailActivity")
+        device.dump_hierarchy.return_value = (
+            "<hierarchy>"
+            '<node resource-id="cn.damai:id/'
+            'trade_project_detail_purchase_status_bar_container_fl" '
+            'bounds="[100,1200][700,1400]" />'
+            '<node resource-id="cn.damai:id/project_detail_price_layout" />'
+            "</hierarchy>"
+        )
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "detail_page"
+        assert result["purchase_button"] is True
+        assert result["price_container"] is True
+        assert probe._last_snapshot_cta_inspection == {
+            "resource_id": (
+                "cn.damai:id/"
+                "trade_project_detail_purchase_status_bar_container_fl"
+            ),
+            "text": None,
+            "coords": (400, 1300),
+            "kind": "canvas",
+            "device_error": False,
+            "source": "hierarchy_snapshot",
+        }
+        device.assert_not_called()
+
     def test_detail_page_fast_path_price_container_absent(self):
         """无任何价格区锚点时 price_container 保持 False（probe_only 判未就绪）。"""
         device = _make_device("com.damai.ProjectDetailActivity")
@@ -245,8 +471,24 @@ class TestFullProbe:
         assert result["price_container"] is False
 
     def test_sku_page_by_activity_fast_path(self):
-        """Full probe uses Activity shortcut for NcovSku, sets price_container."""
+        """NcovSku identifies page type but does not invent missing controls."""
         device = _make_device("com.damai.NcovSkuActivity")
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "sku_page"
+        assert result["price_container"] is False
+        assert result["quantity_picker"] is False
+
+    def test_sku_activity_reports_only_observed_ready_controls(self):
+        device = _make_device("com.damai.NcovSkuActivity")
+        device.dump_hierarchy.return_value = """
+        <hierarchy>
+          <node resource-id="cn.damai:id/layout_price" />
+          <node resource-id="cn.damai:id/layout_num" />
+        </hierarchy>
+        """
         probe = PageProbe(device, cache_ttl_s=0)
 
         result = probe.probe_current_page(fast=False)
@@ -254,6 +496,21 @@ class TestFullProbe:
         assert result["state"] == "sku_page"
         assert result["price_container"] is True
         assert result["quantity_picker"] is True
+
+    def test_sku_activity_loading_snapshot_is_not_actionable(self):
+        device = _make_device("com.damai.NcovSkuActivity")
+        device.dump_hierarchy.return_value = """
+        <hierarchy>
+          <node resource-id="cn.damai:id/sku_loading" />
+        </hierarchy>
+        """
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "sku_page"
+        assert result["price_container"] is False
+        assert result["quantity_picker"] is False
 
     def test_homepage_by_activity_fast_path(self):
         """Full probe uses Activity shortcut for MainActivity."""
@@ -273,8 +530,8 @@ class TestFullProbe:
 
         assert result["state"] == "search_page"
 
-    def test_activity_fast_path_skips_element_checks(self):
-        """When Activity matches, element lookups should NOT be called (except confirmation)."""
+    def test_activity_fast_path_only_checks_priority_overlays(self):
+        """Known activities still check dialogs/errors that can cover the page."""
         device = _make_device("com.damai.MainActivity")
         mock_element = Mock()
         mock_element.exists = False
@@ -284,8 +541,11 @@ class TestFullProbe:
         result = probe.probe_current_page(fast=False)
 
         assert result["state"] == "homepage"
-        # device() should not have been called for element checks
-        device.assert_not_called()
+        assert device.call_count == 4
+        device.assert_any_call(resourceId="cn.damai:id/id_boot_action_agree")
+        device.assert_any_call(textMatches=_PENDING_ORDER_TEXT_PATTERN)
+        device.assert_any_call(textMatches=_MANUAL_VERIFICATION_TEXT_PATTERN)
+        device.assert_any_call(textMatches=_TRANSIENT_ERROR_TEXT_PATTERN)
 
     # --- Element-based slow path (ambiguous Activity) ---
 
@@ -328,6 +588,170 @@ class TestFullProbe:
 
         assert result["state"] == "consent_dialog"
 
+    def test_pending_order_dialog_overrides_detail_activity(self):
+        device = _make_device("com.damai.ProjectDetailActivity")
+
+        def element_factory(**kwargs):
+            el = Mock()
+            el.exists = (
+                kwargs.get("textMatches") == _PENDING_ORDER_TEXT_PATTERN
+            )
+            return el
+
+        device.side_effect = element_factory
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "pending_order_dialog"
+        assert result["pending_order_dialog"] is True
+
+    def test_transient_error_overrides_sku_activity(self):
+        device = _make_device("com.damai.NcovSkuActivity")
+
+        def element_factory(**kwargs):
+            el = Mock()
+            el.exists = (
+                kwargs.get("textMatches") == _TRANSIENT_ERROR_TEXT_PATTERN
+            )
+            return el
+
+        device.side_effect = element_factory
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "transient_error"
+        assert result["transient_error"] is True
+
+    def test_transient_snapshot_carries_exact_retry_coordinates(self):
+        device = _make_device("com.damai.NcovSkuActivity")
+        device.dump_hierarchy.return_value = """
+        <hierarchy>
+          <node resource-id="cn.damai:id/app_root">
+            <node resource-id="cn.damai:id/network_error_panel">
+              <node text="网络开小差，请稍后重试" />
+              <node clickable="true" bounds="[100,200][300,300]">
+                <node text="重新加载" />
+              </node>
+            </node>
+          </node>
+        </hierarchy>
+        """
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "transient_error"
+        assert result["transient_retry_coords"] == (200, 250)
+        assert result["snapshot_observed_at"] > 0
+
+    def test_transient_snapshot_rejects_retry_from_unrelated_region(self):
+        device = _make_device("com.damai.NcovSkuActivity")
+        device.dump_hierarchy.return_value = """
+        <hierarchy>
+          <node resource-id="cn.damai:id/app_root">
+            <node resource-id="cn.damai:id/page_content">
+              <node text="网络异常" bounds="[0,0][300,100]" />
+              <node text="刷新" clickable="true"
+                    bounds="[800,0][1000,100]" />
+            </node>
+          </node>
+        </hierarchy>
+        """
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "transient_error"
+        assert result["transient_retry_coords"] is None
+
+    def test_transient_snapshot_never_pairs_through_hierarchy_root(self):
+        device = _make_device("com.damai.NcovSkuActivity")
+        device.dump_hierarchy.return_value = """
+        <hierarchy>
+          <node text="网络异常" bounds="[0,0][300,100]" />
+          <node text="重试" bounds="[100,200][300,300]" />
+        </hierarchy>
+        """
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "transient_error"
+        assert result["transient_retry_coords"] is None
+
+    def test_manual_verification_overrides_detail_activity(self):
+        device = _make_device("com.damai.ProjectDetailActivity")
+
+        def element_factory(**kwargs):
+            element = Mock()
+            element.exists = (
+                kwargs.get("textMatches") == _MANUAL_VERIFICATION_TEXT_PATTERN
+            )
+            return element
+
+        device.side_effect = element_factory
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "manual_verification"
+        assert result["manual_verification"] is True
+
+    def test_all_manual_verification_markers_override_page(self):
+        for marker in MANUAL_VERIFICATION_MARKERS:
+            device = _make_device("com.damai.ProjectDetailActivity")
+            device.dump_hierarchy.return_value = (
+                f'<hierarchy><node text="{marker}" /></hierarchy>'
+            )
+
+            result = PageProbe(device, cache_ttl_s=0).probe_blocking_overlay()
+
+            assert result is not None, marker
+            assert result["state"] == "manual_verification", marker
+            assert result["manual_verification"] is True, marker
+
+    def test_all_pending_order_markers_override_page(self):
+        for marker in PENDING_ORDER_MARKERS:
+            device = _make_device("com.damai.ProjectDetailActivity")
+            device.dump_hierarchy.return_value = (
+                f'<hierarchy><node text="{marker}" /></hierarchy>'
+            )
+
+            result = PageProbe(device, cache_ttl_s=0).probe_blocking_overlay()
+
+            assert result is not None, marker
+            assert result["state"] == "pending_order_dialog", marker
+            assert result["pending_order_dialog"] is True, marker
+
+    def test_generic_order_payment_copy_is_not_pending_dialog(self):
+        device = _make_device("com.damai.ProjectDetailActivity")
+        device.dump_hierarchy.return_value = """
+        <hierarchy>
+          <node text="订单信息" />
+          <node text="支付方式" />
+        </hierarchy>
+        """
+
+        result = PageProbe(device, cache_ttl_s=0).probe_blocking_overlay()
+
+        assert result is None
+
+    def test_hidden_error_marker_does_not_override_visible_page(self):
+        device = _make_device("com.damai.ProjectDetailActivity")
+        device.dump_hierarchy.return_value = """
+        <hierarchy>
+          <node text="网络异常" visible-to-user="false" />
+          <node resource-id="cn.damai:id/title_tv"
+                visible-to-user="true" />
+        </hierarchy>
+        """
+
+        result = PageProbe(device, cache_ttl_s=0).probe_blocking_overlay()
+
+        assert result is None
+
     def test_sku_page_detected_by_layout(self):
         """Full probe detects sku_page by layout_sku resource ID (element fallback)."""
         device = _make_device("com.damai.SomeActivity")
@@ -346,7 +770,7 @@ class TestFullProbe:
         result = probe.probe_current_page(fast=False)
 
         assert result["state"] == "sku_page"
-        assert result["quantity_picker"] is True
+        assert result["quantity_picker"] is False
 
     def test_homepage_detected_by_search_header(self):
         """Full probe detects homepage by search header resource ID (element fallback)."""
@@ -510,6 +934,24 @@ class TestClassifySessionPicker:
         assert result["state"] == "sku_page"
         assert result["state"] != PageState.SESSION_PICKER.value
 
+    def test_fast_session_probe_reports_device_error_instead_of_absent(self):
+        device = _make_device("com.damai.NcovSkuActivity")
+        calls = {"count": 0}
+
+        def element_factory(**kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                el = Mock()
+                el.exists = False
+                return el
+            raise RuntimeError("device disconnected")
+
+        device.side_effect = element_factory
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        assert probe.probe_session_picker_markers() is None
+        assert probe._last_session_probe_device_error is True
+
 
 class TestPageStateEnum:
     def test_session_picker_value(self):
@@ -589,7 +1031,7 @@ class TestUnknownThreshold:
         assert probe.dumped_xml_path is not None
         assert os.path.exists(probe.dumped_xml_path)
 
-    def test_unknown_threshold_clamps_to_min_one(self, tmp_path):
+    def test_unknown_threshold_zero_disables_dump(self, tmp_path):
         device = _make_device(activity="")
         device.dump_hierarchy.return_value = "<hierarchy/>"
         probe = PageProbe(
@@ -598,9 +1040,8 @@ class TestUnknownThreshold:
             unknown_threshold=0,
             dump_dir=str(tmp_path),
         )
-        # threshold=0 is clamped to 1 → first unknown triggers immediately.
         probe.probe_current_page()
-        assert probe.dumped_xml_path is not None
+        assert probe.dumped_xml_path is None
 
 
 class TestForceState:
@@ -662,26 +1103,13 @@ class TestForceState:
 # ---------------------------------------------------------------------------
 
 
-import pytest  # noqa: E402
-
-
 class TestUnknownThresholdZeroBoundary:
     """W3-03 qa-added 边界用例：把 unknown_threshold=0 的语义 lock-in。"""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "qa intent: unknown_threshold=0 应禁用告警 (never dump)。"
-            "当前实现在 mobile/page_probe.py PageProbe.__init__ 内做 max(1, ...) "
-            "夹紧，第一次 unknown 即触发 dump — 行为与名字相反。"
-            "本测试 xfail 等待源码语义澄清/修复后转为 pass；"
-            "见 tests/manual/W3_regression_summary.md 'New issues' 区。"
-        ),
-    )
     def test_unknown_threshold_zero_disables_alert(self, tmp_path):
         """传 unknown_threshold=0 时，无论多少次 unknown 都不应触发告警/dump。
 
-        当前实现：clamp 到 1 → 第一次 unknown 即 dump，本测试 xfail。
+        0 表示禁用 unknown 告警与 dump。
         """
         device = _make_device(activity="")
         device.dump_hierarchy.return_value = "<hierarchy/>"

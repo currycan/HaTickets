@@ -10,9 +10,10 @@ import os
 import re
 import sys
 import time
+from math import ceil
 from pathlib import Path
 from statistics import mean
-from typing import Optional
+from typing import Callable, Mapping, Optional
 
 try:
     from mobile.config import CONFIG_OVERRIDE_ENV_VAR, Config
@@ -23,6 +24,15 @@ except ImportError:
 
 
 START_STATE = "detail_page"
+LOCAL_BENCHMARK_SCHEMA_VERSION = 1
+LOCAL_STAGE_BUDGETS_MS = {
+    "cta_match_parse": 0.10,
+    "detail_probe_fast_path": 0.25,
+    "result_json_encode": 0.50,
+}
+LOCAL_BENCHMARK_SCOPE = (
+    "仅测本地 Python 控制路径；不连接设备、不访问网络、不点击购票或提交订单"
+)
 
 
 class StepTimelineRecorder(logging.Handler):
@@ -131,6 +141,23 @@ def parse_args(argv=None):
     parser.add_argument(
         "--json", action="store_true", dest="json_output", help="输出 JSON 结果"
     )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="运行无真机、无网络、无下单的本地毫秒级微基准",
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=1000,
+        help="本地微基准每个阶段的采样数，默认 1000",
+    )
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=100,
+        help="本地微基准每个阶段的预热次数，默认 100",
+    )
     return parser.parse_args(argv)
 
 
@@ -202,6 +229,232 @@ def _fast_check_detail_page(bot: DamaiBot) -> dict | None:
     except Exception:
         pass
     return None
+
+
+class _LocalDetailProbeBot:
+    """Device-free stand-in for the benchmark's detail-page adapter."""
+
+    @staticmethod
+    def _find_all(_by, _value):
+        return (object(),)
+
+
+_LOCAL_DETAIL_PROBE_BOT = _LocalDetailProbeBot()
+_LOCAL_CTA_MATCH_MESSAGE = "CTA_MATCH: text='立即预订' polls=3 (开售已开始)"
+_LOCAL_RESULT_PAYLOAD = {
+    "mode": "probe",
+    "outcome": "probe_ready",
+    "state": "detail_page",
+    "submit_intent": None,
+}
+
+
+def _local_cta_match_parse():
+    """Exercise the compiled CTA log parser with a fixed representative line."""
+    match = StepTimelineRecorder._CTA_MATCH_PATTERN.search(_LOCAL_CTA_MATCH_MESSAGE)
+    if match is None:
+        raise RuntimeError("本地 CTA 样本未命中")
+    return match.group("text"), int(match.group("polls"))
+
+
+def _local_detail_probe_fast_path():
+    """Exercise the real fast detail-page adapter without a device lookup."""
+    probe = _fast_check_detail_page(_LOCAL_DETAIL_PROBE_BOT)
+    if probe is None or probe.get("state") != START_STATE:
+        raise RuntimeError("本地详情页样本分类失败")
+    return probe
+
+
+def _local_result_json_encode():
+    """Exercise deterministic JSON encoding of a representative safe result."""
+    return json.dumps(
+        _LOCAL_RESULT_PAYLOAD,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _local_stage_workloads() -> dict[str, Callable[[], object]]:
+    """Return fixed workloads in a stable order for repeatable local runs."""
+    return {
+        "cta_match_parse": _local_cta_match_parse,
+        "detail_probe_fast_path": _local_detail_probe_fast_path,
+        "result_json_encode": _local_result_json_encode,
+    }
+
+
+def _nearest_rank_percentile(values: list[float], percentile: int) -> float:
+    """Return a deterministic nearest-rank percentile for non-empty samples."""
+    if not values:
+        raise ValueError("百分位样本不能为空")
+    if not 0 < percentile <= 100:
+        raise ValueError("percentile 必须在 1 到 100 之间")
+
+    ordered = sorted(float(value) for value in values)
+    rank = max(1, ceil((percentile / 100) * len(ordered)))
+    return ordered[rank - 1]
+
+
+def summarize_stage_samples(
+    stage_samples_ms: Mapping[str, list[float]],
+    stage_budgets_ms: Optional[Mapping[str, float]] = None,
+) -> dict:
+    """Summarise per-stage local timings and evaluate p95 budgets.
+
+    Nearest-rank percentiles avoid interpolation differences across Python
+    versions. Stage names are sorted so JSON output ordering is repeatable.
+    """
+    if not stage_samples_ms:
+        raise ValueError("至少需要一个基准阶段")
+
+    budgets = (
+        dict(LOCAL_STAGE_BUDGETS_MS)
+        if stage_budgets_ms is None
+        else dict(stage_budgets_ms)
+    )
+    stages = {}
+    overall_pass = True
+
+    for stage_name in sorted(stage_samples_ms):
+        samples = [float(value) for value in stage_samples_ms[stage_name]]
+        if not samples:
+            raise ValueError(f"{stage_name} 阶段没有样本")
+        if any(value < 0 for value in samples):
+            raise ValueError(f"{stage_name} 阶段包含负耗时")
+        if stage_name not in budgets:
+            raise ValueError(f"{stage_name} 阶段缺少预算")
+
+        budget_ms = float(budgets[stage_name])
+        if budget_ms < 0:
+            raise ValueError(f"{stage_name} 阶段预算不能为负数")
+
+        p50_ms = _nearest_rank_percentile(samples, 50)
+        p95_ms = _nearest_rank_percentile(samples, 95)
+        max_ms = max(samples)
+        budget_pass = p95_ms <= budget_ms
+        overall_pass = overall_pass and budget_pass
+        stages[stage_name] = {
+            "sample_count": len(samples),
+            "p50_ms": round(p50_ms, 6),
+            "p95_ms": round(p95_ms, 6),
+            "max_ms": round(max_ms, 6),
+            "budget_metric": "p95_ms",
+            "budget_ms": round(budget_ms, 6),
+            "budget_pass": budget_pass,
+        }
+
+    return {
+        "stage_count": len(stages),
+        "stages": stages,
+        "budget_pass": overall_pass,
+    }
+
+
+def _measure_stage_ms(
+    workload: Callable[[], object],
+    samples: int,
+    warmup: int,
+    timer_ns: Callable[[], int],
+) -> list[float]:
+    """Measure one deterministic workload with a monotonic nanosecond clock."""
+    for _ in range(warmup):
+        workload()
+
+    elapsed_values = []
+    for _ in range(samples):
+        started_ns = timer_ns()
+        workload()
+        finished_ns = timer_ns()
+        if finished_ns < started_ns:
+            raise RuntimeError("本地基准时钟发生倒退")
+        elapsed_values.append((finished_ns - started_ns) / 1_000_000)
+    return elapsed_values
+
+
+def run_local_benchmark(
+    samples: int = 1000,
+    warmup: int = 100,
+    *,
+    timer_ns: Optional[Callable[[], int]] = None,
+    workloads: Optional[Mapping[str, Callable[[], object]]] = None,
+    stage_budgets_ms: Optional[Mapping[str, float]] = None,
+) -> dict:
+    """Run a repeatable, device-free microbenchmark of local hot-path helpers."""
+    if samples < 1:
+        raise ValueError("samples 必须大于等于 1")
+    if warmup < 0:
+        raise ValueError("warmup 必须大于等于 0")
+
+    clock = timer_ns or time.perf_counter_ns
+    selected_workloads = (
+        _local_stage_workloads() if workloads is None else dict(workloads)
+    )
+    if not selected_workloads:
+        raise ValueError("至少需要一个基准阶段")
+
+    stage_samples_ms = {}
+    for stage_name in sorted(selected_workloads):
+        workload = selected_workloads[stage_name]
+        if not callable(workload):
+            raise ValueError(f"{stage_name} 阶段 workload 不可调用")
+        stage_samples_ms[stage_name] = _measure_stage_ms(
+            workload,
+            samples=samples,
+            warmup=warmup,
+            timer_ns=clock,
+        )
+
+    summary = summarize_stage_samples(stage_samples_ms, stage_budgets_ms)
+    return {
+        "schema_version": LOCAL_BENCHMARK_SCHEMA_VERSION,
+        "mode": "local_microbenchmark",
+        "scope": LOCAL_BENCHMARK_SCOPE,
+        "safety": {
+            "device_required": False,
+            "network_access": False,
+            "purchase_click": False,
+            "order_submission": False,
+        },
+        "clock": "perf_counter_ns",
+        "deterministic_workloads": True,
+        "sample_count_per_stage": samples,
+        "warmup_count_per_stage": warmup,
+        **summary,
+    }
+
+
+def format_local_report(payload: dict) -> str:
+    """Render the local microbenchmark without implying device performance."""
+    lines = [
+        "本地热路径微基准（安全离线）",
+        (
+            f"每阶段 samples={payload['sample_count_per_stage']}, "
+            f"warmup={payload['warmup_count_per_stage']}"
+        ),
+        "",
+        "关键阶段:",
+    ]
+
+    for stage_name in sorted(payload["stages"]):
+        stage = payload["stages"][stage_name]
+        status = "PASS" if stage["budget_pass"] else "FAIL"
+        lines.append(
+            f"- {stage_name}: n={stage['sample_count']}, "
+            f"p50={stage['p50_ms']:.6f}ms, "
+            f"p95={stage['p95_ms']:.6f}ms, "
+            f"max={stage['max_ms']:.6f}ms, "
+            f"budget(p95)<={stage['budget_ms']:.6f}ms [{status}]"
+        )
+
+    lines.extend(
+        [
+            "",
+            f"总预算: {'PASS' if payload['budget_pass'] else 'FAIL'}",
+            f"范围: {payload['scope']}",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _shell_back(bot: DamaiBot, count: int = 1):
@@ -303,9 +556,9 @@ def _run_one(
     """Execute one timed ticket-grabbing attempt and return (success, elapsed, final_probe, timeline)."""
     recorder, attached_loggers = _attach_timeline_recorder()
     try:
-        start_time = time.time()
+        start_time = time.monotonic()
         success = bot.run_ticket_grabbing(initial_page_probe=run_start_probe)
-        elapsed_seconds = round(time.time() - start_time, 2)
+        elapsed_seconds = round(time.monotonic() - start_time, 2)
     finally:
         _detach_timeline_recorder(recorder, attached_loggers)
     final_probe = bot.probe_current_page()
@@ -341,9 +594,9 @@ def run_benchmark(bot: DamaiBot, runs: int) -> dict:
         recovery_seconds = None
         recovery_state = final_probe["state"]
         if index < runs - 1:
-            recovery_start = time.time()
+            recovery_start = time.monotonic()
             recovery_probe = _require_detail_start(bot, f"第 {index + 2} 轮准备")
-            recovery_seconds = round(time.time() - recovery_start, 2)
+            recovery_seconds = round(time.monotonic() - recovery_start, 2)
             recovery_state = recovery_probe["state"]
 
         results.append(
@@ -420,6 +673,23 @@ def format_report(payload: dict) -> str:
 
 def main(argv=None):
     args = parse_args(argv)
+
+    if args.local:
+        try:
+            payload = run_local_benchmark(
+                samples=args.samples,
+                warmup=args.warmup,
+            )
+        except Exception as exc:
+            print(f"本地热路径微基准失败: {exc}", file=sys.stderr)
+            return 1
+
+        if args.json_output:
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            print(format_local_report(payload))
+        return 0 if payload["budget_pass"] else 1
+
     if args.runs < 1:
         print("runs 必须大于等于 1", file=sys.stderr)
         return 1
