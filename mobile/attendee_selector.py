@@ -14,6 +14,7 @@ from mobile.logger import get_logger
 
 logger = get_logger(__name__)
 _CHECKBOX_ID = "cn.damai:id/checkbox"
+_monotonic = time.monotonic
 
 
 class AttendeeSelector:
@@ -164,6 +165,130 @@ class AttendeeSelector:
                     return True
         return False
 
+    @staticmethod
+    def _xpath_string_literal(value):
+        """Return an XPath string literal without broadening an exact name match."""
+        value = str(value)
+        if '"' not in value:
+            return f'"{value}"'
+        if "'" not in value:
+            return f"'{value}'"
+        parts = value.split('"')
+        joined = ", '\"', ".join(f'"{part}"' for part in parts)
+        return f"concat({joined})"
+
+    def _formal_named_attendee_checkboxes(self, user_name):
+        """Return checkboxes belonging to the exact configured attendee row."""
+        name = user_name.strip() if isinstance(user_name, str) else ""
+        if not name:
+            return []
+        literal = self._xpath_string_literal(name)
+        checkbox_xpath = (
+            '//*[@resource-id="cn.damai:id/text_name" '
+            f"and normalize-space(@text)={literal}]"
+            '/ancestor::*[.//*[@resource-id="cn.damai:id/checkbox"]][1]'
+            '//*[@resource-id="cn.damai:id/checkbox"]'
+        )
+        try:
+            return self._bot._find_all(By.XPATH, checkbox_xpath)
+        except Exception:
+            return []
+
+    def _verify_formal_named_attendee(self, user_name):
+        """Require one uniquely mapped, selected checkbox for ``user_name``."""
+        checkboxes = self._formal_named_attendee_checkboxes(user_name)
+        if len(checkboxes) != 1:
+            logger.error(
+                "正式模式无法唯一定位观演人同行勾选框: name=%s matches=%d",
+                user_name,
+                len(checkboxes),
+            )
+            return False
+        return bool(self._bot._is_checkbox_selected(checkboxes[0]))
+
+    def _ensure_formal_attendees_selected(self):
+        """Fail closed unless every configured name is selected in its own row."""
+        bot = self._bot
+        users = [
+            user.strip()
+            for user in (self._config.users or [])
+            if isinstance(user, str) and user.strip()
+        ]
+        if len(users) != len(self._config.users or []) or not users:
+            logger.error("正式模式缺少有效观演人姓名，已停止自动提交")
+            return False
+        if len(set(users)) != len(users):
+            logger.error("正式模式观演人姓名重复，无法唯一映射勾选框")
+            return False
+
+        attendee_section_visible = bot._has_element(
+            ANDROID_UIAUTOMATOR,
+            'new UiSelector().textContains("实名观演人")',
+        )
+        if not attendee_section_visible:
+            logger.error("正式模式未确认实名观演人区域，已停止自动提交")
+            return False
+
+        for user_name in users:
+            checkboxes = self._formal_named_attendee_checkboxes(user_name)
+            if len(checkboxes) != 1:
+                logger.error(
+                    "正式模式无法唯一定位观演人同行勾选框: name=%s matches=%d",
+                    user_name,
+                    len(checkboxes),
+                )
+                return False
+            checkbox = checkboxes[0]
+            if bot._is_checkbox_selected(checkbox):
+                continue
+
+            # Exactly one click is allowed here.  If the RPC result or the
+            # resulting checked state is uncertain, fail closed instead of
+            # issuing a fallback click that could toggle an already-selected row.
+            try:
+                bot._click_element_center(checkbox, duration=35)
+            except Exception as exc:
+                logger.warning(
+                    "正式模式观演人点击结果不确定，停止自动提交: name=%s err=%s",
+                    user_name,
+                    exc,
+                )
+                return False
+
+            verify_deadline = _monotonic() + 0.35
+            while True:
+                refreshed = self._formal_named_attendee_checkboxes(user_name)
+                if len(refreshed) > 1:
+                    logger.error(
+                        "正式模式点击后观演人映射变得不唯一: name=%s matches=%d",
+                        user_name,
+                        len(refreshed),
+                    )
+                    return False
+                if (
+                    len(refreshed) == 1
+                    and bot._is_checkbox_selected(refreshed[0])
+                ):
+                    break
+                if _monotonic() >= verify_deadline:
+                    logger.error(
+                        "正式模式点击后未确认观演人已勾选: name=%s",
+                        user_name,
+                    )
+                    return False
+                time.sleep(0.04)
+
+        # Re-read every named row after all clicks.  A total selected count is
+        # never sufficient proof because it may belong to different attendees.
+        for user_name in users:
+            if not self._verify_formal_named_attendee(user_name):
+                logger.error(
+                    "正式模式最终观演人校验失败: name=%s",
+                    user_name,
+                )
+                return False
+        return True
+
     def _ensure_attendees_selected_on_confirm_page(
         self, require_attendee_section=False
     ):
@@ -176,8 +301,11 @@ class AttendeeSelector:
         bot = self._bot
         required_count = max(1, len(self._config.users or []))
 
+        if self._config.if_commit_order:
+            return self._ensure_formal_attendees_selected()
+
         if self._config.rush_mode and not self._config.if_commit_order:
-            cached_coords = bot._cached_hot_path_coords.get("attendee_checkboxes")
+            cached_coords = bot._get_hot_coord("attendee_checkboxes")
             if cached_coords:
                 logger.info(
                     f"检测到观演人未选择完成，尝试自动补选（已选 0/{required_count}）"
@@ -189,8 +317,8 @@ class AttendeeSelector:
 
             # Poll for checkbox elements — confirm page may still be rendering.
             checkbox_elements = []
-            poll_deadline = time.time() + 3.0
-            while time.time() < poll_deadline:
+            poll_deadline = _monotonic() + 3.0
+            while _monotonic() < poll_deadline:
                 checkbox_elements = bot._attendee_checkbox_elements()
                 if checkbox_elements:
                     break
@@ -208,7 +336,21 @@ class AttendeeSelector:
                 except Exception:
                     pass
             if _coords:
-                bot._cached_hot_path_coords["attendee_checkboxes"] = _coords
+                layout_digest = getattr(
+                    bot, "_hot_cache_layout_digests", {}
+                ).get("confirm") or f"confirm-checkboxes:{_coords!r}"
+                bot._set_hot_cache_context(
+                    scope="confirm",
+                    page_state="order_confirm_page",
+                    layout_digest=layout_digest,
+                )
+                bot._put_hot_coord(
+                    "attendee_checkboxes",
+                    _coords,
+                    scope="confirm",
+                    page_state="order_confirm_page",
+                    layout_digest=layout_digest,
+                )
 
             selected_count = bot._attendee_selected_count(
                 checkbox_elements, use_source_fallback=False

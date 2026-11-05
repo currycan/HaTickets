@@ -21,10 +21,10 @@ EXIT_RETRIES_EXHAUSTED = 10  # run_with_retry 全部重试失败（可安全重�
 # ⚠️ 编排器绝不能对 11 做自动重启——submit_unverified 场景可能重复下单。
 EXIT_TERMINAL_FAILURE = 11
 EXIT_CONFIG_OR_DEVICE_ERROR = 12  # 配置解析/校验失败、设备连接失败、运行期设备异常
-EXIT_LOCK_CONFLICT = 13  # reserved：实例互斥锁冲突（U-15 落地后启用，本轮任何路径都不返回）
+EXIT_LOCK_CONFLICT = 13  # 同一设备（或 global）已有 HaTickets 实例运行
 EXIT_INTERRUPTED = 130  # SIGINT / Ctrl-C
 
-RUN_SUMMARY_SCHEMA_VERSION = 1
+RUN_SUMMARY_SCHEMA_VERSION = 2
 RESULT_JSON_ENV_VAR = "HATICKETS_RESULT_JSON"
 # 相对 cwd；start_ticket_grabbing.sh 会先 cd 到 mobile/，即 mobile/tmp/（已 gitignore）。
 # 固定路径是「最近一次 run」语义，需要保留历史请用 --result-json 指定带时间戳的路径。

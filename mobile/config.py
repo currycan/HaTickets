@@ -35,6 +35,11 @@ CONFIG_OVERRIDE_ENV_VAR = "HATICKETS_CONFIG_PATH"
 # U-12：serial 覆盖通道（--serial CLI 参数 / 脚本 export 均写此环境变量），
 # 非空时优先于配置文件的 serial 字段；空/纯空白视为未设置（与 CONFIG_OVERRIDE_ENV_VAR 口径一致）。
 SERIAL_OVERRIDE_ENV_VAR = "HATICKETS_SERIAL"
+# P0 运行授权必须是一次性的进程状态，不能依赖会残留/并发互相覆盖的配置写回。
+# start_ticket_grabbing.sh 只在当前子进程注入以下变量；退出后授权自然失效。
+RUNTIME_MODE_ENV_VAR = "HATICKETS_RUN_MODE"
+COMMIT_AUTH_ENV_VAR = "HATICKETS_COMMIT_AUTH"
+COMMIT_AUTH_VALUE = "confirmed-by-start-script"
 DEFAULT_CONFIG_FILENAMES = (DEFAULT_CONFIG_FILENAME,)
 
 PRICE_INDEX_LARGE_WARNING_THRESHOLD = 50
@@ -70,6 +75,7 @@ KNOWN_CONFIG_KEYS = frozenset(
         "auto_navigate",
         "sell_start_time",
         "countdown_lead_ms",
+        "presale_prewarm_enabled",
         "wait_cta_ready_timeout_ms",
         "fast_retry_count",
         "fast_retry_interval_ms",
@@ -662,6 +668,7 @@ class Config:
         app_activity=".launcher.splash.SplashMainActivity",
         sell_start_time=None,
         countdown_lead_ms=3000,
+        presale_prewarm_enabled=True,
         wait_cta_ready_timeout_ms=0,
         fast_retry_count=8,
         fast_retry_interval_ms=120,
@@ -754,6 +761,12 @@ class Config:
                 f"countdown_lead_ms 必须是非负整数，实际值: {countdown_lead_ms!r}"
             )
 
+        if not isinstance(presale_prewarm_enabled, bool):
+            raise ValueError(
+                "presale_prewarm_enabled 必须是布尔值，"
+                f"实际值: {presale_prewarm_enabled!r}"
+            )
+
         if (
             not isinstance(wait_cta_ready_timeout_ms, int)
             or isinstance(wait_cta_ready_timeout_ms, bool)
@@ -806,6 +819,7 @@ class Config:
         self.app_activity = app_activity
         self.sell_start_time = sell_start_time
         self.countdown_lead_ms = countdown_lead_ms
+        self.presale_prewarm_enabled = presale_prewarm_enabled
         self.wait_cta_ready_timeout_ms = wait_cta_ready_timeout_ms
         self.fast_retry_count = fast_retry_count
         self.fast_retry_interval_ms = fast_retry_interval_ms
@@ -862,6 +876,7 @@ class Config:
             "auto_navigate": self.auto_navigate,
             "sell_start_time": self.sell_start_time,
             "countdown_lead_ms": self.countdown_lead_ms,
+            "presale_prewarm_enabled": self.presale_prewarm_enabled,
             "wait_cta_ready_timeout_ms": self.wait_cta_ready_timeout_ms,
             "fast_retry_count": self.fast_retry_count,
             "fast_retry_interval_ms": self.fast_retry_interval_ms,
@@ -899,6 +914,51 @@ class Config:
         env_serial = os.environ.get(SERIAL_OVERRIDE_ENV_VAR, "").strip()
         serial = env_serial or config.get("serial") or config.get("udid")
 
+        # P0 — 本次进程的运行模式覆盖磁盘配置，不写回文件：
+        # - probe 始终强制安全探测；
+        # - validation 可走到确认页但绝不提交；
+        # - commit 还必须带启动脚本注入的第二道显式授权。
+        # 未设置时保持 Config 的库级兼容语义；damai_app 入口会对磁盘中残留的
+        # if_commit_order=true 再做 fail-closed 拦截。
+        runtime_mode = os.environ.get(RUNTIME_MODE_ENV_VAR, "").strip().lower()
+        if runtime_mode and runtime_mode not in {"probe", "validation", "commit"}:
+            raise ConfigError(
+                f"{RUNTIME_MODE_ENV_VAR} 必须是 probe/validation/commit，"
+                f"实际值: {runtime_mode!r}"
+            )
+        if runtime_mode == "probe":
+            effective_probe_only = True
+            effective_if_commit_order = False
+        elif runtime_mode == "validation":
+            effective_probe_only = False
+            effective_if_commit_order = False
+        elif runtime_mode == "commit":
+            if os.environ.get(COMMIT_AUTH_ENV_VAR) != COMMIT_AUTH_VALUE:
+                raise ConfigError(
+                    "正式提交授权缺失或已失效；请通过 "
+                    "start_ticket_grabbing.sh --commit 启动"
+                )
+            formal_required = {
+                "target_title": config.get("target_title"),
+                "date": config.get("date"),
+                "price": config.get("price"),
+            }
+            invalid_formal = [
+                key
+                for key, value in formal_required.items()
+                if not isinstance(value, str) or not value.strip()
+            ]
+            if invalid_formal:
+                raise ConfigError(
+                    "正式提交必须配置非空精确字段: "
+                    + ", ".join(invalid_formal)
+                )
+            effective_probe_only = False
+            effective_if_commit_order = True
+        else:
+            effective_probe_only = config.get("probe_only", False)
+            effective_if_commit_order = config["if_commit_order"]
+
         # P1 #31 — 启动期校验 price_index 范围
         raw_price_index = config["price_index"]
         if isinstance(raw_price_index, int) and not isinstance(raw_price_index, bool):
@@ -918,14 +978,17 @@ class Config:
             date=config["date"],
             price=config["price"],
             price_index=config["price_index"],
-            if_commit_order=config["if_commit_order"],
-            probe_only=config.get("probe_only", False),
+            if_commit_order=effective_if_commit_order,
+            probe_only=effective_probe_only,
             app_package=config.get("app_package", "cn.damai"),
             app_activity=config.get(
                 "app_activity", ".launcher.splash.SplashMainActivity"
             ),
             sell_start_time=config.get("sell_start_time"),
             countdown_lead_ms=config.get("countdown_lead_ms", 3000),
+            presale_prewarm_enabled=config.get(
+                "presale_prewarm_enabled", True
+            ),
             wait_cta_ready_timeout_ms=config.get("wait_cta_ready_timeout_ms", 0),
             fast_retry_count=config.get("fast_retry_count", 8),
             fast_retry_interval_ms=config.get("fast_retry_interval_ms", 120),

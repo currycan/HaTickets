@@ -546,7 +546,8 @@ class TestFormatSummary:
 class TestSuccessDetailForMode:
     def test_summary_message_no_longer_mentions_confirm(self):
         message = _success_detail_for_mode("summary")
-        assert "apply / probe" in message
+        assert "apply" in message
+        assert "只读 probe" in message
         assert "confirm" not in message
 
     def test_apply_message_no_longer_mentions_confirm(self):
@@ -932,6 +933,8 @@ class TestMain:
                 "app_package": "cn.damai",
                 "app_activity": ".SplashMainActivity",
                 "keyword": "张杰 演唱会",
+                "target_title": "张杰演唱会",
+                "target_venue": "国家体育场",
                 "users": ["张志涛"],
                 "city": "北京",
                 "date": "04.06",
@@ -941,6 +944,9 @@ class TestMain:
                 "probe_only": True,
                 "auto_navigate": True,
             },
+            keyword="张杰 演唱会",
+            target_title="张杰演唱会",
+            target_venue="国家体育场",
             city="北京",
             date="04.06",
             price="580元",
@@ -997,20 +1003,58 @@ class TestMain:
         assert result == 0
         mock_save.assert_called_once()
 
-    def test_probe_mode_runs_bot_after_save(self):
-        """probe mode: saves config and then runs bot.run_with_retry."""
+    def test_probe_mode_is_observation_only_and_does_not_write(self):
+        """Prompt probe uses the existing target without navigation or writes."""
         from mobile.prompt_runner import main
 
         mock_bot = self._make_full_mock_bot()
+        page_probe = {
+            "state": "detail_page",
+            "observed_title": "张杰演唱会",
+            "purchase_button": True,
+            "price_container": True,
+        }
+        mock_bot.probe_current_page.return_value = page_probe
 
-        def _config_factory(**kwargs):
-            return Mock(
-                to_dict=lambda: kwargs,
-                city=kwargs.get("city"),
-                date=kwargs.get("date"),
-                price=kwargs.get("price"),
-                price_index=kwargs.get("price_index"),
-            )
+        with \
+            patch(
+                "mobile.prompt_runner._config_path",
+                return_value=Mock(__str__=lambda s: "/mock/config.jsonc"),
+            ), \
+            patch("mobile.prompt_runner.load_config_dict", return_value={}), \
+            patch(
+                "mobile.prompt_runner.Config.load_config",
+                return_value=self._base_config_mock(),
+            ), \
+            patch(
+                "mobile.prompt_runner.DamaiBot",
+                return_value=mock_bot,
+            ) as mock_bot_cls, \
+            patch("mobile.prompt_runner.update_config_values") as mock_save:
+            result = main(["帮张志涛抢4月6日张杰演唱会 580元", "--mode", "probe", "-y"])
+
+        assert result == 0
+        mock_save.assert_not_called()
+        mock_bot.dismiss_startup_popups.assert_not_called()
+        mock_bot.discover_target_event.assert_not_called()
+        mock_bot.inspect_current_target_event.assert_not_called()
+        mock_bot.run_with_retry.assert_called_once_with(
+            max_retries=1,
+            initial_page_probe=page_probe,
+        )
+        effective_config = mock_bot_cls.call_args.kwargs["config"]
+        assert effective_config.probe_only is True
+        assert effective_config.if_commit_order is False
+        assert effective_config.auto_navigate is False
+
+    def test_probe_mode_off_target_fails_without_any_navigation(self):
+        from mobile.prompt_runner import main
+
+        mock_bot = self._make_full_mock_bot()
+        mock_bot.probe_current_page.return_value = {
+            "state": "homepage",
+            "observed_title": "",
+        }
 
         with \
             patch(
@@ -1023,20 +1067,22 @@ class TestMain:
                 return_value=self._base_config_mock(),
             ), \
             patch("mobile.prompt_runner.DamaiBot", return_value=mock_bot), \
-            patch("mobile.prompt_runner.update_config_values"), \
-            patch("mobile.prompt_runner._resolve_confirmed_date", return_value="04.06"), \
-            patch(
-                "mobile.prompt_runner._resolve_confirmed_price",
-                return_value={"index": 0, "text": "580元", "tag": "可预约"},
-            ), \
-            patch("mobile.prompt_runner.build_updated_config", return_value={}), \
-            patch("mobile.prompt_runner.Config") as mock_config_cls, \
-            patch("mobile.prompt_runner._prompt_yes_no", return_value=True):
-            mock_config_cls.side_effect = _config_factory
-            mock_config_cls.load_config.return_value = self._base_config_mock()
-            result = main(["帮张志涛抢4月6日张杰演唱会 580元", "--mode", "probe", "-y"])
-        mock_bot.run_with_retry.assert_called_once()
-        assert result in (0, 1)
+            patch("mobile.prompt_runner.update_config_values") as mock_save:
+            result = main(
+                [
+                    "帮张志涛抢4月6日张杰演唱会 580元",
+                    "--mode",
+                    "probe",
+                    "-y",
+                ]
+            )
+
+        assert result == 1
+        mock_save.assert_not_called()
+        mock_bot.dismiss_startup_popups.assert_not_called()
+        mock_bot.discover_target_event.assert_not_called()
+        mock_bot.inspect_current_target_event.assert_not_called()
+        mock_bot.run_with_retry.assert_not_called()
 
     def test_no_date_cancels_flow(self):
         """If date cannot be confirmed, returns 1."""

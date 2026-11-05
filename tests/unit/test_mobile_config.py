@@ -201,6 +201,14 @@ class TestMobileConfigNewFields:
         with pytest.raises(ValueError, match="countdown_lead_ms"):
             Config(**_make(countdown_lead_ms=-1))
 
+    def test_presale_prewarm_enabled_defaults_true(self):
+        cfg = Config(**_make())
+        assert cfg.presale_prewarm_enabled is True
+
+    def test_presale_prewarm_enabled_requires_bool(self):
+        with pytest.raises(ValueError, match="presale_prewarm_enabled"):
+            Config(**_make(presale_prewarm_enabled=1))
+
     def test_wait_cta_ready_timeout_ms_default(self):
         cfg = Config(**_make())
         assert cfg.wait_cta_ready_timeout_ms == 0
@@ -1603,12 +1611,14 @@ class TestUpdateRuntimeModeContract:
 # ---------------------------------------------------------------------------
 
 
-def test_start_script_mentions_bak_hint_and_syntax_ok():
+def test_start_script_uses_ephemeral_mode_and_syntax_ok():
     import subprocess
 
     script = _REPO_ROOT / "mobile" / "scripts" / "start_ticket_grabbing.sh"
     text = script.read_text(encoding="utf-8")
-    assert ".bak" in text  # U-06：写回后提示备份位置
+    assert "HATICKETS_RUN_MODE" in text
+    assert "HATICKETS_COMMIT_AUTH" in text
+    assert "update_runtime_mode" not in text
     result = subprocess.run(
         ["bash", "-n", str(script)], capture_output=True, timeout=30
     )
@@ -1676,3 +1686,108 @@ class TestSerialEnvOverride:
         path = self._write_config(tmp_path, serial="filedev")
         monkeypatch.setenv("HATICKETS_SERIAL", " dev1 ")
         assert Config.load_config(path).serial == "dev1"
+
+
+class TestProcessRuntimeModeOverride:
+    """P0：模式是本次进程能力，不通过共享配置文件持久化。"""
+
+    def _write_config(self, tmp_path, *, probe_only, if_commit_order):
+        path = tmp_path / "config.jsonc"
+        path.write_text(
+            json.dumps(
+                _make(
+                    probe_only=probe_only,
+                    if_commit_order=if_commit_order,
+                    target_title="周深演唱会深圳站",
+                ),
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_probe_env_forces_safe_mode_over_stale_commit_config(
+        self, tmp_path, monkeypatch
+    ):
+        path = self._write_config(
+            tmp_path, probe_only=False, if_commit_order=True
+        )
+        before = path.read_bytes()
+        monkeypatch.setenv("HATICKETS_RUN_MODE", "probe")
+
+        cfg = Config.load_config(path)
+
+        assert cfg.probe_only is True
+        assert cfg.if_commit_order is False
+        assert path.read_bytes() == before
+
+    def test_validation_env_never_commits(self, tmp_path, monkeypatch):
+        path = self._write_config(
+            tmp_path, probe_only=True, if_commit_order=True
+        )
+        monkeypatch.setenv("HATICKETS_RUN_MODE", "validation")
+
+        cfg = Config.load_config(path)
+
+        assert cfg.probe_only is False
+        assert cfg.if_commit_order is False
+
+    def test_commit_env_requires_second_authorization(self, tmp_path, monkeypatch):
+        path = self._write_config(
+            tmp_path, probe_only=True, if_commit_order=False
+        )
+        monkeypatch.setenv("HATICKETS_RUN_MODE", "commit")
+        monkeypatch.delenv("HATICKETS_COMMIT_AUTH", raising=False)
+
+        with pytest.raises(ConfigError, match="正式提交授权缺失"):
+            Config.load_config(path)
+
+    def test_commit_env_authorizes_only_loaded_process_config(
+        self, tmp_path, monkeypatch
+    ):
+        path = self._write_config(
+            tmp_path, probe_only=True, if_commit_order=False
+        )
+        before = path.read_bytes()
+        monkeypatch.setenv("HATICKETS_RUN_MODE", "commit")
+        monkeypatch.setenv(
+            "HATICKETS_COMMIT_AUTH", "confirmed-by-start-script"
+        )
+
+        cfg = Config.load_config(path)
+
+        assert cfg.probe_only is False
+        assert cfg.if_commit_order is True
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize("field,value", [
+        ("target_title", None),
+        ("target_title", "  "),
+        ("date", ""),
+        ("price", None),
+    ])
+    def test_commit_env_requires_exact_non_empty_target_fields(
+        self, tmp_path, monkeypatch, field, value
+    ):
+        path = self._write_config(
+            tmp_path, probe_only=True, if_commit_order=False
+        )
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data[field] = value
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setenv("HATICKETS_RUN_MODE", "commit")
+        monkeypatch.setenv(
+            "HATICKETS_COMMIT_AUTH", "confirmed-by-start-script"
+        )
+
+        with pytest.raises(ConfigError, match=field):
+            Config.load_config(path)
+
+    def test_invalid_runtime_mode_fails_closed(self, tmp_path, monkeypatch):
+        path = self._write_config(
+            tmp_path, probe_only=True, if_commit_order=False
+        )
+        monkeypatch.setenv("HATICKETS_RUN_MODE", "typo")
+
+        with pytest.raises(ConfigError, match="probe/validation/commit"):
+            Config.load_config(path)

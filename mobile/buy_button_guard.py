@@ -8,7 +8,9 @@ only purchase-ready button texts are treated as safe to click.
 """
 
 import time
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
+
+from uiautomator2.exceptions import UiObjectNotFoundError
 
 try:
     from mobile.logger import get_logger
@@ -16,6 +18,7 @@ except ImportError:
     from logger import get_logger
 
 logger = get_logger(__name__)
+_monotonic = time.monotonic
 
 SAFE_TEXTS = frozenset(
     {
@@ -141,6 +144,98 @@ class BuyButtonGuard:
                 logger.debug("Failed to read CTA bounds (resource-id=%s)", rid)
         return None
 
+    @staticmethod
+    def _center_from_bounds(bounds) -> Optional[Tuple[int, int]]:
+        """Return a positive-area bounds centre from a u2 ``info`` payload."""
+        if not isinstance(bounds, dict):
+            return None
+        try:
+            left = int(bounds["left"])
+            top = int(bounds["top"])
+            right = int(bounds["right"])
+            bottom = int(bounds["bottom"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if right <= left or bottom <= top:
+            return None
+        return ((left + right) // 2, (top + bottom) // 2)
+
+    def inspect_cta(self) -> Dict[str, Any]:
+        """Read CTA text and bounds from one matched selector.
+
+        This is the presale prewarm primitive.  Unlike calling
+        :meth:`get_current_text` and :meth:`get_cta_center_coords` in
+        sequence, each candidate is queried directly for its ``info`` payload.
+        A present element therefore costs one device RPC instead of a separate
+        ``exists`` RPC followed by ``info``.  Candidate order remains unchanged
+        so a legacy text CTA always keeps priority over the Canvas container.
+        The method never clicks.
+        """
+        selector_error = False
+        for rid in _BUY_BUTTON_RESOURCE_IDS:
+            try:
+                element = self._device(resourceId=rid)
+                info = element.info
+            except UiObjectNotFoundError:
+                # Normal miss: move to the next candidate without spending a
+                # preceding ``exists`` RPC.
+                continue
+            except Exception:
+                selector_error = True
+                logger.debug("Failed to inspect CTA selector (resource-id=%s)", rid)
+                continue
+
+            # Lightweight fakes and older adapters can represent a missing
+            # selector with a non-dict/empty payload rather than raising.
+            if not isinstance(info, dict) or not info:
+                continue
+
+            self._last_matched_resource_id = rid
+            text = (
+                info.get("text")
+                or info.get("contentDescription")
+                or info.get("content-desc")
+                or None
+            )
+            if isinstance(text, str):
+                text = text.strip() or None
+            else:
+                text = None
+
+            # v8.x exposes text in the element payload.  Some older u2
+            # adapters omit it from ``info``; only the legacy text button may
+            # use get_text as a compatibility fallback.  Never call get_text
+            # on the Canvas container because it can traverse the subtree.
+            if text is None and rid == _BUY_BUTTON_RESOURCE_IDS[0]:
+                try:
+                    legacy_text = element.get_text()
+                    text = (
+                        legacy_text.strip()
+                        if isinstance(legacy_text, str) and legacy_text.strip()
+                        else None
+                    )
+                except Exception:
+                    text = None
+
+            coords = self._center_from_bounds(info.get("bounds"))
+            kind = "text" if text is not None else "canvas" if coords else "missing"
+            return {
+                "resource_id": rid,
+                "text": text,
+                "coords": coords,
+                "kind": kind,
+                "device_error": False,
+            }
+
+        self._last_matched_resource_id = None
+        return {
+            "resource_id": None,
+            "text": None,
+            "coords": None,
+            "kind": "missing",
+            "device_error": selector_error,
+        }
+
     def wait_until_safe(self, timeout_s: float = 10.0, poll_ms: int = 50) -> bool:
         """Poll button text until a safe text is detected or timeout expires.
 
@@ -151,7 +246,7 @@ class BuyButtonGuard:
         Returns:
             True if a safe text was detected before timeout, False otherwise.
         """
-        deadline = time.time() + timeout_s
+        deadline = _monotonic() + timeout_s
         poll_s = poll_ms / 1000.0
 
         while True:
@@ -160,7 +255,7 @@ class BuyButtonGuard:
                 logger.info("Safe button text detected: %s", text)
                 return True
 
-            if time.time() >= deadline:
+            if _monotonic() >= deadline:
                 logger.warning(
                     "Timed out waiting for safe button text (last seen: %s)",
                     text,

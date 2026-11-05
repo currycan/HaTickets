@@ -20,9 +20,11 @@
   "price_index": 0,
 
   // ── 运行模式 ──
+  // start_ticket_grabbing.sh 的 --probe / --commit 会仅为本次进程覆盖以下两项，
+  // 不写回配置；模板保持安全值可避免直接调用库代码时误提交。
   // probe_only=true  → 安全探测：停在"立即购票"前，不点击
   // probe_only=false + if_commit_order=false → 开发验证：到确认页但不提交
-  // probe_only=false + if_commit_order=true  → 正式抢票：会提交订单
+  // probe_only=false + if_commit_order=true  → 仅供受控开发调用；正常正式抢票请用 --commit
   "probe_only": true,
   "if_commit_order": false,
 
@@ -35,6 +37,8 @@
   "sell_start_time": null,
   // 开抢前多少毫秒进入高频轮询
   "countdown_lead_ms": 3000,
+  // 在倒计时窗口开始时做一次只读 CTA/异常页预热；不点击购票
+  "presale_prewarm_enabled": true,
   // CTA 等待模式：最多等待多少毫秒「立即购票」按钮从倒计时变为可点击。
   // 0 = 不启用（已知精确开抢时间时推荐）；不知道精确时间、手动停在倒计时详情页时可设 60000。
   "wait_cta_ready_timeout_ms": 0,

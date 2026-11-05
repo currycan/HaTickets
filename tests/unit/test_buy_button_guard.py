@@ -2,9 +2,10 @@
 """Tests for the BuyButtonGuard safety module."""
 
 import time
-from unittest.mock import Mock, PropertyMock, patch
+from unittest.mock import Mock, PropertyMock, call, patch
 
 import pytest
+from uiautomator2.exceptions import UiObjectNotFoundError
 
 from mobile.buy_button_guard import BuyButtonGuard, SAFE_TEXTS, BLOCKED_TEXTS
 
@@ -94,10 +95,7 @@ class TestWaitUntilSafe:
         mock_el.get_text.return_value = "立即购买"
         mock_device.return_value = mock_el
 
-        # Provide enough time.time() values for the single check
-        with patch("mobile.buy_button_guard.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.0]
-            mock_time.sleep = Mock()
+        with patch("mobile.buy_button_guard._monotonic", return_value=0.0):
             assert guard.wait_until_safe(timeout_s=1.0, poll_ms=50) is True
 
     def test_transitions_from_blocked_to_safe(self, guard, mock_device):
@@ -107,10 +105,10 @@ class TestWaitUntilSafe:
         mock_el.get_text.side_effect = ["预约抢票", "预约抢票", "预约抢票", "立即购买"]
         mock_device.return_value = mock_el
 
-        with patch("mobile.buy_button_guard.time") as mock_time:
-            # time() calls: deadline calc, then check after each poll
-            mock_time.time.side_effect = [0.0, 0.1, 0.2, 0.3, 0.4]
-            mock_time.sleep = Mock()
+        with patch(
+            "mobile.buy_button_guard._monotonic",
+            side_effect=[0.0, 0.1, 0.2, 0.3],
+        ), patch("mobile.buy_button_guard.time.sleep"):
             assert guard.wait_until_safe(timeout_s=10.0, poll_ms=50) is True
 
     def test_timeout_with_blocked_text(self, guard, mock_device):
@@ -119,10 +117,10 @@ class TestWaitUntilSafe:
         mock_el.get_text.return_value = "预约抢票"
         mock_device.return_value = mock_el
 
-        with patch("mobile.buy_button_guard.time") as mock_time:
-            # First call sets deadline, subsequent calls exceed it
-            mock_time.time.side_effect = [0.0, 11.0]
-            mock_time.sleep = Mock()
+        with patch(
+            "mobile.buy_button_guard._monotonic",
+            side_effect=[0.0, 11.0],
+        ), patch("mobile.buy_button_guard.time.sleep"):
             assert guard.wait_until_safe(timeout_s=10.0, poll_ms=50) is False
 
     def test_timeout_button_not_found(self, guard, mock_device):
@@ -130,10 +128,32 @@ class TestWaitUntilSafe:
         mock_el.exists = False
         mock_device.return_value = mock_el
 
-        with patch("mobile.buy_button_guard.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 11.0]
-            mock_time.sleep = Mock()
+        with patch(
+            "mobile.buy_button_guard._monotonic",
+            side_effect=[0.0, 11.0],
+        ), patch("mobile.buy_button_guard.time.sleep"):
             assert guard.wait_until_safe(timeout_s=10.0, poll_ms=50) is False
+
+    def test_wall_clock_jump_does_not_expire_relative_timeout(
+        self, guard, mock_device
+    ):
+        mock_el = Mock()
+        mock_el.exists = True
+        mock_el.get_text.side_effect = ["预约抢票", "立即购买"]
+        mock_device.return_value = mock_el
+        wall_time = Mock()
+        wall_time.time.side_effect = [0.0, 10**12]
+
+        with patch(
+            "mobile.buy_button_guard.time",
+            wall_time,
+        ), patch(
+            "mobile.buy_button_guard._monotonic",
+            side_effect=[20.0, 20.1],
+        ):
+            assert guard.wait_until_safe(timeout_s=1.0, poll_ms=50) is True
+
+        wall_time.time.assert_not_called()
 
 
 # ── multi-ID candidates + coordinate fallback (issue #41) ──
@@ -180,6 +200,14 @@ class _ExplodingInfoElement:
         raise RuntimeError("boom")
 
 
+class _MissingInfoElement:
+    """A real u2 missing selector raises when its payload is requested."""
+
+    @property
+    def info(self):
+        raise UiObjectNotFoundError(-32002, "UiObjectNotFound", {})
+
+
 class TestMultiIdCandidates:
     """issue #41：大麦 ≥9.0.2x 移除 btn_buy_view 后的多 resource-id 候选。"""
 
@@ -215,18 +243,17 @@ class TestMultiIdCandidates:
     def test_wait_until_safe_true_on_v8_text(self):
         legacy = _make_element(exists=True, text="立即购票")
         guard = BuyButtonGuard(_make_dispatch_device({LEGACY_ID: legacy}))
-        with patch("mobile.buy_button_guard.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.0]
-            mock_time.sleep = Mock()
+        with patch("mobile.buy_button_guard._monotonic", return_value=0.0):
             assert guard.wait_until_safe(timeout_s=1.0, poll_ms=50) is True
 
     def test_wait_until_safe_blocks_reservation_on_container(self):
         """安全属性回归：容器读到「预约抢票」时 wait_until_safe 仍拒绝。"""
         container = _make_element(exists=True, text="预约抢票")
         guard = BuyButtonGuard(_make_dispatch_device({CONTAINER_ID: container}))
-        with patch("mobile.buy_button_guard.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 11.0]
-            mock_time.sleep = Mock()
+        with patch(
+            "mobile.buy_button_guard._monotonic",
+            side_effect=[0.0, 11.0],
+        ), patch("mobile.buy_button_guard.time.sleep"):
             assert guard.wait_until_safe(timeout_s=10.0, poll_ms=50) is False
 
 
@@ -256,3 +283,115 @@ class TestGetCtaCenterCoords:
         device = Mock(side_effect=Exception("device error"))
         guard = BuyButtonGuard(device)
         assert guard.get_cta_center_coords() is None
+
+
+class TestInspectCta:
+    def test_text_button_uses_one_matched_selector_payload(self):
+        legacy = _make_element(exists=True, text="should-not-be-read")
+        legacy.info = {
+            "text": "立即购票",
+            "bounds": {"left": 100, "top": 200, "right": 500, "bottom": 400},
+        }
+        device = _make_dispatch_device({LEGACY_ID: legacy})
+        guard = BuyButtonGuard(device)
+
+        result = guard.inspect_cta()
+
+        assert result == {
+            "resource_id": LEGACY_ID,
+            "text": "立即购票",
+            "coords": (300, 300),
+            "kind": "text",
+            "device_error": False,
+        }
+        assert device.call_count == 1
+        legacy.get_text.assert_not_called()
+
+    def test_legacy_text_keeps_priority_when_container_also_exists(self):
+        legacy = _make_element(exists=True, text="")
+        legacy.info = {
+            "text": "待开售",
+            "bounds": {"left": 100, "top": 200, "right": 500, "bottom": 400},
+        }
+        container = _make_element(exists=True, text="")
+        container.info = {
+            "text": "",
+            "bounds": {"left": 341, "top": 2544, "right": 1248, "bottom": 2691},
+        }
+        device = _make_dispatch_device(
+            {
+                LEGACY_ID: legacy,
+                CONTAINER_ID: container,
+            }
+        )
+        guard = BuyButtonGuard(device)
+
+        result = guard.inspect_cta()
+
+        assert result["resource_id"] == LEGACY_ID
+        assert result["text"] == "待开售"
+        device.assert_called_once_with(resourceId=LEGACY_ID)
+
+    def test_missing_candidate_uses_no_exists_rpc_before_fallback(self):
+        container = _make_element(exists=True, text="")
+        container.info = {
+            "text": "",
+            "bounds": {"left": 341, "top": 2544, "right": 1248, "bottom": 2691},
+        }
+        device = _make_dispatch_device(
+            {
+                LEGACY_ID: _MissingInfoElement(),
+                CONTAINER_ID: container,
+            }
+        )
+        guard = BuyButtonGuard(device)
+
+        result = guard.inspect_cta()
+
+        assert result["resource_id"] == CONTAINER_ID
+        assert result["coords"] == (794, 2617)
+        assert device.call_count == 2
+        assert [call.kwargs["resourceId"] for call in device.call_args_list] == [
+            LEGACY_ID,
+            CONTAINER_ID,
+        ]
+
+    def test_canvas_container_reads_bounds_without_get_text(self):
+        container = _make_element(exists=True, text="")
+        container.info = {
+            "text": "",
+            "bounds": {"left": 341, "top": 2544, "right": 1248, "bottom": 2691},
+        }
+        guard = BuyButtonGuard(
+            _make_dispatch_device({CONTAINER_ID: container})
+        )
+
+        result = guard.inspect_cta()
+
+        assert result["kind"] == "canvas"
+        assert result["coords"] == (794, 2617)
+        assert result["device_error"] is False
+        container.get_text.assert_not_called()
+
+    def test_invalid_bounds_are_not_cacheable(self):
+        container = _make_element(exists=True, text="")
+        container.info = {
+            "text": "",
+            "bounds": {"left": 10, "top": 20, "right": 10, "bottom": 40},
+        }
+        guard = BuyButtonGuard(
+            _make_dispatch_device({CONTAINER_ID: container})
+        )
+
+        result = guard.inspect_cta()
+
+        assert result["kind"] == "missing"
+        assert result["coords"] is None
+
+    def test_device_error_is_explicit(self):
+        guard = BuyButtonGuard(Mock(side_effect=RuntimeError("offline")))
+
+        result = guard.inspect_cta()
+
+        assert result["kind"] == "missing"
+        assert result["device_error"] is True
