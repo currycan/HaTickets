@@ -64,9 +64,10 @@ class TestSubmitJournalLifecycle:
         assert record["state"] == "ARMED"
         assert record["click_attempts"] == 0
         assert journal.load_active()["intent_id"] == record["intent_id"]
-        assert stat.S_IMODE(journal.active_path.stat().st_mode) == 0o600
-        assert stat.S_IMODE(journal.active_dir.stat().st_mode) == 0o700
-        assert stat.S_IMODE(journal.key_path.stat().st_mode) == 0o600
+        if os.name != "nt":
+            assert stat.S_IMODE(journal.active_path.stat().st_mode) == 0o600
+            assert stat.S_IMODE(journal.active_dir.stat().st_mode) == 0o700
+            assert stat.S_IMODE(journal.key_path.stat().st_mode) == 0o600
         assert "DEVICE-SECRET-123" not in str(journal.active_path)
 
         all_bytes = b"".join(
