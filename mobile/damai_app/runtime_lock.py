@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import unicodedata
 from pathlib import Path
+from typing import Any
 
 from . import logger
 
@@ -27,6 +28,34 @@ try:  # macOS / Linux
     import fcntl as _fcntl
 except ImportError:  # pragma: no cover - unsupported non-POSIX platform
     _fcntl = None
+
+try:  # Windows fallback
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    _msvcrt = None
+
+
+class _MsvcrtFlockBackend:  # pragma: no cover - Windows
+    LOCK_SH = 1
+    LOCK_EX = 2
+    LOCK_NB = 4
+    LOCK_UN = 8
+
+    def flock(self, fd, flags):
+        assert _msvcrt is not None
+        os.lseek(fd, 0, os.SEEK_SET)
+        if flags & self.LOCK_UN:
+            _msvcrt.locking(fd, _msvcrt.LK_UNLCK, 1)
+            return
+        mode = _msvcrt.LK_NBLCK if (flags & self.LOCK_NB) else _msvcrt.LK_LOCK
+        _msvcrt.locking(fd, mode, 1)
+
+
+_LOCK_BACKEND: Any = (
+    _fcntl
+    if _fcntl is not None
+    else (_MsvcrtFlockBackend() if _msvcrt is not None else None)
+)
 
 _DEFAULT_BACKEND = object()
 _INVALID_DEVICE_VALUES = frozenset(
@@ -163,14 +192,16 @@ class DeviceInstanceLock:
         self,
         physical_device_id=None,
         lock_dir=None,
-        backend=_DEFAULT_BACKEND,
+        backend: Any = _DEFAULT_BACKEND,
     ):
         self.physical_device_id = _normalise_device_value(physical_device_id)
         # ``serial`` remains as a compatibility attribute for diagnostics/tests.
         self.serial = self.physical_device_id
         self.key = self.physical_device_id or "global"
         self.lock_dir = Path(lock_dir) if lock_dir is not None else _default_lock_dir()
-        self._backend = _fcntl if backend is _DEFAULT_BACKEND else backend
+        self._backend: Any = (
+            _LOCK_BACKEND if backend is _DEFAULT_BACKEND else backend
+        )
         self._guard_file = None
         self._file = None
 

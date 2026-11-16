@@ -197,6 +197,17 @@ def _safe_chmod(path, mode):
         raise SubmitJournalUnavailable(f"无法设置 journal 权限: {exc}") from exc
 
 
+def _safe_fchmod(fd, mode, *, fallback_path=None):
+    fchmod = getattr(os, "fchmod", None)
+    if fchmod is not None:
+        try:
+            fchmod(fd, mode)
+        except OSError as exc:
+            raise SubmitJournalUnavailable(f"无法设置 journal 权限: {exc}") from exc
+    elif fallback_path is not None:
+        _safe_chmod(fallback_path, mode)
+
+
 class SubmitJournal:
     """One active durable submit intent per physical Android device."""
 
@@ -327,6 +338,8 @@ class SubmitJournal:
 
     @staticmethod
     def _fsync_dir(path):
+        if os.name == "nt":  # pragma: no cover - Windows 不支持对目录打开 fd 做 fsync
+            return
         flags = os.O_RDONLY
         if hasattr(os, "O_DIRECTORY"):
             flags |= os.O_DIRECTORY
@@ -354,7 +367,7 @@ class SubmitJournal:
                 dir=path.parent,
             )
             tmp_path = Path(tmp_name)
-            os.fchmod(fd, 0o600)
+            _safe_fchmod(fd, 0o600, fallback_path=tmp_path)
             with os.fdopen(fd, "wb") as stream:
                 fd = None
                 stream.write(raw)
@@ -435,7 +448,7 @@ class SubmitJournal:
                     dir=self.state_dir,
                 )
                 tmp_path = Path(tmp_name)
-                os.fchmod(fd, 0o600)
+                _safe_fchmod(fd, 0o600, fallback_path=tmp_path)
                 key = secrets.token_bytes(32)
                 with os.fdopen(fd, "wb") as stream:
                     fd = None
